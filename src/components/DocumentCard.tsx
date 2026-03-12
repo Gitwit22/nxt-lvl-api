@@ -1,4 +1,4 @@
-import { FileText, Download, Calendar, User, Tag, Sparkles } from "lucide-react";
+import { FileText, Download, Calendar, User, Tag, Sparkles, Copy, AlertTriangle } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import ProcessingStatusBadge from "@/components/ProcessingStatusBadge";
 import type { ArchiveDocument } from "@/types/document";
@@ -9,6 +9,9 @@ interface DocumentCardProps {
 }
 
 const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
+  const isDuplicate = document.duplicateCheck?.duplicateStatus === "possible_duplicate";
+  const needsReview = document.review?.required && !document.review?.resolution;
+
   return (
     <div
       className="group bg-card border border-border rounded-lg p-6 hover:shadow-lg hover:border-primary/30 transition-all duration-300 cursor-pointer"
@@ -23,11 +26,27 @@ const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
             <h3 className="font-display text-lg font-semibold text-foreground leading-tight group-hover:text-primary transition-colors">
               {document.title}
             </h3>
-            <ProcessingStatusBadge status={document.processingStatus} />
+            <ProcessingStatusBadge status={document.processingStatus} lifecycleStatus={document.status} />
           </div>
           <p className="text-sm text-muted-foreground font-body leading-relaxed mb-3 line-clamp-2">
             {document.description}
           </p>
+
+          {/* Duplicate Warning */}
+          {isDuplicate && (
+            <div className="flex items-center gap-1.5 mb-2 px-2 py-1 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded text-xs text-yellow-700 dark:text-yellow-300 font-body">
+              <Copy className="h-3 w-3" />
+              Possible duplicate ({document.duplicateCheck?.possibleDuplicateIds?.length ?? 0} match{(document.duplicateCheck?.possibleDuplicateIds?.length ?? 0) !== 1 ? "es" : ""})
+            </div>
+          )}
+
+          {/* Review Required Warning */}
+          {needsReview && (
+            <div className="flex items-center gap-1.5 mb-2 px-2 py-1 bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded text-xs text-orange-700 dark:text-orange-300 font-body">
+              <AlertTriangle className="h-3 w-3" />
+              Review required{document.review?.reason ? `: ${document.review.reason[0]}` : ""}
+            </div>
+          )}
 
           {/* AI Summary Preview */}
           {document.aiSummary && (

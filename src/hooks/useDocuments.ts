@@ -6,7 +6,7 @@
  */
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { ArchiveDocument, DocumentFilters, DocumentIntakeInput } from "@/types/document";
+import type { ArchiveDocument, DocumentFilters, DocumentIntakeInput, ReviewMetadata } from "@/types/document";
 import {
   getAllDocuments,
   getDocumentById,
@@ -27,6 +27,8 @@ import {
   intakeManualEntry,
 } from "@/services/intakeService";
 import { retryProcessing } from "@/services/processingPipeline";
+import { getReviewQueue, resolveReview, markForReview } from "@/services/reviewQueueService";
+import { detectDuplicates } from "@/services/duplicateDetectionService";
 
 const QUERY_KEYS = {
   documents: ["documents"] as const,
@@ -36,6 +38,7 @@ const QUERY_KEYS = {
   tags: ["documents", "tags"] as const,
   categories: ["documents", "categories"] as const,
   statusCounts: ["documents", "statusCounts"] as const,
+  reviewQueue: ["documents", "reviewQueue"] as const,
 };
 
 /** Hook: Get all documents */
@@ -94,6 +97,15 @@ export function useStatusCounts() {
   return useQuery({
     queryKey: QUERY_KEYS.statusCounts,
     queryFn: getStatusCounts,
+  });
+}
+
+/** Hook: Get the review queue */
+export function useReviewQueue() {
+  return useQuery({
+    queryKey: QUERY_KEYS.reviewQueue,
+    queryFn: getReviewQueue,
+    staleTime: 1000,
   });
 }
 
@@ -197,6 +209,37 @@ export function useRetryProcessing() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) => retryProcessing(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+  });
+}
+
+/** Hook: Resolve a review decision */
+export function useResolveReview() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      docId,
+      resolution,
+      notes,
+    }: {
+      docId: string;
+      resolution: ReviewMetadata["resolution"];
+      notes?: string;
+    }) => resolveReview(docId, resolution, notes),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["documents"] });
+    },
+  });
+}
+
+/** Hook: Run duplicate detection */
+export function useDetectDuplicates() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ docId, file }: { docId: string; file?: File }) =>
+      detectDuplicates(docId, file),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["documents"] });
     },

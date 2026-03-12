@@ -39,6 +39,17 @@ const PROCESSING_STATUS_LABELS: Record<string, string> = {
   needs_review: "Needs Review",
 };
 
+const LIFECYCLE_STATUS_LABELS: Record<string, string> = {
+  intake_received: "Received",
+  queued: "Queued",
+  extracting: "Extracting",
+  extracted: "Extracted",
+  categorized: "Categorized",
+  review_required: "Review Required",
+  archived: "Archived",
+  failed: "Failed",
+};
+
 const FilterBar = ({ filters, onChange, years }: FilterBarProps) => {
   const hasFilters =
     filters.year || filters.category || filters.type || filters.intakeSource || filters.processingStatus;
@@ -110,6 +121,12 @@ const FilterBar = ({ filters, onChange, years }: FilterBarProps) => {
           {Object.entries(PROCESSING_STATUS_LABELS).map(([value, label]) => (
             <SelectItem key={value} value={value}>
               {label}
+            </SelectItem>
+          ))}
+          <SelectItem value="_separator" disabled>──────────</SelectItem>
+          {Object.entries(LIFECYCLE_STATUS_LABELS).map(([value, label]) => (
+            <SelectItem key={`lc-${value}`} value={`lifecycle:${value}`}>
+              ⏵ {label}
             </SelectItem>
           ))}
         </SelectContent>

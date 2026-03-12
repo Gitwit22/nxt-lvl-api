@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe, PenLine } from "lucide-react";
+import { Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe, PenLine, LayoutDashboard, Eye } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import SearchBar from "@/components/SearchBar";
@@ -9,8 +9,12 @@ import DocumentDetail from "@/components/DocumentDetail";
 import UploadDialog from "@/components/UploadDialog";
 import ManualEntryForm from "@/components/ManualEntryForm";
 import Timeline from "@/components/Timeline";
-import { useDocuments, useDocumentYears } from "@/hooks/useDocuments";
+import ArchiveDashboard from "@/components/ArchiveDashboard";
+import ReviewQueuePanel from "@/components/ReviewQueuePanel";
+import { useDocuments, useDocumentYears, useResolveReview } from "@/hooks/useDocuments";
 import { searchDocuments } from "@/services/documentStore";
+import { resolveReview } from "@/services/reviewQueueService";
+import { retryProcessing } from "@/services/processingPipeline";
 import type { ArchiveDocument } from "@/types/document";
 
 const Index = () => {
@@ -22,6 +26,7 @@ const Index = () => {
 
   const { data: allDocuments = [], isLoading } = useDocuments();
   const { data: years = [] } = useDocumentYears();
+  const resolveReviewMutation = useResolveReview();
 
   const filtered = useMemo(() => {
     return searchDocuments({
@@ -34,6 +39,19 @@ const Index = () => {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [search, filters, allDocuments.length]);
+
+  const handleDashboardFilter = (status: string) => {
+    setFilters({ year: "", category: "", type: "", intakeSource: "", processingStatus: status });
+  };
+
+  const handleReviewResolve = (docId: string, resolution: string) => {
+    if (resolution === "reprocessed") {
+      retryProcessing(docId);
+    } else {
+      resolveReview(docId, resolution as any, undefined);
+    }
+    resolveReviewMutation.mutate({ docId, resolution: resolution as any });
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -119,15 +137,30 @@ const Index = () => {
       <main className="container max-w-6xl py-10">
         <Tabs defaultValue="library" className="space-y-8">
           <TabsList className="bg-muted/60">
+            <TabsTrigger value="dashboard" className="font-body gap-2">
+              <LayoutDashboard className="h-4 w-4" />
+              Dashboard
+            </TabsTrigger>
             <TabsTrigger value="library" className="font-body gap-2">
               <SearchIcon className="h-4 w-4" />
               Document Library
+            </TabsTrigger>
+            <TabsTrigger value="review" className="font-body gap-2">
+              <Eye className="h-4 w-4" />
+              Review Queue
             </TabsTrigger>
             <TabsTrigger value="timeline" className="font-body gap-2">
               <Clock className="h-4 w-4" />
               Timeline
             </TabsTrigger>
           </TabsList>
+
+          <TabsContent value="dashboard" className="space-y-6">
+            <ArchiveDashboard
+              documents={allDocuments}
+              onFilterByStatus={handleDashboardFilter}
+            />
+          </TabsContent>
 
           <TabsContent value="library" className="space-y-6">
             <FilterBar filters={filters} onChange={setFilters} years={years} />
@@ -178,6 +211,14 @@ const Index = () => {
                 </div>
               </div>
             )}
+          </TabsContent>
+
+          <TabsContent value="review" className="space-y-6">
+            <ReviewQueuePanel
+              documents={allDocuments}
+              onSelectDocument={setSelectedDoc}
+              onResolve={handleReviewResolve}
+            />
           </TabsContent>
 
           <TabsContent value="timeline">
