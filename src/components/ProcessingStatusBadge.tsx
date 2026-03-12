@@ -125,8 +125,8 @@ const lifecycleConfig: Record<
 
 const ProcessingStatusBadge = ({ status, lifecycleStatus, className }: ProcessingStatusBadgeProps) => {
   // Prefer lifecycle status if available
-  if (lifecycleStatus) {
-    const lc = lifecycleConfig[lifecycleStatus] || lifecycleConfig.intake_received;
+  if (lifecycleStatus && lifecycleConfig[lifecycleStatus]) {
+    const lc = lifecycleConfig[lifecycleStatus];
     const Icon = lc.icon;
     return (
       <Badge

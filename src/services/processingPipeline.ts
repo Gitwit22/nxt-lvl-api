@@ -256,7 +256,7 @@ export async function processDocument(documentId: string): Promise<boolean> {
     const searchIndex = {
       titleText: doc.title.toLowerCase(),
       bodyText: extractedText.toLowerCase().slice(0, 5000),
-      tags: mergedTags.map(t => t.toLowerCase()),
+      tags: mergedTags.map((t) => t.toLowerCase()),
       category: (doc.category === "Uncategorized" ? classificationResult.category : doc.category).toLowerCase(),
       sourceType: doc.intakeSource,
       status: lifecycleStatus,

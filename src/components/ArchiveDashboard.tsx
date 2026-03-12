@@ -31,6 +31,13 @@ interface ArchiveDashboardProps {
   onFilterByStatus?: (status: string) => void;
 }
 
+/** Get color class for a confidence value */
+function confidenceColor(confidence: number): string {
+  if (confidence >= 0.7) return "text-green-600";
+  if (confidence >= 0.4) return "text-yellow-600";
+  return "text-muted-foreground";
+}
+
 const INTAKE_SOURCE_LABELS: Record<string, string> = {
   file_upload: "File Upload",
   multi_upload: "Multi Upload",
@@ -116,7 +123,7 @@ const ArchiveDashboard = ({ documents, onFilterByStatus }: ArchiveDashboardProps
           <div className="space-y-3 text-sm font-body">
             <div className="flex items-center justify-between">
               <span className="text-muted-foreground">Avg Confidence</span>
-              <span className={`font-medium ${health.avgExtractionConfidence >= 0.7 ? "text-green-600" : health.avgExtractionConfidence >= 0.4 ? "text-yellow-600" : "text-muted-foreground"}`}>
+              <span className={`font-medium ${confidenceColor(health.avgExtractionConfidence)}`}>
                 {health.avgExtractionConfidence > 0
                   ? `${(health.avgExtractionConfidence * 100).toFixed(0)}%`
                   : "N/A"}

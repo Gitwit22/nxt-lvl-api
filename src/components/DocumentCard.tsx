@@ -33,12 +33,15 @@ const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
           </p>
 
           {/* Duplicate Warning */}
-          {isDuplicate && (
-            <div className="flex items-center gap-1.5 mb-2 px-2 py-1 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded text-xs text-yellow-700 dark:text-yellow-300 font-body">
-              <Copy className="h-3 w-3" />
-              Possible duplicate ({document.duplicateCheck?.possibleDuplicateIds?.length ?? 0} match{(document.duplicateCheck?.possibleDuplicateIds?.length ?? 0) !== 1 ? "es" : ""})
-            </div>
-          )}
+          {isDuplicate && (() => {
+            const count = document.duplicateCheck?.possibleDuplicateIds?.length ?? 0;
+            return (
+              <div className="flex items-center gap-1.5 mb-2 px-2 py-1 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded text-xs text-yellow-700 dark:text-yellow-300 font-body">
+                <Copy className="h-3 w-3" />
+                Possible duplicate ({count} match{count !== 1 ? "es" : ""})
+              </div>
+            );
+          })()}
 
           {/* Review Required Warning */}
           {needsReview && (
