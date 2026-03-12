@@ -9,6 +9,7 @@ export interface Document {
   keywords: string[];
   fileUrl: string;
   createdAt: string;
+  aiSummary: string;
 }
 
 export interface TimelineEvent {
@@ -49,6 +50,7 @@ export const mockDocuments: Document[] = [
     keywords: ["founding", "mission", "charter", "Detroit", "racial justice"],
     fileUrl: "#",
     createdAt: "1985-03-15",
+    aiSummary: "This 1985 founding document establishes the Michigan Roundtable's core mission: advancing racial justice, promoting housing equity, and empowering communities across metropolitan Detroit. It outlines the organizational structure, key objectives, and the guiding principles that would shape decades of advocacy work.",
   },
   {
     id: "2",
@@ -61,6 +63,7 @@ export const mockDocuments: Document[] = [
     keywords: ["housing", "segregation", "Detroit", "residential patterns", "disparities"],
     fileUrl: "#",
     createdAt: "1992-06-01",
+    aiSummary: "This 1992 study by Dr. Eleanor Williams provides a data-driven analysis of residential segregation in metro Detroit. It maps demographic shifts, documents redlining's lasting effects, and quantifies disparities in neighborhood investment between predominantly white and Black communities. The research became a foundational reference for fair housing advocacy in Michigan.",
   },
   {
     id: "3",
@@ -73,6 +76,7 @@ export const mockDocuments: Document[] = [
     keywords: ["fair housing", "policy", "lending", "discrimination", "enforcement"],
     fileUrl: "#",
     createdAt: "1994-01-10",
+    aiSummary: "The inaugural 1994 policy report examines the state of fair housing enforcement in Michigan. It identifies gaps in discrimination complaint processing, documents lending bias against minority homebuyers, and proposes 12 policy recommendations for equitable housing development. Several recommendations were later adopted by local municipalities.",
   },
   {
     id: "4",
@@ -85,6 +89,7 @@ export const mockDocuments: Document[] = [
     keywords: ["education", "equity", "K-12", "funding", "school districts"],
     fileUrl: "#",
     createdAt: "1998-09-15",
+    aiSummary: "Dr. Thompson's 1998 assessment reveals that Michigan school districts serving predominantly Black and Latino students receive up to 40% less per-pupil funding than affluent suburban counterparts. The study traces this disparity to property tax dependency and proposes alternative funding models that would ensure equitable resource distribution across all districts.",
   },
   {
     id: "5",
@@ -97,6 +102,7 @@ export const mockDocuments: Document[] = [
     keywords: ["community", "survey", "neighborhoods", "Detroit", "voices"],
     fileUrl: "#",
     createdAt: "2000-04-20",
+    aiSummary: "This grassroots report compiles survey responses and oral histories from over 500 residents across 12 Detroit neighborhoods. Key themes include the impact of commercial disinvestment, concerns about policing practices, and the power of community organizing. The report directly influenced the creation of three new neighborhood advisory councils.",
   },
   {
     id: "6",
@@ -109,6 +115,7 @@ export const mockDocuments: Document[] = [
     keywords: ["housing", "equity", "Detroit", "employment", "health"],
     fileUrl: "#",
     createdAt: "2003-11-01",
+    aiSummary: "This landmark 2003 report provides a comprehensive cross-sector analysis of equity in the greater Detroit region. It examines housing access, employment rates, and health outcomes across racial lines, revealing persistent disparities despite civil rights progress. The report proposes an integrated policy framework addressing all three domains simultaneously.",
   },
   {
     id: "7",
@@ -121,6 +128,7 @@ export const mockDocuments: Document[] = [
     keywords: ["predatory lending", "legal", "communities of color", "homeownership"],
     fileUrl: "#",
     createdAt: "2005-07-12",
+    aiSummary: "This 2005 legal brief documents systematic predatory lending targeting African American and Latino homeowners in Detroit. It presents 8 detailed case studies showing how subprime lenders used deceptive practices to extract wealth from communities of color. The brief's recommendations for stronger consumer protections proved prescient ahead of the 2008 financial crisis.",
   },
   {
     id: "8",
@@ -133,6 +141,7 @@ export const mockDocuments: Document[] = [
     keywords: ["youth", "leadership", "civic engagement", "program outcomes"],
     fileUrl: "#",
     createdAt: "2010-05-30",
+    aiSummary: "This program report covers the first five years of the Youth Leadership Initiative (2005–2010). It documents that 89% of participants increased civic engagement, 78% enrolled in higher education, and collectively contributed over 15,000 community service hours. The initiative's peer mentoring model is highlighted as a replicable best practice.",
   },
   {
     id: "9",
@@ -145,6 +154,7 @@ export const mockDocuments: Document[] = [
     keywords: ["water", "environmental justice", "testimony", "Flint", "Detroit"],
     fileUrl: "#",
     createdAt: "2015-02-18",
+    aiSummary: "This legislative testimony addresses the water crisis affecting Detroit and Flint residents. It documents how water shutoffs disproportionately impact low-income communities of color, presents data on contamination risks, and argues that access to clean, affordable water is a fundamental civil rights issue. The testimony calls for a statewide water affordability plan.",
   },
   {
     id: "10",
@@ -157,6 +167,7 @@ export const mockDocuments: Document[] = [
     keywords: ["COVID-19", "racial equity", "pandemic", "recovery", "health disparities"],
     fileUrl: "#",
     createdAt: "2021-08-05",
+    aiSummary: "Dr. Reynolds' 2021 study quantifies COVID-19's disproportionate toll on communities of color in Michigan: 2.3x higher hospitalization rates, 35% greater job losses, and significant learning gaps for students of color. The study proposes a 5-pillar equitable recovery framework addressing health infrastructure, economic relief, educational support, housing stability, and digital access.",
   },
 ];
 

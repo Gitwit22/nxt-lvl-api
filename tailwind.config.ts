@@ -19,10 +19,12 @@ export default {
       },
       colors: {
         archive: {
-          gold: "hsl(var(--archive-gold))",
-          "gold-light": "hsl(var(--archive-gold-light))",
-          charcoal: "hsl(var(--archive-charcoal))",
-          cream: "hsl(var(--archive-cream))",
+          blue: "hsl(var(--archive-blue))",
+          "blue-light": "hsl(var(--archive-blue-light))",
+          red: "hsl(var(--archive-red))",
+          "red-light": "hsl(var(--archive-red-light))",
+          navy: "hsl(var(--archive-navy))",
+          ice: "hsl(var(--archive-ice))",
           warm: "hsl(var(--archive-warm))",
           slate: "hsl(var(--archive-slate))",
         },

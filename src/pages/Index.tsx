@@ -1,15 +1,17 @@
 import { useState, useMemo } from "react";
-import { BookOpen, Clock, FileText, Search as SearchIcon } from "lucide-react";
+import { BookOpen, Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import SearchBar from "@/components/SearchBar";
 import FilterBar from "@/components/FilterBar";
 import DocumentCard from "@/components/DocumentCard";
+import DocumentDetail from "@/components/DocumentDetail";
 import Timeline from "@/components/Timeline";
-import { mockDocuments } from "@/data/documents";
+import { mockDocuments, type Document } from "@/data/documents";
 
 const Index = () => {
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState({ year: "", category: "", type: "" });
+  const [selectedDoc, setSelectedDoc] = useState<Document | null>(null);
 
   const years = useMemo(
     () => [...new Set(mockDocuments.map((d) => d.year))].sort((a, b) => b - a),
@@ -41,14 +43,14 @@ const Index = () => {
         <div className="container max-w-6xl py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center">
-              <BookOpen className="h-5 w-5 text-primary-foreground" />
+              <Shield className="h-5 w-5 text-primary-foreground" />
             </div>
             <div>
               <h1 className="font-display text-xl font-bold text-foreground leading-tight">
-                Community Archive
+                Equity Research Vault
               </h1>
               <p className="text-xs text-muted-foreground font-body">
-                Civil Rights & Community History
+                Civil Rights Document Archive
               </p>
             </div>
           </div>
@@ -60,7 +62,7 @@ const Index = () => {
       </header>
 
       {/* Hero */}
-      <section className="border-b border-border bg-gradient-to-b from-card to-background">
+      <section className="border-b border-border bg-gradient-to-b from-primary/5 to-background">
         <div className="container max-w-6xl py-16 text-center">
           <h2 className="font-display text-4xl md:text-5xl font-bold text-foreground mb-4 text-balance">
             Decades of Justice,
@@ -71,8 +73,26 @@ const Index = () => {
             Explore reports, studies, and testimonies documenting the fight for
             racial equity and community empowerment.
           </p>
-          <div className="flex justify-center">
+          <div className="flex justify-center mb-12">
             <SearchBar value={search} onChange={setSearch} />
+          </div>
+
+          {/* System capabilities */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 max-w-3xl mx-auto">
+            {[
+              { icon: Globe, label: "Public Library", desc: "Open research access" },
+              { icon: Database, label: "Digital Archive", desc: "Structured metadata" },
+              { icon: Upload, label: "Document System", desc: "Upload & organize" },
+              { icon: SearchIcon, label: "Smart Search", desc: "AI-powered discovery" },
+            ].map(({ icon: Icon, label, desc }) => (
+              <div key={label} className="flex flex-col items-center gap-2 p-4 rounded-xl bg-card border border-border">
+                <div className="w-10 h-10 rounded-lg bg-accent/10 flex items-center justify-center">
+                  <Icon className="h-5 w-5 text-accent" />
+                </div>
+                <span className="font-body text-sm font-semibold text-foreground">{label}</span>
+                <span className="font-body text-xs text-muted-foreground">{desc}</span>
+              </div>
+            ))}
           </div>
         </div>
       </section>
@@ -101,7 +121,11 @@ const Index = () => {
                 </p>
                 <div className="grid gap-4">
                   {filtered.map((doc) => (
-                    <DocumentCard key={doc.id} document={doc} />
+                    <DocumentCard
+                      key={doc.id}
+                      document={doc}
+                      onClick={() => setSelectedDoc(doc)}
+                    />
                   ))}
                 </div>
               </div>
@@ -134,10 +158,17 @@ const Index = () => {
       <footer className="border-t border-border py-8">
         <div className="container max-w-6xl text-center">
           <p className="text-sm text-muted-foreground font-body">
-            Community Archive — Preserving civil rights history for researchers, educators, and advocates.
+            Equity Research Vault — Preserving civil rights history for researchers, educators, and advocates.
           </p>
         </div>
       </footer>
+
+      {/* Document Detail Dialog */}
+      <DocumentDetail
+        document={selectedDoc}
+        open={!!selectedDoc}
+        onOpenChange={(open) => !open && setSelectedDoc(null)}
+      />
     </div>
   );
 };

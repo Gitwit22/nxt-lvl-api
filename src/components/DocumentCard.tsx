@@ -1,14 +1,18 @@
-import { FileText, Download, Calendar, User, Tag } from "lucide-react";
+import { FileText, Download, Calendar, User, Tag, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import type { Document } from "@/data/documents";
 
 interface DocumentCardProps {
   document: Document;
+  onClick?: () => void;
 }
 
-const DocumentCard = ({ document }: DocumentCardProps) => {
+const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
   return (
-    <div className="group bg-card border border-border rounded-lg p-6 hover:shadow-lg hover:border-primary/30 transition-all duration-300">
+    <div
+      className="group bg-card border border-border rounded-lg p-6 hover:shadow-lg hover:border-primary/30 transition-all duration-300 cursor-pointer"
+      onClick={onClick}
+    >
       <div className="flex items-start gap-4">
         <div className="flex-shrink-0 w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center">
           <FileText className="h-6 w-6 text-primary" />
@@ -17,9 +21,17 @@ const DocumentCard = ({ document }: DocumentCardProps) => {
           <h3 className="font-display text-lg font-semibold text-foreground leading-tight mb-2 group-hover:text-primary transition-colors">
             {document.title}
           </h3>
-          <p className="text-sm text-muted-foreground font-body leading-relaxed mb-4 line-clamp-2">
+          <p className="text-sm text-muted-foreground font-body leading-relaxed mb-3 line-clamp-2">
             {document.description}
           </p>
+
+          {/* AI Summary Preview */}
+          <div className="flex items-start gap-2 mb-3 px-3 py-2 bg-primary/5 rounded-md border border-primary/10">
+            <Sparkles className="h-3.5 w-3.5 text-accent mt-0.5 flex-shrink-0" />
+            <p className="text-xs text-muted-foreground font-body line-clamp-1">
+              {document.aiSummary}
+            </p>
+          </div>
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground mb-3">
             <span className="flex items-center gap-1.5">
@@ -48,7 +60,10 @@ const DocumentCard = ({ document }: DocumentCardProps) => {
           </div>
         </div>
 
-        <button className="flex-shrink-0 p-2 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors opacity-0 group-hover:opacity-100">
+        <button
+          className="flex-shrink-0 p-2 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors opacity-0 group-hover:opacity-100"
+          onClick={(e) => e.stopPropagation()}
+        >
           <Download className="h-5 w-5" />
         </button>
       </div>
