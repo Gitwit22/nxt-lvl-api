@@ -2,30 +2,51 @@
  * Search Service
  *
  * Provides search and retrieval functionality for the document archive.
- * Currently implements client-side search with efficient filtering.
- *
- * Designed for future expansion to:
- * - Server-side full-text search (Elasticsearch, PostgreSQL FTS)
- * - Vector/semantic search (pgvector, Pinecone, Weaviate)
- * - Natural language querying via LLM
+ * Includes relevance scoring, snippet extraction, faceted filtering,
+ * and sort modes for scaled retrieval.
  */
 
 import type { ArchiveDocument, DocumentFilters, PaginatedResult } from "@/types/document";
 import { searchDocuments, searchDocumentsPaginated, getAllDocuments } from "./documentStore";
 
 /** Sort options for search results */
-export type SortField = "relevance" | "date_desc" | "date_asc" | "title_asc" | "title_desc" | "year_desc" | "year_asc";
+export type SortField =
+  | "relevance"
+  | "date_desc"
+  | "date_asc"
+  | "title_asc"
+  | "title_desc"
+  | "year_desc"
+  | "year_asc"
+  | "status"
+  | "category";
 
-/** Search result with optional relevance score */
+/** Search result with optional relevance score and snippet */
 export interface SearchResult {
   document: ArchiveDocument;
   score: number;
   highlights?: { field: string; snippet: string }[];
+  snippet?: string;
+}
+
+/**
+ * Extract a matching snippet from text around the query match.
+ */
+export function extractSnippet(text: string, query: string, radius = 80): string {
+  if (!text || !query) return text?.slice(0, 160) ?? "";
+  const idx = text.toLowerCase().indexOf(query.toLowerCase());
+  if (idx === -1) return text.slice(0, 160);
+  const start = Math.max(0, idx - radius);
+  const end = Math.min(text.length, idx + query.length + radius);
+  let snippet = text.slice(start, end).trim();
+  if (start > 0) snippet = "..." + snippet;
+  if (end < text.length) snippet = snippet + "...";
+  return snippet;
 }
 
 /**
  * Full-text search with relevance scoring.
- * Scores results based on where the match occurs (title > keywords > text).
+ * Scores results across title, tags, category, metadata, extracted text, and recency.
  */
 export function searchWithRelevance(
   query: string,
@@ -40,15 +61,28 @@ export function searchWithRelevance(
   const allFiltered = searchDocuments({ ...filters });
 
   const results: SearchResult[] = [];
+  const now = Date.now();
 
   for (const doc of allFiltered) {
     let score = 0;
     const highlights: SearchResult["highlights"] = [];
 
-    // Title match (highest weight)
+    // Title match (highest weight) - exact title match vs partial
     if (doc.title.toLowerCase().includes(q)) {
-      score += 10;
+      score += doc.title.toLowerCase() === q ? 60 : 50;
       highlights.push({ field: "title", snippet: doc.title });
+    }
+
+    // Category match
+    if (doc.category.toLowerCase().includes(q)) {
+      score += 20;
+    }
+
+    // Tag match
+    const matchedTags = doc.tags.filter((t) => t.toLowerCase().includes(q));
+    if (matchedTags.length > 0) {
+      score += 25 * Math.min(matchedTags.length, 3);
+      highlights.push({ field: "tags", snippet: matchedTags.join(", ") });
     }
 
     // Keyword match
@@ -56,12 +90,6 @@ export function searchWithRelevance(
     if (matchedKeywords.length > 0) {
       score += 5 * matchedKeywords.length;
       highlights.push({ field: "keywords", snippet: matchedKeywords.join(", ") });
-    }
-
-    // Tag match
-    const matchedTags = doc.tags.filter((t) => t.toLowerCase().includes(q));
-    if (matchedTags.length > 0) {
-      score += 4 * matchedTags.length;
     }
 
     // Author match
@@ -73,34 +101,51 @@ export function searchWithRelevance(
     // Description match
     if (doc.description.toLowerCase().includes(q)) {
       score += 3;
-      const idx = doc.description.toLowerCase().indexOf(q);
-      const start = Math.max(0, idx - 40);
-      const end = Math.min(doc.description.length, idx + q.length + 40);
       highlights.push({
         field: "description",
-        snippet: (start > 0 ? "..." : "") + doc.description.slice(start, end) + (end < doc.description.length ? "..." : ""),
+        snippet: extractSnippet(doc.description, q, 40),
       });
     }
 
-    // Extracted text match (lowest weight)
+    // Extracted text match
     if (doc.extractedText.toLowerCase().includes(q)) {
-      score += 2;
-      const idx = doc.extractedText.toLowerCase().indexOf(q);
-      const start = Math.max(0, idx - 50);
-      const end = Math.min(doc.extractedText.length, idx + q.length + 50);
+      score += 15;
       highlights.push({
         field: "extractedText",
-        snippet: (start > 0 ? "..." : "") + doc.extractedText.slice(start, end) + (end < doc.extractedText.length ? "..." : ""),
+        snippet: extractSnippet(doc.extractedText, q, 50),
       });
     }
 
-    // Category match
-    if (doc.category.toLowerCase().includes(q)) {
-      score += 3;
+    // Metadata matches
+    if (doc.extractedMetadata?.detectedOrganization?.toLowerCase().includes(q)) {
+      score += 5;
+    }
+    if (doc.department?.toLowerCase().includes(q)) {
+      score += 5;
+    }
+
+    // Only apply boosts if there was at least one content match
+    if (score > 0) {
+      // Recency boost: newer documents get a small boost
+      const docAge = now - new Date(doc.createdAt).getTime();
+      const dayAge = docAge / (1000 * 60 * 60 * 24);
+      if (dayAge < 30) score += 5;
+      else if (dayAge < 90) score += 3;
+      else if (dayAge < 365) score += 1;
+
+      // Status weighting: archived/processed docs rank slightly higher
+      if (doc.processingStatus === "processed" || doc.status === "archived") {
+        score += 2;
+      }
+      // Review/failed docs rank lower
+      if (doc.processingStatus === "failed" || doc.status === "review_required") {
+        score -= 1;
+      }
     }
 
     if (score > 0) {
-      results.push({ document: doc, score, highlights });
+      const snippet = extractSnippet(doc.extractedText || doc.description, q);
+      results.push({ document: doc, score, highlights, snippet });
     }
   }
 
@@ -127,6 +172,12 @@ export function sortDocuments(docs: ArchiveDocument[], sortBy: SortField): Archi
       return sorted.sort((a, b) => b.year - a.year);
     case "year_asc":
       return sorted.sort((a, b) => a.year - b.year);
+    case "status":
+      return sorted.sort((a, b) =>
+        (a.status ?? a.processingStatus).localeCompare(b.status ?? b.processingStatus)
+      );
+    case "category":
+      return sorted.sort((a, b) => a.category.localeCompare(b.category));
     case "relevance":
     default:
       return sorted;
@@ -172,6 +223,9 @@ export function getFacetCounts(
   years: Record<string, number>;
   sources: Record<string, number>;
   statuses: Record<string, number>;
+  lifecycleStatuses: Record<string, number>;
+  reviewRequired: number;
+  duplicateFlagged: number;
 } {
   const docs = baseFilters ? searchDocuments(baseFilters) : getAllDocuments();
 
@@ -180,6 +234,9 @@ export function getFacetCounts(
   const years: Record<string, number> = {};
   const sources: Record<string, number> = {};
   const statuses: Record<string, number> = {};
+  const lifecycleStatuses: Record<string, number> = {};
+  let reviewRequired = 0;
+  let duplicateFlagged = 0;
 
   for (const doc of docs) {
     categories[doc.category] = (categories[doc.category] || 0) + 1;
@@ -187,27 +244,26 @@ export function getFacetCounts(
     years[String(doc.year)] = (years[String(doc.year)] || 0) + 1;
     sources[doc.intakeSource] = (sources[doc.intakeSource] || 0) + 1;
     statuses[doc.processingStatus] = (statuses[doc.processingStatus] || 0) + 1;
+    if (doc.status) {
+      lifecycleStatuses[doc.status] = (lifecycleStatuses[doc.status] || 0) + 1;
+    }
+    if (doc.review?.required && !doc.review?.resolution) {
+      reviewRequired++;
+    }
+    if (doc.duplicateCheck?.duplicateStatus === "possible_duplicate") {
+      duplicateFlagged++;
+    }
   }
 
-  return { categories, types, years, sources, statuses };
+  return { categories, types, years, sources, statuses, lifecycleStatuses, reviewRequired, duplicateFlagged };
 }
 
 /**
  * Scaffold: Natural language query.
- *
- * When an LLM API is connected, this function will:
- * 1. Send the user's natural language question to the LLM
- * 2. The LLM generates structured search filters
- * 3. Execute the search with those filters
- * 4. Return results with an AI-generated answer
- *
- * For future vector search integration, extracted text can be
- * embedded and stored in a vector database for semantic retrieval.
  */
 export async function naturalLanguageQuery(
   _question: string
 ): Promise<{ answer: string; results: ArchiveDocument[] }> {
-  // TODO: Integrate with LLM API for natural language search
   throw new Error(
     "Natural language query is not yet implemented. Use searchWithRelevance() for keyword-based search."
   );

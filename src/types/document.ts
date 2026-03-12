@@ -15,6 +15,32 @@ export type ProcessingStatus =
   | "failed"
   | "needs_review";
 
+/** Formal document lifecycle status for workflow tracking */
+export type DocumentLifecycleStatus =
+  | "intake_received"
+  | "queued"
+  | "extracting"
+  | "extracted"
+  | "categorized"
+  | "review_required"
+  | "archived"
+  | "failed";
+
+/** Result from a text extraction adapter */
+export interface ExtractedContent {
+  text: string;
+  pages?: number;
+  confidence?: number;
+  language?: string;
+  warnings?: string[];
+}
+
+/** Interface for pluggable text extraction adapters */
+export interface TextExtractorAdapter {
+  canHandle(file: File): boolean;
+  extract(file: File): Promise<ExtractedContent>;
+}
+
 /** How the document was brought into the system */
 export type IntakeSource =
   | "file_upload"
@@ -166,11 +192,86 @@ export interface ArchiveDocument {
   /** Processing history / audit trail */
   processingHistory: ProcessingEvent[];
 
+  // --- Lifecycle ---
+  /** Formal lifecycle status for workflow tracking */
+  status?: DocumentLifecycleStatus;
+  /** Timestamp of last lifecycle status change */
+  statusUpdatedAt?: string;
+  /** Audit trail of lifecycle transitions */
+  auditTrail?: AuditTrailEvent[];
+
+  // --- Extraction ---
+  /** Extraction metadata */
+  extraction?: ExtractionMetadata;
+
+  // --- Duplicate Detection ---
+  /** Duplicate check metadata */
+  duplicateCheck?: DuplicateCheckMetadata;
+
+  // --- Review Queue ---
+  /** Human review metadata */
+  review?: ReviewMetadata;
+
+  // --- Search Index ---
+  /** Pre-computed search index fields */
+  searchIndex?: SearchIndexFields;
+
   // --- Flags ---
   /** Whether manual review is needed */
   needsReview: boolean;
   /** AI-generated summary */
   aiSummary: string;
+}
+
+/** A single audit trail event */
+export interface AuditTrailEvent {
+  type: string;
+  timestamp: string;
+  actor: string;
+  details: string;
+}
+
+/** Extraction metadata tracking */
+export interface ExtractionMetadata {
+  status: "not_started" | "processing" | "complete" | "failed";
+  method?: "text" | "pdf" | "ocr" | "manual" | "fallback";
+  confidence?: number;
+  extractedAt?: string;
+  warningMessages?: string[];
+  errorMessage?: string;
+  pageCount?: number;
+}
+
+/** Duplicate detection metadata */
+export interface DuplicateCheckMetadata {
+  hash?: string;
+  filenameFingerprint?: string;
+  possibleDuplicateIds?: string[];
+  duplicateStatus?: "unique" | "possible_duplicate" | "confirmed_duplicate";
+  checkedAt?: string;
+}
+
+/** Human review metadata */
+export interface ReviewMetadata {
+  required: boolean;
+  reason?: string[];
+  priority?: "low" | "medium" | "high";
+  assignedTo?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
+  resolution?: "approved" | "corrected" | "reprocessed" | "duplicate" | "rejected";
+  notes?: string;
+}
+
+/** Pre-computed search index fields */
+export interface SearchIndexFields {
+  titleText: string;
+  bodyText: string;
+  tags: string[];
+  category: string;
+  sourceType: string;
+  status: string;
+  dateTokens: string[];
 }
 
 /**
