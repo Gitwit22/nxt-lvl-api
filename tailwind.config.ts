@@ -13,7 +13,19 @@ export default {
       },
     },
     extend: {
+      fontFamily: {
+        display: ['"Playfair Display"', 'Georgia', 'serif'],
+        body: ['"Source Sans 3"', 'system-ui', 'sans-serif'],
+      },
       colors: {
+        archive: {
+          gold: "hsl(var(--archive-gold))",
+          "gold-light": "hsl(var(--archive-gold-light))",
+          charcoal: "hsl(var(--archive-charcoal))",
+          cream: "hsl(var(--archive-cream))",
+          warm: "hsl(var(--archive-warm))",
+          slate: "hsl(var(--archive-slate))",
+        },
         border: "hsl(var(--border))",
         input: "hsl(var(--input))",
         ring: "hsl(var(--ring))",
