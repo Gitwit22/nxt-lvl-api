@@ -1,0 +1,59 @@
+import { FileText, Download, Calendar, User, Tag } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
+import type { Document } from "@/data/documents";
+
+interface DocumentCardProps {
+  document: Document;
+}
+
+const DocumentCard = ({ document }: DocumentCardProps) => {
+  return (
+    <div className="group bg-card border border-border rounded-lg p-6 hover:shadow-lg hover:border-primary/30 transition-all duration-300">
+      <div className="flex items-start gap-4">
+        <div className="flex-shrink-0 w-12 h-12 rounded-lg bg-primary/10 flex items-center justify-center">
+          <FileText className="h-6 w-6 text-primary" />
+        </div>
+        <div className="flex-1 min-w-0">
+          <h3 className="font-display text-lg font-semibold text-foreground leading-tight mb-2 group-hover:text-primary transition-colors">
+            {document.title}
+          </h3>
+          <p className="text-sm text-muted-foreground font-body leading-relaxed mb-4 line-clamp-2">
+            {document.description}
+          </p>
+
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground mb-3">
+            <span className="flex items-center gap-1.5">
+              <Calendar className="h-3.5 w-3.5" />
+              {document.year}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <User className="h-3.5 w-3.5" />
+              {document.author}
+            </span>
+            <span className="flex items-center gap-1.5">
+              <Tag className="h-3.5 w-3.5" />
+              {document.type}
+            </span>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5">
+            <Badge variant="secondary" className="text-xs font-body font-medium">
+              {document.category}
+            </Badge>
+            {document.keywords.slice(0, 3).map((kw) => (
+              <Badge key={kw} variant="outline" className="text-xs font-body text-muted-foreground">
+                {kw}
+              </Badge>
+            ))}
+          </div>
+        </div>
+
+        <button className="flex-shrink-0 p-2 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors opacity-0 group-hover:opacity-100">
+          <Download className="h-5 w-5" />
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default DocumentCard;
