@@ -1,40 +1,39 @@
 import { useState, useMemo } from "react";
-import { BookOpen, Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe } from "lucide-react";
+import { Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe, PenLine } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
 import SearchBar from "@/components/SearchBar";
 import FilterBar from "@/components/FilterBar";
 import DocumentCard from "@/components/DocumentCard";
 import DocumentDetail from "@/components/DocumentDetail";
+import UploadDialog from "@/components/UploadDialog";
+import ManualEntryForm from "@/components/ManualEntryForm";
 import Timeline from "@/components/Timeline";
-import { mockDocuments, type Document } from "@/data/documents";
+import { useDocuments, useDocumentYears } from "@/hooks/useDocuments";
+import { searchDocuments } from "@/services/documentStore";
+import type { ArchiveDocument } from "@/types/document";
 
 const Index = () => {
   const [search, setSearch] = useState("");
-  const [filters, setFilters] = useState({ year: "", category: "", type: "" });
-  const [selectedDoc, setSelectedDoc] = useState<Document | null>(null);
+  const [filters, setFilters] = useState({ year: "", category: "", type: "", intakeSource: "", processingStatus: "" });
+  const [selectedDoc, setSelectedDoc] = useState<ArchiveDocument | null>(null);
+  const [uploadOpen, setUploadOpen] = useState(false);
+  const [manualEntryOpen, setManualEntryOpen] = useState(false);
 
-  const years = useMemo(
-    () => [...new Set(mockDocuments.map((d) => d.year))].sort((a, b) => b - a),
-    []
-  );
+  const { data: allDocuments = [], isLoading } = useDocuments();
+  const { data: years = [] } = useDocumentYears();
 
   const filtered = useMemo(() => {
-    return mockDocuments.filter((doc) => {
-      const q = search.toLowerCase();
-      const matchesSearch =
-        !q ||
-        doc.title.toLowerCase().includes(q) ||
-        doc.description.toLowerCase().includes(q) ||
-        doc.keywords.some((k) => k.toLowerCase().includes(q)) ||
-        doc.author.toLowerCase().includes(q);
-
-      const matchesYear = !filters.year || doc.year === Number(filters.year);
-      const matchesCategory = !filters.category || doc.category === filters.category;
-      const matchesType = !filters.type || doc.type === filters.type;
-
-      return matchesSearch && matchesYear && matchesCategory && matchesType;
+    return searchDocuments({
+      search: search || undefined,
+      year: filters.year || undefined,
+      category: filters.category || undefined,
+      type: filters.type || undefined,
+      intakeSource: filters.intakeSource || undefined,
+      processingStatus: filters.processingStatus || undefined,
     });
-  }, [search, filters]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search, filters, allDocuments.length]);
 
   return (
     <div className="min-h-screen bg-background">
@@ -54,9 +53,28 @@ const Index = () => {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground font-body">
-            <FileText className="h-4 w-4" />
-            <span>{mockDocuments.length} documents</span>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 text-sm text-muted-foreground font-body">
+              <FileText className="h-4 w-4" />
+              <span>{allDocuments.length} documents</span>
+            </div>
+            <Button
+              onClick={() => setUploadOpen(true)}
+              className="gap-2 font-body bg-primary hover:bg-primary/90"
+              size="sm"
+            >
+              <Upload className="h-4 w-4" />
+              Upload
+            </Button>
+            <Button
+              onClick={() => setManualEntryOpen(true)}
+              variant="outline"
+              className="gap-2 font-body"
+              size="sm"
+            >
+              <PenLine className="h-4 w-4" />
+              New Entry
+            </Button>
           </div>
         </div>
       </header>
@@ -114,7 +132,12 @@ const Index = () => {
           <TabsContent value="library" className="space-y-6">
             <FilterBar filters={filters} onChange={setFilters} years={years} />
 
-            {filtered.length > 0 ? (
+            {isLoading ? (
+              <div className="text-center py-20">
+                <div className="h-12 w-12 mx-auto mb-4 border-4 border-primary/30 border-t-primary rounded-full animate-spin" />
+                <p className="text-muted-foreground font-body">Loading documents...</p>
+              </div>
+            ) : filtered.length > 0 ? (
               <div className="space-y-4">
                 <p className="text-sm text-muted-foreground font-body">
                   {filtered.length} document{filtered.length !== 1 && "s"} found
@@ -133,9 +156,26 @@ const Index = () => {
               <div className="text-center py-20">
                 <SearchIcon className="h-12 w-12 text-muted-foreground/40 mx-auto mb-4" />
                 <h3 className="font-display text-xl text-foreground mb-2">No documents found</h3>
-                <p className="text-muted-foreground font-body">
-                  Try adjusting your search or filters.
+                <p className="text-muted-foreground font-body mb-6">
+                  Try adjusting your search or filters, or add new documents.
                 </p>
+                <div className="flex justify-center gap-3">
+                  <Button
+                    onClick={() => setUploadOpen(true)}
+                    className="gap-2 font-body"
+                  >
+                    <Upload className="h-4 w-4" />
+                    Upload Documents
+                  </Button>
+                  <Button
+                    onClick={() => setManualEntryOpen(true)}
+                    variant="outline"
+                    className="gap-2 font-body"
+                  >
+                    <PenLine className="h-4 w-4" />
+                    Manual Entry
+                  </Button>
+                </div>
               </div>
             )}
           </TabsContent>
@@ -163,12 +203,14 @@ const Index = () => {
         </div>
       </footer>
 
-      {/* Document Detail Dialog */}
+      {/* Dialogs */}
       <DocumentDetail
         document={selectedDoc}
         open={!!selectedDoc}
         onOpenChange={(open) => !open && setSelectedDoc(null)}
       />
+      <UploadDialog open={uploadOpen} onOpenChange={setUploadOpen} />
+      <ManualEntryForm open={manualEntryOpen} onOpenChange={setManualEntryOpen} />
     </div>
   );
 };

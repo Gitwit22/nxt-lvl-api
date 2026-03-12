@@ -1,13 +1,21 @@
-import { FileText, Calendar, User, Tag, Download, Sparkles, ExternalLink } from "lucide-react";
+import { FileText, Calendar, User, Tag, Download, Sparkles, ExternalLink, Clock, Info } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import type { Document } from "@/data/documents";
+import ProcessingStatusBadge from "@/components/ProcessingStatusBadge";
+import type { ArchiveDocument } from "@/types/document";
 
 interface DocumentDetailProps {
-  document: Document | null;
+  document: ArchiveDocument | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
+}
+
+/** Format an intake source for display */
+function formatIntakeSource(source: string): string {
+  return source
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (c) => c.toUpperCase());
 }
 
 const DocumentDetail = ({ document, open, onOpenChange }: DocumentDetailProps) => {
@@ -38,6 +46,7 @@ const DocumentDetail = ({ document, open, onOpenChange }: DocumentDetailProps) =
                   <Tag className="h-3.5 w-3.5" />
                   {document.type}
                 </span>
+                <ProcessingStatusBadge status={document.processingStatus} />
               </div>
             </div>
           </div>
@@ -55,34 +64,117 @@ const DocumentDetail = ({ document, open, onOpenChange }: DocumentDetailProps) =
           </div>
 
           {/* AI Summary */}
-          <div className="bg-primary/5 border border-primary/20 rounded-xl p-5">
-            <div className="flex items-center gap-2 mb-3">
-              <Sparkles className="h-4 w-4 text-accent" />
-              <h4 className="font-display text-sm font-semibold text-accent uppercase tracking-wider">
-                AI Summary
-              </h4>
+          {document.aiSummary && (
+            <div className="bg-primary/5 border border-primary/20 rounded-xl p-5">
+              <div className="flex items-center gap-2 mb-3">
+                <Sparkles className="h-4 w-4 text-accent" />
+                <h4 className="font-display text-sm font-semibold text-accent uppercase tracking-wider">
+                  AI Summary
+                </h4>
+              </div>
+              <p className="text-foreground font-body leading-relaxed text-sm">
+                {document.aiSummary}
+              </p>
             </div>
-            <p className="text-foreground font-body leading-relaxed text-sm">
-              {document.aiSummary}
-            </p>
-          </div>
+          )}
 
-          {/* Keywords */}
+          {/* Extracted Text Preview */}
+          {document.extractedText && document.extractedText.length > 0 && (
+            <div>
+              <h4 className="font-display text-sm font-semibold text-foreground mb-2 uppercase tracking-wider">
+                Extracted Text
+              </h4>
+              <div className="bg-muted/50 border border-border rounded-lg p-4 max-h-40 overflow-y-auto">
+                <p className="text-sm text-muted-foreground font-body whitespace-pre-wrap">
+                  {document.extractedText.slice(0, 1000)}
+                  {document.extractedText.length > 1000 && "..."}
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Keywords & Tags */}
           <div>
             <h4 className="font-display text-sm font-semibold text-foreground mb-2 uppercase tracking-wider">
-              Keywords
+              Tags & Keywords
             </h4>
             <div className="flex flex-wrap gap-2">
               <Badge variant="secondary" className="text-xs font-body font-medium">
                 {document.category}
               </Badge>
-              {document.keywords.map((kw) => (
-                <Badge key={kw} variant="outline" className="text-xs font-body text-muted-foreground">
-                  {kw}
+              {document.tags.map((tag) => (
+                <Badge key={tag} variant="outline" className="text-xs font-body text-muted-foreground">
+                  {tag}
                 </Badge>
               ))}
             </div>
           </div>
+
+          {/* Document Metadata */}
+          <div>
+            <h4 className="font-display text-sm font-semibold text-foreground mb-2 uppercase tracking-wider">
+              Metadata
+            </h4>
+            <div className="grid grid-cols-2 gap-2 text-sm font-body">
+              <div className="flex items-center gap-2 text-muted-foreground">
+                <Info className="h-3.5 w-3.5" />
+                Source: {formatIntakeSource(document.intakeSource)}
+              </div>
+              {document.originalFileName && (
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <FileText className="h-3.5 w-3.5" />
+                  {document.originalFileName}
+                </div>
+              )}
+              {document.fileSize && (
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Info className="h-3.5 w-3.5" />
+                  {(document.fileSize / 1024).toFixed(1)} KB
+                </div>
+              )}
+              {document.department && (
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Info className="h-3.5 w-3.5" />
+                  Dept: {document.department}
+                </div>
+              )}
+              {document.extractedMetadata?.wordCount && (
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Info className="h-3.5 w-3.5" />
+                  {document.extractedMetadata.wordCount} words
+                </div>
+              )}
+              {document.ocrStatus !== "not_needed" && (
+                <div className="flex items-center gap-2 text-muted-foreground">
+                  <Info className="h-3.5 w-3.5" />
+                  OCR: {document.ocrStatus}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Processing History */}
+          {document.processingHistory.length > 0 && (
+            <div>
+              <h4 className="font-display text-sm font-semibold text-foreground mb-2 uppercase tracking-wider">
+                Processing History
+              </h4>
+              <div className="space-y-1 max-h-32 overflow-y-auto">
+                {document.processingHistory.map((event, i) => (
+                  <div
+                    key={i}
+                    className="flex items-center gap-2 text-xs text-muted-foreground font-body"
+                  >
+                    <Clock className="h-3 w-3 flex-shrink-0" />
+                    <span className="text-foreground/60">
+                      {new Date(event.timestamp).toLocaleString()}
+                    </span>
+                    <span>{event.details || event.action}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Actions */}
           <div className="flex gap-3 pt-2">

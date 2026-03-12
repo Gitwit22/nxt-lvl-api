@@ -1,9 +1,10 @@
 import { FileText, Download, Calendar, User, Tag, Sparkles } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import type { Document } from "@/data/documents";
+import ProcessingStatusBadge from "@/components/ProcessingStatusBadge";
+import type { ArchiveDocument } from "@/types/document";
 
 interface DocumentCardProps {
-  document: Document;
+  document: ArchiveDocument;
   onClick?: () => void;
 }
 
@@ -18,20 +19,25 @@ const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
           <FileText className="h-6 w-6 text-primary" />
         </div>
         <div className="flex-1 min-w-0">
-          <h3 className="font-display text-lg font-semibold text-foreground leading-tight mb-2 group-hover:text-primary transition-colors">
-            {document.title}
-          </h3>
+          <div className="flex items-center gap-2 mb-2">
+            <h3 className="font-display text-lg font-semibold text-foreground leading-tight group-hover:text-primary transition-colors">
+              {document.title}
+            </h3>
+            <ProcessingStatusBadge status={document.processingStatus} />
+          </div>
           <p className="text-sm text-muted-foreground font-body leading-relaxed mb-3 line-clamp-2">
             {document.description}
           </p>
 
           {/* AI Summary Preview */}
-          <div className="flex items-start gap-2 mb-3 px-3 py-2 bg-primary/5 rounded-md border border-primary/10">
-            <Sparkles className="h-3.5 w-3.5 text-accent mt-0.5 flex-shrink-0" />
-            <p className="text-xs text-muted-foreground font-body line-clamp-1">
-              {document.aiSummary}
-            </p>
-          </div>
+          {document.aiSummary && (
+            <div className="flex items-start gap-2 mb-3 px-3 py-2 bg-primary/5 rounded-md border border-primary/10">
+              <Sparkles className="h-3.5 w-3.5 text-accent mt-0.5 flex-shrink-0" />
+              <p className="text-xs text-muted-foreground font-body line-clamp-1">
+                {document.aiSummary}
+              </p>
+            </div>
+          )}
 
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground mb-3">
             <span className="flex items-center gap-1.5">
@@ -52,9 +58,9 @@ const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
             <Badge variant="secondary" className="text-xs font-body font-medium">
               {document.category}
             </Badge>
-            {document.keywords.slice(0, 3).map((kw) => (
-              <Badge key={kw} variant="outline" className="text-xs font-body text-muted-foreground">
-                {kw}
+            {document.tags.slice(0, 3).map((tag) => (
+              <Badge key={tag} variant="outline" className="text-xs font-body text-muted-foreground">
+                {tag}
               </Badge>
             ))}
           </div>
