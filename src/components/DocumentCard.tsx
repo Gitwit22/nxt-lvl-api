@@ -2,6 +2,7 @@ import { FileText, Download, Calendar, User, Tag, Sparkles, Copy, AlertTriangle 
 import { Badge } from "@/components/ui/badge";
 import ProcessingStatusBadge from "@/components/ProcessingStatusBadge";
 import type { ArchiveDocument } from "@/types/document";
+import { MONTH_NAMES_SHORT } from "@/types/document";
 
 interface DocumentCardProps {
   document: ArchiveDocument;
@@ -65,7 +66,7 @@ const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
             <span className="flex items-center gap-1.5">
               <Calendar className="h-3.5 w-3.5" />
               {document.month
-                ? `${["", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][document.month]} ${document.year}`
+                ? `${MONTH_NAMES_SHORT[document.month - 1]} ${document.year}`
                 : document.year}
             </span>
             <span className="flex items-center gap-1.5">

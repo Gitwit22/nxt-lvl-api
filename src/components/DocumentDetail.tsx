@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import ProcessingStatusBadge from "@/components/ProcessingStatusBadge";
 import type { ArchiveDocument } from "@/types/document";
+import { MONTH_NAMES } from "@/types/document";
 
 interface DocumentDetailProps {
   document: ArchiveDocument | null;
@@ -37,7 +38,7 @@ const DocumentDetail = ({ document, open, onOpenChange }: DocumentDetailProps) =
                 <span className="flex items-center gap-1.5">
                   <Calendar className="h-3.5 w-3.5" />
                   {document.month
-                    ? `${["", "January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"][document.month]} ${document.year}`
+                    ? `${MONTH_NAMES[document.month - 1]} ${document.year}`
                     : document.year}
                 </span>
                 <span className="flex items-center gap-1.5">

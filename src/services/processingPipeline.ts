@@ -15,6 +15,7 @@
  */
 
 import type { ArchiveDocument, ProcessingEvent, ExtractedMetadata, AuditTrailEvent, DocumentLifecycleStatus } from "@/types/document";
+import { MONTH_NAMES } from "@/types/document";
 import { getDocumentById, updateDocument } from "./documentStore";
 import { categorizeDocument } from "./categorizationService";
 import { extractContentFromFile } from "./textExtractor";
@@ -250,10 +251,8 @@ export async function processDocument(documentId: string): Promise<boolean> {
     const financialTags: string[] = [];
     if (financialCategory) financialTags.push(financialCategory.toLowerCase());
     if (financialDocumentType) financialTags.push(financialDocumentType.toLowerCase());
-    if (month) {
-      const monthNames = ["", "january", "february", "march", "april", "may", "june",
-        "july", "august", "september", "october", "november", "december"];
-      financialTags.push(monthNames[month]);
+    if (month && month >= 1 && month <= 12) {
+      financialTags.push(MONTH_NAMES[month - 1].toLowerCase());
     }
 
     const mergedTags = [

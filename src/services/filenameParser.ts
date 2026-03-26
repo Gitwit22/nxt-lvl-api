@@ -13,6 +13,7 @@
  */
 
 import type { FinancialCategory, FinancialDocumentType, FilenameParsedMetadata } from "@/types/document";
+import { MONTH_NAMES } from "@/types/document";
 
 // --- Month Detection ---
 
@@ -31,10 +32,7 @@ const MONTH_MAP: Record<string, number> = {
   december: 12, dec: 12,
 };
 
-const MONTH_NAMES_DISPLAY = [
-  "", "January", "February", "March", "April", "May", "June",
-  "July", "August", "September", "October", "November", "December",
-];
+const MONTH_NAMES_INDEXED = ["", ...MONTH_NAMES];
 
 // --- Financial Category Keywords ---
 
@@ -100,7 +98,7 @@ export function extractMonth(text: string): { month: number; monthName: string }
   for (const name of sortedNames) {
     if (lower.includes(name)) {
       const month = MONTH_MAP[name];
-      return { month, monthName: MONTH_NAMES_DISPLAY[month] };
+      return { month, monthName: MONTH_NAMES_INDEXED[month] };
     }
   }
 
@@ -108,14 +106,14 @@ export function extractMonth(text: string): { month: number; monthName: string }
   const numericMatch = text.match(/[_\-/](0[1-9]|1[0-2])[_\-/]/);
   if (numericMatch) {
     const month = parseInt(numericMatch[1], 10);
-    return { month, monthName: MONTH_NAMES_DISPLAY[month] };
+    return { month, monthName: MONTH_NAMES_INDEXED[month] };
   }
 
   // Try standalone two-digit month at start of string: MM_... or MM-...
   const startMatch = text.match(/^(0[1-9]|1[0-2])[_\-/]/);
   if (startMatch) {
     const month = parseInt(startMatch[1], 10);
-    return { month, monthName: MONTH_NAMES_DISPLAY[month] };
+    return { month, monthName: MONTH_NAMES_INDEXED[month] };
   }
 
   return undefined;

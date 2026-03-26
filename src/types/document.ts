@@ -128,6 +128,12 @@ export const MONTH_NAMES = [
   "July", "August", "September", "October", "November", "December",
 ] as const;
 
+/** Abbreviated month names for compact display */
+export const MONTH_NAMES_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+] as const;
+
 /** Result from filename/path parsing */
 export interface FilenameParsedMetadata {
   year?: number;

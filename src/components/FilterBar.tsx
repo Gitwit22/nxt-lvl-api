@@ -80,7 +80,7 @@ const FilterBar = ({ filters, onChange, years }: FilterBarProps) => {
         <SelectContent>
           <SelectItem value="all">All Months</SelectItem>
           {MONTH_NAMES.map((name, i) => (
-            <SelectItem key={i} value={String(i + 1)}>{name}</SelectItem>
+            <SelectItem key={i + 1} value={String(i + 1)}>{name}</SelectItem>
           ))}
         </SelectContent>
       </Select>
