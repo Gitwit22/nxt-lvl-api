@@ -1,4 +1,4 @@
-import { FileText, Calendar, User, Tag, Download, Sparkles, ExternalLink, Clock, Info } from "lucide-react";
+import { FileText, Calendar, User, Tag, Download, Sparkles, ExternalLink, Clock, Info, AlertTriangle, Shield, Copy } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,7 +46,7 @@ const DocumentDetail = ({ document, open, onOpenChange }: DocumentDetailProps) =
                   <Tag className="h-3.5 w-3.5" />
                   {document.type}
                 </span>
-                <ProcessingStatusBadge status={document.processingStatus} />
+                <ProcessingStatusBadge status={document.processingStatus} lifecycleStatus={document.status} />
               </div>
             </div>
           </div>
@@ -75,6 +75,114 @@ const DocumentDetail = ({ document, open, onOpenChange }: DocumentDetailProps) =
               <p className="text-foreground font-body leading-relaxed text-sm">
                 {document.aiSummary}
               </p>
+            </div>
+          )}
+
+          {/* Extraction Status */}
+          {document.extraction && (
+            <div className="bg-muted/30 border border-border rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-3">
+                <Shield className="h-4 w-4 text-muted-foreground" />
+                <h4 className="font-display text-sm font-semibold text-foreground uppercase tracking-wider">
+                  Extraction Details
+                </h4>
+              </div>
+              <div className="grid grid-cols-2 gap-2 text-sm font-body">
+                <div className="text-muted-foreground">
+                  Status: <span className="text-foreground font-medium">{document.extraction.status}</span>
+                </div>
+                {document.extraction.method && (
+                  <div className="text-muted-foreground">
+                    Method: <span className="text-foreground font-medium">{document.extraction.method}</span>
+                  </div>
+                )}
+                {document.extraction.confidence != null && (
+                  <div className="text-muted-foreground">
+                    Confidence: <span className={`font-medium ${document.extraction.confidence >= 0.7 ? "text-green-600" : document.extraction.confidence >= 0.4 ? "text-yellow-600" : "text-red-600"}`}>
+                      {(document.extraction.confidence * 100).toFixed(0)}%
+                    </span>
+                  </div>
+                )}
+                {document.extraction.pageCount != null && (
+                  <div className="text-muted-foreground">
+                    Pages: <span className="text-foreground font-medium">{document.extraction.pageCount}</span>
+                  </div>
+                )}
+                {document.extraction.extractedAt && (
+                  <div className="text-muted-foreground col-span-2">
+                    Extracted: <span className="text-foreground/60">{new Date(document.extraction.extractedAt).toLocaleString()}</span>
+                  </div>
+                )}
+              </div>
+              {document.extraction.warningMessages && document.extraction.warningMessages.length > 0 && (
+                <div className="mt-2 space-y-1">
+                  {document.extraction.warningMessages.map((w, i) => (
+                    <div key={i} className="flex items-center gap-1.5 text-xs text-yellow-600">
+                      <AlertTriangle className="h-3 w-3" />
+                      {w}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {document.extraction.errorMessage && (
+                <div className="mt-2 flex items-center gap-1.5 text-xs text-red-600">
+                  <AlertTriangle className="h-3 w-3" />
+                  {document.extraction.errorMessage}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Duplicate Check */}
+          {document.duplicateCheck && document.duplicateCheck.duplicateStatus !== "unique" && (
+            <div className="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <Copy className="h-4 w-4 text-yellow-600" />
+                <h4 className="font-display text-sm font-semibold text-yellow-800 dark:text-yellow-200 uppercase tracking-wider">
+                  Possible Duplicate
+                </h4>
+              </div>
+              <p className="text-sm text-yellow-700 dark:text-yellow-300 font-body">
+                This document may be a duplicate of {document.duplicateCheck.possibleDuplicateIds?.length ?? 0} other document(s).
+              </p>
+            </div>
+          )}
+
+          {/* Review Status */}
+          {document.review?.required && !document.review?.resolution && (
+            <div className="bg-orange-50 dark:bg-orange-900/20 border border-orange-200 dark:border-orange-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <AlertTriangle className="h-4 w-4 text-orange-600" />
+                <h4 className="font-display text-sm font-semibold text-orange-800 dark:text-orange-200 uppercase tracking-wider">
+                  Review Required
+                </h4>
+                {document.review.priority && (
+                  <Badge variant="outline" className="text-xs">
+                    {document.review.priority}
+                  </Badge>
+                )}
+              </div>
+              {document.review.reason && document.review.reason.length > 0 && (
+                <ul className="text-sm text-orange-700 dark:text-orange-300 font-body list-disc pl-4 space-y-0.5">
+                  {document.review.reason.map((r, i) => (
+                    <li key={i}>{r}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+          {document.review?.resolution && (
+            <div className="bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-1">
+                <Shield className="h-4 w-4 text-green-600" />
+                <span className="font-display text-sm font-semibold text-green-800 dark:text-green-200 uppercase tracking-wider">
+                  Reviewed
+                </span>
+                <Badge variant="outline" className="text-xs">{document.review.resolution}</Badge>
+              </div>
+              {document.review.notes && (
+                <p className="text-sm text-green-700 dark:text-green-300 font-body mt-1">{document.review.notes}</p>
+              )}
             </div>
           )}
 

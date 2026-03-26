@@ -9,15 +9,15 @@
  * 5. Update search-ready fields
  * 6. Mark as processed or failed
  *
- * Designed for async/queue-based processing.
- * Currently runs synchronously in-browser; can be swapped for a
- * background worker or server-side queue in production.
+ * Manages formal lifecycle state transitions:
+ * intake_received → queued → extracting → extracted → categorized → archived
+ * Fallback paths: low confidence → review_required, error → failed
  */
 
-import type { ArchiveDocument, ProcessingEvent, ExtractedMetadata } from "@/types/document";
+import type { ArchiveDocument, ProcessingEvent, ExtractedMetadata, AuditTrailEvent, DocumentLifecycleStatus } from "@/types/document";
 import { getDocumentById, updateDocument } from "./documentStore";
 import { categorizeDocument } from "./categorizationService";
-import { extractTextFromFile } from "./textExtractor";
+import { extractContentFromFile } from "./textExtractor";
 
 /** Add a processing event to a document's audit trail */
 function addProcessingEvent(
@@ -34,6 +34,40 @@ function addProcessingEvent(
   };
   doc.processingHistory.push(event);
   return event;
+}
+
+/** Append an audit trail event to a document */
+export function appendAuditEvent(
+  doc: ArchiveDocument,
+  event: { type: string; actor?: string; details?: string }
+): ArchiveDocument {
+  const auditEvent: AuditTrailEvent = {
+    type: event.type,
+    timestamp: new Date().toISOString(),
+    actor: event.actor ?? "system",
+    details: event.details ?? "",
+  };
+  return {
+    ...doc,
+    auditTrail: [...(doc.auditTrail ?? []), auditEvent],
+  };
+}
+
+/** Update lifecycle status with audit trail */
+function transitionLifecycleStatus(
+  doc: ArchiveDocument,
+  newStatus: DocumentLifecycleStatus,
+  details?: string
+): Partial<ArchiveDocument> {
+  const updatedDoc = appendAuditEvent(doc, {
+    type: `status_transition`,
+    details: details ?? `Status changed to ${newStatus}`,
+  });
+  return {
+    status: newStatus,
+    statusUpdatedAt: new Date().toISOString(),
+    auditTrail: updatedDoc.auditTrail,
+  };
 }
 
 /** Extract metadata from text content using heuristics */
@@ -93,36 +127,88 @@ export async function processDocument(documentId: string): Promise<boolean> {
     updateDocument(doc.id, {
       processingStatus: "queued",
       processingHistory: doc.processingHistory,
+      ...transitionLifecycleStatus(doc, "queued", "Document queued for processing"),
     });
 
-    // Stage 2: Processing
+    // Stage 2: Extracting
     addProcessingEvent(doc, "processing_start", "processing", "Processing started");
     updateDocument(doc.id, {
       processingStatus: "processing",
       processingHistory: doc.processingHistory,
+      extraction: { status: "processing" },
+      ...transitionLifecycleStatus(doc, "extracting", "Text extraction started"),
     });
 
-    // Stage 3: Text extraction
+    // Stage 3: Text extraction using adapter-based extractor
     let extractedText = doc.extractedText;
+    let extractionMethod: "text" | "pdf" | "ocr" | "manual" | "fallback" = "fallback";
+    let extractionConfidence = 0;
+    let extractionWarnings: string[] = [];
+    let extractionPageCount: number | undefined;
+
     if (doc.fileRef && !extractedText) {
       try {
-        extractedText = await extractTextFromFile(doc.fileRef);
+        const extractionResult = await extractContentFromFile(doc.fileRef);
+        extractedText = extractionResult.text;
+        extractionConfidence = extractionResult.confidence ?? 0;
+        extractionWarnings = extractionResult.warnings ?? [];
+        extractionPageCount = extractionResult.pages;
+
+        // Determine method from file type
+        if (doc.fileRef.type.startsWith("image/")) {
+          extractionMethod = "ocr";
+        } else if (doc.fileRef.type === "application/pdf") {
+          extractionMethod = "pdf";
+        } else if (doc.fileRef.type.startsWith("text/")) {
+          extractionMethod = "text";
+        }
+
         addProcessingEvent(doc, "text_extraction", "processing", "Text extracted from file");
       } catch (err) {
+        const errorMessage = err instanceof Error ? err.message : "Unknown error";
         addProcessingEvent(
           doc,
           "text_extraction_failed",
           "processing",
-          `Text extraction failed: ${err instanceof Error ? err.message : "Unknown error"}`
+          `Text extraction failed: ${errorMessage}`
         );
+        extractionWarnings.push(`Extraction failed: ${errorMessage}`);
+        updateDocument(doc.id, {
+          extraction: {
+            status: "failed",
+            method: extractionMethod,
+            confidence: 0,
+            extractedAt: new Date().toISOString(),
+            warningMessages: extractionWarnings,
+            errorMessage,
+          },
+        });
         // Continue processing even if text extraction fails
       }
+    } else if (doc.extractedText) {
+      extractionMethod = "manual";
+      extractionConfidence = 1.0;
     }
 
     // If no text was extracted, use title + description as fallback
     if (!extractedText) {
       extractedText = `${doc.title}\n\n${doc.description}`;
+      extractionMethod = "fallback";
+      extractionConfidence = 0.1;
     }
+
+    // Update extraction metadata
+    updateDocument(doc.id, {
+      extraction: {
+        status: "complete",
+        method: extractionMethod,
+        confidence: extractionConfidence,
+        extractedAt: new Date().toISOString(),
+        warningMessages: extractionWarnings.length > 0 ? extractionWarnings : undefined,
+        pageCount: extractionPageCount,
+      },
+      ...transitionLifecycleStatus(doc, "extracted", "Text extraction complete"),
+    });
 
     // Stage 4: Metadata extraction
     const extractedMetadata = extractMetadataFromText(extractedText, doc);
@@ -142,10 +228,40 @@ export async function processDocument(documentId: string): Promise<boolean> {
       ...new Set([...doc.tags, ...classificationResult.suggestedTags]),
     ];
 
-    // Stage 6: Update document with all results
+    // Stage 6: Determine review needs
     const needsReview = doc.ocrStatus === "pending" || classificationResult.confidence < 0.5;
+    const lowConfidenceExtraction = (extractionConfidence) < 0.7;
+    const weakCategorization = classificationResult.confidence < 0.5;
+
+    let reviewData: ArchiveDocument["review"] = undefined;
+    let lifecycleStatus: DocumentLifecycleStatus = "archived";
+
+    if (needsReview || lowConfidenceExtraction || weakCategorization) {
+      const reasons: string[] = [];
+      if (lowConfidenceExtraction) reasons.push("Low extraction confidence");
+      if (weakCategorization) reasons.push("Weak categorization confidence");
+      if (doc.ocrStatus === "pending") reasons.push("OCR pending");
+
+      reviewData = {
+        required: true,
+        reason: reasons,
+        priority: lowConfidenceExtraction ? "high" : "medium",
+      };
+      lifecycleStatus = "review_required";
+    }
 
     addProcessingEvent(doc, "processing_complete", "processed", "Processing completed");
+
+    // Build search index
+    const searchIndex = {
+      titleText: doc.title.toLowerCase(),
+      bodyText: extractedText.toLowerCase().slice(0, 5000),
+      tags: mergedTags.map((t) => t.toLowerCase()),
+      category: (doc.category === "Uncategorized" ? classificationResult.category : doc.category).toLowerCase(),
+      sourceType: doc.intakeSource,
+      status: lifecycleStatus,
+      dateTokens: [String(doc.year), doc.createdAt.slice(0, 10)],
+    };
 
     updateDocument(doc.id, {
       extractedText,
@@ -156,9 +272,12 @@ export async function processDocument(documentId: string): Promise<boolean> {
       processingStatus: "processed",
       processingHistory: doc.processingHistory,
       needsReview,
+      review: reviewData,
+      searchIndex,
       aiSummary:
         doc.aiSummary ||
         generateSummary(extractedText, extractedMetadata),
+      ...transitionLifecycleStatus(doc, lifecycleStatus, `Processing complete, status: ${lifecycleStatus}`),
     });
 
     return true;
@@ -173,6 +292,17 @@ export async function processDocument(documentId: string): Promise<boolean> {
       processingStatus: "failed",
       processingHistory: doc.processingHistory,
       needsReview: true,
+      extraction: {
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : "Unknown error",
+        extractedAt: new Date().toISOString(),
+      },
+      review: {
+        required: true,
+        reason: ["Processing failed"],
+        priority: "high",
+      },
+      ...transitionLifecycleStatus(doc, "failed", `Processing failed: ${error instanceof Error ? error.message : "Unknown error"}`),
     });
     return false;
   }
@@ -220,6 +350,7 @@ export async function retryProcessing(documentId: string): Promise<boolean> {
   updateDocument(doc.id, {
     processingStatus: "queued",
     processingHistory: doc.processingHistory,
+    ...transitionLifecycleStatus(doc, "queued", "Retrying processing"),
   });
 
   return processDocument(documentId);
