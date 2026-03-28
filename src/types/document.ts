@@ -94,6 +94,58 @@ export const DOCUMENT_TYPES = [
 
 export type DocumentType = (typeof DOCUMENT_TYPES)[number];
 
+/** Top-level financial categories */
+export const FINANCIAL_CATEGORIES = [
+  "Funding",
+  "Spending",
+] as const;
+
+export type FinancialCategory = (typeof FINANCIAL_CATEGORIES)[number];
+
+/** Financial document types */
+export const FINANCIAL_DOCUMENT_TYPES = [
+  "Grant",
+  "Donation",
+  "Invoice",
+  "Receipt",
+  "Budget",
+  "Expense Report",
+  "Bank Statement",
+  "Payroll",
+  "Tax Document",
+  "Reimbursement",
+  "Purchase Order",
+  "Financial Summary",
+  "Audit",
+  "Other",
+] as const;
+
+export type FinancialDocumentType = (typeof FINANCIAL_DOCUMENT_TYPES)[number];
+
+/** Month names for display */
+export const MONTH_NAMES = [
+  "January", "February", "March", "April", "May", "June",
+  "July", "August", "September", "October", "November", "December",
+] as const;
+
+/** Abbreviated month names for compact display */
+export const MONTH_NAMES_SHORT = [
+  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+] as const;
+
+/** Result from filename/path parsing */
+export interface FilenameParsedMetadata {
+  year?: number;
+  month?: number;
+  monthName?: string;
+  financialCategory?: FinancialCategory;
+  financialDocumentType?: FinancialDocumentType;
+  tags: string[];
+  confidence: number;
+  source: "folder_path" | "filename" | "content" | "manual";
+}
+
 /** OCR processing status */
 export type OcrStatus = "not_needed" | "pending" | "in_progress" | "completed" | "failed";
 
@@ -122,6 +174,8 @@ export interface ClassificationResult {
   confidence: number;
   method: "rule_based" | "ai_assisted" | "manual";
   suggestedTags: string[];
+  financialCategory?: FinancialCategory;
+  financialDocumentType?: FinancialDocumentType;
 }
 
 /**
@@ -139,12 +193,18 @@ export interface ArchiveDocument {
   author: string;
   /** Year of the document (for timeline/filtering) */
   year: number;
+  /** Month of the document (1-12, for filtering) */
+  month?: number;
 
   // --- Classification ---
   /** Primary category */
   category: DocumentCategory;
   /** Document type/format */
   type: DocumentType;
+  /** Financial category (Funding or Spending) */
+  financialCategory?: FinancialCategory;
+  /** Financial document type (Grant, Invoice, etc.) */
+  financialDocumentType?: FinancialDocumentType;
   /** User-assigned or auto-generated tags */
   tags: string[];
   /** Search keywords */
@@ -283,8 +343,11 @@ export interface DocumentIntakeInput {
   description?: string;
   author?: string;
   year?: number;
+  month?: number;
   category?: DocumentCategory;
   type?: DocumentType;
+  financialCategory?: FinancialCategory;
+  financialDocumentType?: FinancialDocumentType;
   tags?: string[];
   keywords?: string[];
   department?: string;
@@ -298,8 +361,11 @@ export interface DocumentIntakeInput {
 export interface DocumentFilters {
   search?: string;
   year?: string;
+  month?: string;
   category?: string;
   type?: string;
+  financialCategory?: string;
+  financialDocumentType?: string;
   intakeSource?: string;
   processingStatus?: string;
   tags?: string[];

@@ -26,6 +26,7 @@ import type {
 } from "@/types/document";
 import { addDocument, addDocuments } from "./documentStore";
 import { processDocument, processDocumentBatch } from "./processingPipeline";
+import { extractFileMetadata } from "./filenameParser";
 
 /** Generate a UUID v4 */
 function generateId(): string {
@@ -75,6 +76,7 @@ function guessYear(dateStr?: string): number {
 /**
  * Create a normalized ArchiveDocument record from intake input.
  * This is the single entry point that all intake methods use.
+ * Automatically extracts metadata from filename and folder path.
  */
 export function createDocumentRecord(input: DocumentIntakeInput): ArchiveDocument {
   const now = new Date().toISOString();
@@ -89,15 +91,36 @@ export function createDocumentRecord(input: DocumentIntakeInput): ArchiveDocumen
     details: `Document received via ${input.intakeSource}`,
   };
 
+  // Extract metadata from filename and folder path
+  const filename = input.file?.name;
+  const folderPath = input.sourceReference;
+  const parsedMeta = filename
+    ? extractFileMetadata(filename, folderPath)
+    : undefined;
+
+  // Merge parsed metadata with provided input (input overrides parsed)
+  const year = input.year || parsedMeta?.year || guessYear();
+  const month = input.month || parsedMeta?.month;
+  const financialCategory = input.financialCategory || parsedMeta?.financialCategory;
+  const financialDocumentType = input.financialDocumentType || parsedMeta?.financialDocumentType;
+
+  // Merge tags from input and parsed metadata
+  const inputTags = input.tags || [];
+  const parsedTags = parsedMeta?.tags || [];
+  const mergedTags = [...new Set([...inputTags, ...parsedTags])];
+
   return {
     id,
     title: input.title || (input.file ? titleFromFileName(input.file.name) : "Untitled Document"),
     description: input.description || "",
     author: input.author || "Unknown",
-    year: input.year || guessYear(),
+    year,
+    month,
     category: input.category || "Uncategorized",
     type: input.type || (input.file ? guessDocumentType(input.file) : "Other"),
-    tags: input.tags || [],
+    financialCategory,
+    financialDocumentType,
+    tags: mergedTags,
     keywords: input.keywords || [],
     originalFileName: input.file?.name,
     mimeType: input.file?.type,

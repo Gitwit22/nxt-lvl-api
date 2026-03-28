@@ -19,7 +19,7 @@ import type { ArchiveDocument } from "@/types/document";
 
 const Index = () => {
   const [search, setSearch] = useState("");
-  const [filters, setFilters] = useState({ year: "", category: "", type: "", intakeSource: "", processingStatus: "" });
+  const [filters, setFilters] = useState({ year: "", month: "", category: "", type: "", financialCategory: "", financialDocumentType: "", intakeSource: "", processingStatus: "" });
   const [selectedDoc, setSelectedDoc] = useState<ArchiveDocument | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [manualEntryOpen, setManualEntryOpen] = useState(false);
@@ -32,8 +32,11 @@ const Index = () => {
     return searchDocuments({
       search: search || undefined,
       year: filters.year || undefined,
+      month: filters.month || undefined,
       category: filters.category || undefined,
       type: filters.type || undefined,
+      financialCategory: filters.financialCategory || undefined,
+      financialDocumentType: filters.financialDocumentType || undefined,
       intakeSource: filters.intakeSource || undefined,
       processingStatus: filters.processingStatus || undefined,
     });
@@ -41,7 +44,7 @@ const Index = () => {
   }, [search, filters, allDocuments.length]);
 
   const handleDashboardFilter = (status: string) => {
-    setFilters({ year: "", category: "", type: "", intakeSource: "", processingStatus: status });
+    setFilters({ year: "", month: "", category: "", type: "", financialCategory: "", financialDocumentType: "", intakeSource: "", processingStatus: status });
   };
 
   const handleReviewResolve = (docId: string, resolution: string) => {

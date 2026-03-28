@@ -1,12 +1,15 @@
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Button } from "@/components/ui/button";
 import { X } from "lucide-react";
-import { DOCUMENT_CATEGORIES, DOCUMENT_TYPES } from "@/types/document";
+import { DOCUMENT_CATEGORIES, DOCUMENT_TYPES, FINANCIAL_CATEGORIES, FINANCIAL_DOCUMENT_TYPES, MONTH_NAMES } from "@/types/document";
 
 interface Filters {
   year: string;
+  month: string;
   category: string;
   type: string;
+  financialCategory: string;
+  financialDocumentType: string;
   intakeSource: string;
   processingStatus: string;
 }
@@ -52,7 +55,9 @@ const LIFECYCLE_STATUS_LABELS: Record<string, string> = {
 
 const FilterBar = ({ filters, onChange, years }: FilterBarProps) => {
   const hasFilters =
-    filters.year || filters.category || filters.type || filters.intakeSource || filters.processingStatus;
+    filters.year || filters.month || filters.category || filters.type ||
+    filters.financialCategory || filters.financialDocumentType ||
+    filters.intakeSource || filters.processingStatus;
 
   return (
     <div className="flex flex-wrap items-center gap-3">
@@ -64,6 +69,42 @@ const FilterBar = ({ filters, onChange, years }: FilterBarProps) => {
           <SelectItem value="all">All Years</SelectItem>
           {years.map((y) => (
             <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      <Select value={filters.month} onValueChange={(v) => onChange({ ...filters, month: v === "all" ? "" : v })}>
+        <SelectTrigger className="w-[150px] bg-card font-body">
+          <SelectValue placeholder="Month" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">All Months</SelectItem>
+          {MONTH_NAMES.map((name, i) => (
+            <SelectItem key={i + 1} value={String(i + 1)}>{name}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      <Select value={filters.financialCategory} onValueChange={(v) => onChange({ ...filters, financialCategory: v === "all" ? "" : v })}>
+        <SelectTrigger className="w-[160px] bg-card font-body">
+          <SelectValue placeholder="Funding/Spending" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">All Financial</SelectItem>
+          {FINANCIAL_CATEGORIES.map((c) => (
+            <SelectItem key={c} value={c}>{c}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+
+      <Select value={filters.financialDocumentType} onValueChange={(v) => onChange({ ...filters, financialDocumentType: v === "all" ? "" : v })}>
+        <SelectTrigger className="w-[180px] bg-card font-body">
+          <SelectValue placeholder="Doc Type" />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectItem value="all">All Doc Types</SelectItem>
+          {FINANCIAL_DOCUMENT_TYPES.map((t) => (
+            <SelectItem key={t} value={t}>{t}</SelectItem>
           ))}
         </SelectContent>
       </Select>
@@ -82,10 +123,10 @@ const FilterBar = ({ filters, onChange, years }: FilterBarProps) => {
 
       <Select value={filters.type} onValueChange={(v) => onChange({ ...filters, type: v === "all" ? "" : v })}>
         <SelectTrigger className="w-[160px] bg-card font-body">
-          <SelectValue placeholder="Type" />
+          <SelectValue placeholder="Format" />
         </SelectTrigger>
         <SelectContent>
-          <SelectItem value="all">All Types</SelectItem>
+          <SelectItem value="all">All Formats</SelectItem>
           {DOCUMENT_TYPES.map((t) => (
             <SelectItem key={t} value={t}>{t}</SelectItem>
           ))}
@@ -136,7 +177,7 @@ const FilterBar = ({ filters, onChange, years }: FilterBarProps) => {
         <Button
           variant="ghost"
           size="sm"
-          onClick={() => onChange({ year: "", category: "", type: "", intakeSource: "", processingStatus: "" })}
+          onClick={() => onChange({ year: "", month: "", category: "", type: "", financialCategory: "", financialDocumentType: "", intakeSource: "", processingStatus: "" })}
           className="text-muted-foreground hover:text-foreground font-body"
         >
           <X className="h-4 w-4 mr-1" />

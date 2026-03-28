@@ -12,6 +12,8 @@ import type {
   ArchiveDocument,
   ClassificationResult,
   DocumentCategory,
+  FinancialCategory,
+  FinancialDocumentType,
 } from "@/types/document";
 
 /**
@@ -117,11 +119,59 @@ const TAG_RULES: Array<{ keywords: string[]; tag: string }> = [
   { keywords: ["funding", "budget", "grant", "financial"], tag: "funding" },
   { keywords: ["policy", "legislation", "reform"], tag: "policy" },
   { keywords: ["discrimination", "bias", "predatory"], tag: "discrimination" },
+  { keywords: ["invoice", "receipt", "expense", "payment"], tag: "spending" },
+  { keywords: ["payroll", "salary", "wages"], tag: "payroll" },
+  { keywords: ["tax", "1099", "w2"], tag: "tax" },
+  { keywords: ["audit", "auditing"], tag: "audit" },
+  { keywords: ["reimbursement", "reimburse"], tag: "reimbursement" },
+];
+
+/**
+ * Financial category detection keywords.
+ */
+const FINANCIAL_CATEGORY_RULES: Array<{
+  category: FinancialCategory;
+  keywords: string[];
+}> = [
+  {
+    category: "Funding",
+    keywords: ["funding", "grant", "award", "donation", "donor", "contribution",
+      "revenue", "income", "fundraising", "endowment", "subsidy", "sponsorship", "stipend"],
+  },
+  {
+    category: "Spending",
+    keywords: ["spending", "expense", "expenses", "invoice", "receipt", "payment",
+      "purchase", "cost", "disbursement", "expenditure", "paid", "payroll",
+      "reimbursement", "procurement", "vendor"],
+  },
+];
+
+/**
+ * Financial document type detection keywords.
+ */
+const FINANCIAL_TYPE_RULES: Array<{
+  type: FinancialDocumentType;
+  keywords: string[];
+}> = [
+  { type: "Grant", keywords: ["grant", "award"] },
+  { type: "Donation", keywords: ["donation", "donor", "contribution"] },
+  { type: "Invoice", keywords: ["invoice", "bill", "amount due"] },
+  { type: "Receipt", keywords: ["receipt"] },
+  { type: "Budget", keywords: ["budget", "budgetary"] },
+  { type: "Expense Report", keywords: ["expense report", "expense_report"] },
+  { type: "Bank Statement", keywords: ["bank statement", "bank_statement", "statement of account"] },
+  { type: "Payroll", keywords: ["payroll", "salary", "wages"] },
+  { type: "Tax Document", keywords: ["tax document", "tax_document", "1099", "w2", "w-2", "tax return"] },
+  { type: "Reimbursement", keywords: ["reimbursement", "reimburse"] },
+  { type: "Purchase Order", keywords: ["purchase order", "purchase_order"] },
+  { type: "Financial Summary", keywords: ["financial summary", "financial_summary"] },
+  { type: "Audit", keywords: ["audit", "auditing"] },
 ];
 
 /**
  * Rule-based document categorization.
  * Scores each category based on keyword matches and returns the best match.
+ * Also detects financial category and document type.
  */
 export function categorizeDocument(
   doc: ArchiveDocument,
@@ -167,12 +217,47 @@ export function categorizeDocument(
     }
   }
 
+  // Detect financial category
+  let financialCategory: FinancialCategory | undefined =
+    doc.financialCategory;
+  if (!financialCategory) {
+    let fundingScore = 0;
+    let spendingScore = 0;
+    for (const rule of FINANCIAL_CATEGORY_RULES) {
+      for (const keyword of rule.keywords) {
+        if (textLower.includes(keyword)) {
+          if (rule.category === "Funding") fundingScore++;
+          else spendingScore++;
+        }
+      }
+    }
+    if (fundingScore > 0 && fundingScore >= spendingScore) financialCategory = "Funding";
+    else if (spendingScore > 0) financialCategory = "Spending";
+  }
+
+  // Detect financial document type
+  let financialDocumentType: FinancialDocumentType | undefined =
+    doc.financialDocumentType;
+  if (!financialDocumentType) {
+    for (const rule of FINANCIAL_TYPE_RULES) {
+      for (const keyword of rule.keywords) {
+        if (textLower.includes(keyword)) {
+          financialDocumentType = rule.type;
+          break;
+        }
+      }
+      if (financialDocumentType) break;
+    }
+  }
+
   if (scores.length === 0) {
     return {
       category: "Uncategorized",
       confidence: 0,
       method: "rule_based",
       suggestedTags,
+      financialCategory,
+      financialDocumentType,
     };
   }
 
@@ -182,6 +267,8 @@ export function categorizeDocument(
     confidence: Math.min(best.score, 1.0),
     method: "rule_based",
     suggestedTags,
+    financialCategory,
+    financialDocumentType,
   };
 }
 

@@ -2,6 +2,7 @@ import { FileText, Download, Calendar, User, Tag, Sparkles, Copy, AlertTriangle 
 import { Badge } from "@/components/ui/badge";
 import ProcessingStatusBadge from "@/components/ProcessingStatusBadge";
 import type { ArchiveDocument } from "@/types/document";
+import { MONTH_NAMES_SHORT } from "@/types/document";
 
 interface DocumentCardProps {
   document: ArchiveDocument;
@@ -64,7 +65,9 @@ const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
           <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-muted-foreground mb-3">
             <span className="flex items-center gap-1.5">
               <Calendar className="h-3.5 w-3.5" />
-              {document.year}
+              {document.month
+                ? `${MONTH_NAMES_SHORT[document.month - 1]} ${document.year}`
+                : document.year}
             </span>
             <span className="flex items-center gap-1.5">
               <User className="h-3.5 w-3.5" />
@@ -80,6 +83,16 @@ const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
             <Badge variant="secondary" className="text-xs font-body font-medium">
               {document.category}
             </Badge>
+            {document.financialCategory && (
+              <Badge variant="secondary" className="text-xs font-body font-medium bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300">
+                {document.financialCategory}
+              </Badge>
+            )}
+            {document.financialDocumentType && (
+              <Badge variant="outline" className="text-xs font-body font-medium border-blue-300 dark:border-blue-700 text-blue-600 dark:text-blue-400">
+                {document.financialDocumentType}
+              </Badge>
+            )}
             {document.tags.slice(0, 3).map((tag) => (
               <Badge key={tag} variant="outline" className="text-xs font-body text-muted-foreground">
                 {tag}

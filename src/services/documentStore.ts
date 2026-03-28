@@ -175,12 +175,24 @@ export function searchDocuments(filters: DocumentFilters): ArchiveDocument[] {
     results = results.filter((doc) => doc.year === Number(filters.year));
   }
 
+  if (filters.month) {
+    results = results.filter((doc) => doc.month === Number(filters.month));
+  }
+
   if (filters.category) {
     results = results.filter((doc) => doc.category === filters.category);
   }
 
   if (filters.type) {
     results = results.filter((doc) => doc.type === filters.type);
+  }
+
+  if (filters.financialCategory) {
+    results = results.filter((doc) => doc.financialCategory === filters.financialCategory);
+  }
+
+  if (filters.financialDocumentType) {
+    results = results.filter((doc) => doc.financialDocumentType === filters.financialDocumentType);
   }
 
   if (filters.intakeSource) {

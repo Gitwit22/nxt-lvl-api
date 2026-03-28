@@ -15,9 +15,11 @@
  */
 
 import type { ArchiveDocument, ProcessingEvent, ExtractedMetadata, AuditTrailEvent, DocumentLifecycleStatus } from "@/types/document";
+import { MONTH_NAMES } from "@/types/document";
 import { getDocumentById, updateDocument } from "./documentStore";
 import { categorizeDocument } from "./categorizationService";
 import { extractContentFromFile } from "./textExtractor";
+import { extractFileMetadata } from "./filenameParser";
 
 /** Add a processing event to a document's audit trail */
 function addProcessingEvent(
@@ -223,9 +225,38 @@ export async function processDocument(documentId: string): Promise<boolean> {
       `Categorized as "${classificationResult.category}" (${classificationResult.method}, confidence: ${classificationResult.confidence})`
     );
 
+    // Stage 5b: Financial metadata via filename/content parsing
+    // Use content-based parsing as fallback if filename didn't detect financial info
+    let financialCategory = doc.financialCategory ?? classificationResult.financialCategory;
+    let financialDocumentType = doc.financialDocumentType ?? classificationResult.financialDocumentType;
+    let month = doc.month;
+
+    if (!financialCategory || !financialDocumentType || !month) {
+      const contentParsed = extractFileMetadata(
+        doc.originalFileName || doc.title,
+        doc.sourceReference,
+        extractedText
+      );
+      financialCategory = financialCategory ?? contentParsed.financialCategory;
+      financialDocumentType = financialDocumentType ?? contentParsed.financialDocumentType;
+      month = month ?? contentParsed.month;
+
+      // Also fill in year if not set
+      if (!doc.year && contentParsed.year) {
+        doc.year = contentParsed.year;
+      }
+    }
+
     // Merge auto-generated tags with existing tags
+    const financialTags: string[] = [];
+    if (financialCategory) financialTags.push(financialCategory.toLowerCase());
+    if (financialDocumentType) financialTags.push(financialDocumentType.toLowerCase());
+    if (month && month >= 1 && month <= 12) {
+      financialTags.push(MONTH_NAMES[month - 1].toLowerCase());
+    }
+
     const mergedTags = [
-      ...new Set([...doc.tags, ...classificationResult.suggestedTags]),
+      ...new Set([...doc.tags, ...classificationResult.suggestedTags, ...financialTags]),
     ];
 
     // Stage 6: Determine review needs
@@ -268,6 +299,9 @@ export async function processDocument(documentId: string): Promise<boolean> {
       extractedMetadata,
       classificationResult,
       category: doc.category === "Uncategorized" ? classificationResult.category : doc.category,
+      financialCategory,
+      financialDocumentType,
+      month,
       tags: mergedTags,
       processingStatus: "processed",
       processingHistory: doc.processingHistory,

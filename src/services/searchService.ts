@@ -221,6 +221,9 @@ export function getFacetCounts(
   categories: Record<string, number>;
   types: Record<string, number>;
   years: Record<string, number>;
+  months: Record<string, number>;
+  financialCategories: Record<string, number>;
+  financialDocumentTypes: Record<string, number>;
   sources: Record<string, number>;
   statuses: Record<string, number>;
   lifecycleStatuses: Record<string, number>;
@@ -232,6 +235,9 @@ export function getFacetCounts(
   const categories: Record<string, number> = {};
   const types: Record<string, number> = {};
   const years: Record<string, number> = {};
+  const months: Record<string, number> = {};
+  const financialCategories: Record<string, number> = {};
+  const financialDocumentTypes: Record<string, number> = {};
   const sources: Record<string, number> = {};
   const statuses: Record<string, number> = {};
   const lifecycleStatuses: Record<string, number> = {};
@@ -242,6 +248,15 @@ export function getFacetCounts(
     categories[doc.category] = (categories[doc.category] || 0) + 1;
     types[doc.type] = (types[doc.type] || 0) + 1;
     years[String(doc.year)] = (years[String(doc.year)] || 0) + 1;
+    if (doc.month) {
+      months[String(doc.month)] = (months[String(doc.month)] || 0) + 1;
+    }
+    if (doc.financialCategory) {
+      financialCategories[doc.financialCategory] = (financialCategories[doc.financialCategory] || 0) + 1;
+    }
+    if (doc.financialDocumentType) {
+      financialDocumentTypes[doc.financialDocumentType] = (financialDocumentTypes[doc.financialDocumentType] || 0) + 1;
+    }
     sources[doc.intakeSource] = (sources[doc.intakeSource] || 0) + 1;
     statuses[doc.processingStatus] = (statuses[doc.processingStatus] || 0) + 1;
     if (doc.status) {
@@ -255,7 +270,7 @@ export function getFacetCounts(
     }
   }
 
-  return { categories, types, years, sources, statuses, lifecycleStatuses, reviewRequired, duplicateFlagged };
+  return { categories, types, years, months, financialCategories, financialDocumentTypes, sources, statuses, lifecycleStatuses, reviewRequired, duplicateFlagged };
 }
 
 /**
