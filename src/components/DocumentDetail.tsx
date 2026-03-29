@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import ProcessingStatusBadge from "@/components/ProcessingStatusBadge";
 import type { ArchiveDocument } from "@/types/document";
 import { MONTH_NAMES } from "@/types/document";
+import { downloadDocument, openOriginalDocument } from "@/lib/documentActions";
+import { toast } from "sonner";
 
 interface DocumentDetailProps {
   document: ArchiveDocument | null;
@@ -21,6 +23,22 @@ function formatIntakeSource(source: string): string {
 
 const DocumentDetail = ({ document, open, onOpenChange }: DocumentDetailProps) => {
   if (!document) return null;
+
+  const canOpenFile = Boolean(document.fileUrl);
+
+  const handleDownload = () => {
+    const ok = downloadDocument(document.fileUrl, document.originalFileName ?? document.title);
+    if (!ok) {
+      toast.error("No file is available to download for this record.");
+    }
+  };
+
+  const handleOpenOriginal = () => {
+    const ok = openOriginalDocument(document.fileUrl);
+    if (!ok) {
+      toast.error("No original file is available for this record.");
+    }
+  };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -310,11 +328,20 @@ const DocumentDetail = ({ document, open, onOpenChange }: DocumentDetailProps) =
 
           {/* Actions */}
           <div className="flex gap-3 pt-2">
-            <Button className="gap-2 font-body bg-primary hover:bg-primary/90">
+            <Button
+              className="gap-2 font-body bg-primary hover:bg-primary/90"
+              onClick={handleDownload}
+              disabled={!canOpenFile}
+            >
               <Download className="h-4 w-4" />
               Download Document
             </Button>
-            <Button variant="outline" className="gap-2 font-body">
+            <Button
+              variant="outline"
+              className="gap-2 font-body"
+              onClick={handleOpenOriginal}
+              disabled={!canOpenFile}
+            >
               <ExternalLink className="h-4 w-4" />
               Open Original
             </Button>

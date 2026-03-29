@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import ProcessingStatusBadge from "@/components/ProcessingStatusBadge";
 import type { ArchiveDocument } from "@/types/document";
 import { MONTH_NAMES_SHORT } from "@/types/document";
+import { downloadDocument } from "@/lib/documentActions";
 
 interface DocumentCardProps {
   document: ArchiveDocument;
@@ -102,8 +103,13 @@ const DocumentCard = ({ document, onClick }: DocumentCardProps) => {
         </div>
 
         <button
+          type="button"
           className="flex-shrink-0 p-2 rounded-md text-muted-foreground hover:text-primary hover:bg-primary/10 transition-colors opacity-0 group-hover:opacity-100"
-          onClick={(e) => e.stopPropagation()}
+          onClick={(e) => {
+            e.stopPropagation();
+            downloadDocument(document.fileUrl, document.originalFileName ?? document.title);
+          }}
+          aria-label="Download document"
         >
           <Download className="h-5 w-5" />
         </button>

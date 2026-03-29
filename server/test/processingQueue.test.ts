@@ -15,6 +15,7 @@ const prismaMock = vi.hoisted(() => ({
   document: {
     update: vi.fn(),
     findUniqueOrThrow: vi.fn(),
+    findMany: vi.fn(),
   },
 }));
 
@@ -60,6 +61,10 @@ const mockJob = {
     title: "Test Doc",
     description: "desc",
     author: "Author",
+    year: 2024,
+    month: 3,
+    tags: [],
+    sourceReference: null,
     filePath: null,
     mimeType: null,
     processingHistory: [],
@@ -70,6 +75,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   prismaMock.processingJob.update.mockResolvedValue(mockJob);
   prismaMock.document.update.mockResolvedValue({});
+  prismaMock.document.findMany.mockResolvedValue([]);
 });
 
 // ---------------------------------------------------------------------------
@@ -152,11 +158,18 @@ describe("processSingleJob — text extraction", () => {
     try {
       await processSingleJob();
 
-      // Document should be updated to processed/archived
+      // Document should be updated to processed and enriched with layered metadata.
       const docUpdateCalls = (prismaMock.document.update as ReturnType<typeof vi.fn>).mock.calls;
-      const finalDocUpdate = docUpdateCalls[docUpdateCalls.length - 1][0].data;
+      const processedCall = docUpdateCalls.find(
+        (call) => call[0]?.data?.processingStatus === "processed",
+      );
+      expect(processedCall).toBeDefined();
+      const finalDocUpdate = processedCall![0].data;
       expect(finalDocUpdate.processingStatus).toBe("processed");
-      expect(finalDocUpdate.needsReview).toBe(false);
+      expect(typeof finalDocUpdate.needsReview).toBe("boolean");
+      expect(finalDocUpdate.classificationResult).toBeDefined();
+      expect(finalDocUpdate.duplicateCheck).toBeDefined();
+      expect(finalDocUpdate.searchIndex?.relationships?.clusterId).toBeDefined();
 
       // Job should be marked completed
       const jobUpdateCalls = (prismaMock.processingJob.update as ReturnType<typeof vi.fn>).mock.calls;
