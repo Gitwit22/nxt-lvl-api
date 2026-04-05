@@ -1,5 +1,5 @@
 import { useState, useMemo } from "react";
-import { Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe, PenLine, LayoutDashboard, Eye } from "lucide-react";
+import { Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe, PenLine, LayoutDashboard, Eye, Settings } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
 import SearchBar from "@/components/SearchBar";
@@ -11,6 +11,7 @@ import ManualEntryForm from "@/components/ManualEntryForm";
 import Timeline from "@/components/Timeline";
 import ArchiveDashboard from "@/components/ArchiveDashboard";
 import ReviewQueuePanel from "@/components/ReviewQueuePanel";
+import StorageSettingsPanel from "@/components/StorageSettingsPanel";
 import { useDocuments, useDocumentYears, useResolveReview } from "@/hooks/useDocuments";
 import { resolveReview } from "@/services/reviewQueueService";
 import { retryProcessing } from "@/services/processingPipeline";
@@ -178,6 +179,10 @@ const Index = () => {
               <Clock className="h-4 w-4" />
               Timeline
             </TabsTrigger>
+            <TabsTrigger value="settings" className="font-body gap-2">
+              <Settings className="h-4 w-4" />
+              Settings
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="dashboard" className="space-y-6">
@@ -258,6 +263,10 @@ const Index = () => {
               </p>
               <Timeline isLoading={isLoading} />
             </div>
+          </TabsContent>
+
+          <TabsContent value="settings" className="space-y-6">
+            <StorageSettingsPanel />
           </TabsContent>
         </Tabs>
       </main>
