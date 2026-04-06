@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import express from "express";
 import cors from "cors";
-import { API_PREFIX, UPLOAD_DIR } from "./config.js";
+import { API_PREFIX, UPLOAD_DIR, CORS_ORIGIN, BACKEND_URL } from "./config.js";
 import { prisma } from "./db.js";
 import { toApiDocument } from "./documentMapper.js";
 import { createDocumentPayload } from "./documentFactory.js";
@@ -19,9 +19,22 @@ if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
-app.use(cors());
+app.use(
+  cors({
+    origin: CORS_ORIGIN === "*" ? true : CORS_ORIGIN.split(",").map((o) => o.trim()),
+    credentials: true,
+  }),
+);
 app.use(express.json({ limit: "10mb" }));
 app.use("/uploads", express.static(UPLOAD_DIR));
+
+/** Build a file URL that the frontend can use. In production, prefix with BACKEND_URL. */
+function buildFileUrl(relativePath: string): string {
+  if (BACKEND_URL && !BACKEND_URL.startsWith("http://localhost")) {
+    return `${BACKEND_URL.replace(/\/$/, "")}${relativePath}`;
+  }
+  return relativePath;
+}
 
 // Routers
 app.use(`${API_PREFIX}/auth`, authRouter);
@@ -69,8 +82,12 @@ function parseFilters(query: Record<string, unknown>) {
 }
 
 app.get(`${API_PREFIX}/health`, async (_req, res) => {
-  await prisma.$queryRaw`SELECT 1`;
-  res.json({ ok: true });
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ ok: true, timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(503).json({ ok: false, error: "Database unreachable" });
+  }
 });
 
 app.get(`${API_PREFIX}/documents`, async (req, res) => {
@@ -159,7 +176,7 @@ app.post(`${API_PREFIX}/documents/upload`, requireAuth, requireRole("uploader"),
       originalFileName: req.file.originalname,
       mimeType: req.file.mimetype,
       fileSize: req.file.size,
-      fileUrl: `/uploads/${path.basename(req.file.path)}`,
+      fileUrl: buildFileUrl(`/uploads/${path.basename(req.file.path)}`),
       filePath: req.file.path,
     },
   });
@@ -189,7 +206,7 @@ app.post(`${API_PREFIX}/documents/upload/batch`, requireAuth, requireRole("uploa
         originalFileName: file.originalname,
         mimeType: file.mimetype,
         fileSize: file.size,
-        fileUrl: `/uploads/${path.basename(file.path)}`,
+        fileUrl: buildFileUrl(`/uploads/${path.basename(file.path)}`),
         filePath: file.path,
       },
     });

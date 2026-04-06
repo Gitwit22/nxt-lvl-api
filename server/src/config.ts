@@ -1,8 +1,15 @@
 import path from "path";
 
 export const PORT = Number(process.env.PORT || 4000);
+export const NODE_ENV = process.env.NODE_ENV || "development";
 export const API_PREFIX = "/api";
 export const UPLOAD_DIR = process.env.UPLOAD_DIR || path.resolve(process.cwd(), "uploads");
+
+// The public base URL of this backend (used to build absolute file URLs for the frontend)
+export const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+
+// Comma-separated list of allowed CORS origins (or "*" for dev)
+export const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 
 // Auth
 export const JWT_SECRET = process.env.JWT_SECRET || "changeme-dev-secret-replace-in-production";

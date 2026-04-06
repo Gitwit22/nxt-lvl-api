@@ -10,6 +10,8 @@
     "dev:full": "concurrently \"npm run dev:api\" \"npm run dev\"",
     "dev:stack": "node -e \"console.log('Starting API on http://localhost:4000 and web on http://localhost:8080 (or next free port).')\" && concurrently -k --names API,WEB --prefix-colors cyan,magenta \"npm run dev:api\" \"npm run dev\"",
     "build": "vite build",
+    "build:api": "prisma generate",
+    "start:api": "node --import tsx server/src/index.ts",
     "build:dev": "vite build --mode development",
     "lint": "eslint .",
     "preview": "vite preview",
@@ -19,6 +21,7 @@
     "test:all": "vitest run && vitest run --config server.vitest.config.ts",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
+    "db:migrate:deploy": "prisma migrate deploy",
     "db:push": "prisma db push"
   },
   "dependencies": {
