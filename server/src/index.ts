@@ -22,7 +22,13 @@ async function bootstrap() {
   });
 }
 
-void bootstrap();
+void bootstrap().catch((err) => {
+  logger.error("Failed to start server", {
+    error: err instanceof Error ? err.message : String(err),
+    stack: err instanceof Error ? err.stack : undefined,
+  });
+  process.exit(1);
+});
 
 process.on("SIGINT", async () => {
   stopProcessingWorker();
