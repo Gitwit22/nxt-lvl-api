@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useAuth } from "@/context/AuthContext";
+import { PROGRAM_DISPLAY_NAME } from "@/lib/programInfo";
 import type { LoginViewModel } from "@/auth/types";
 
 const INITIAL_FORM: LoginViewModel = {
@@ -66,7 +67,7 @@ export default function Login() {
             </div>
             <div>
               <h1 className="font-display text-xl font-bold text-foreground leading-tight">
-                Equity Research Vault
+                {PROGRAM_DISPLAY_NAME}
               </h1>
               <p className="text-xs text-muted-foreground font-body">
                 Civil Rights Document Archive
@@ -87,7 +88,7 @@ export default function Login() {
               Sign In
             </h2>
             <p className="text-muted-foreground font-body text-sm">
-              Access the Equity Research Vault archive
+              Access the {PROGRAM_DISPLAY_NAME} archive
             </p>
           </div>
 
@@ -195,7 +196,7 @@ export default function Login() {
       <footer className="border-t border-border py-6">
         <div className="container max-w-6xl text-center">
           <p className="text-xs text-muted-foreground font-body">
-            Equity Research Vault — Preserving civil rights history for researchers,
+            {PROGRAM_DISPLAY_NAME} — Preserving civil rights history for researchers,
             educators, and advocates.
           </p>
         </div>

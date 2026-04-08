@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import express from "express";
 import cors from "cors";
-import { API_PREFIX, UPLOAD_DIR, CORS_ORIGIN, BACKEND_URL } from "./config.js";
+import { API_PREFIX, UPLOAD_DIR, CORS_ORIGIN, BACKEND_URL, PROGRAM_DISPLAY_NAME, PROGRAM_SYSTEM_NAME } from "./config.js";
 import { prisma } from "./db.js";
 import { toApiDocument } from "./documentMapper.js";
 import { createDocumentPayload } from "./documentFactory.js";
@@ -100,7 +100,12 @@ function parseFilters(query: Record<string, unknown>) {
 app.get(`${API_PREFIX}/health`, async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ ok: true, timestamp: new Date().toISOString() });
+    res.json({
+      ok: true,
+      program: PROGRAM_DISPLAY_NAME,
+      systemName: PROGRAM_SYSTEM_NAME,
+      timestamp: new Date().toISOString(),
+    });
   } catch (err) {
     res.status(503).json({ ok: false, error: "Database unreachable" });
   }

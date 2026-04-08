@@ -1,6 +1,7 @@
 import { Link } from "react-router-dom";
 import { Shield, Globe, Database, Upload, Search, BookOpen, Users, FileText } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { PROGRAM_DISPLAY_NAME } from "@/lib/programInfo";
 
 const features = [
   {
@@ -53,7 +54,7 @@ export default function Landing() {
             </div>
             <div>
               <h1 className="font-display text-xl font-bold text-foreground leading-tight">
-                Equity Research Vault
+                {PROGRAM_DISPLAY_NAME}
               </h1>
               <p className="text-xs text-muted-foreground font-body">
                 Civil Rights Document Archive
@@ -71,7 +72,7 @@ export default function Landing() {
         <div className="container max-w-5xl py-24 text-center">
           <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-primary/10 text-primary text-sm font-body font-medium mb-8">
             <FileText className="h-4 w-4" />
-            Community Chronicle — Document Vault
+            {PROGRAM_DISPLAY_NAME} — Document Archive
           </div>
           <h2 className="font-display text-4xl md:text-6xl font-bold text-foreground mb-6 text-balance leading-tight">
             Decades of Justice,
@@ -155,7 +156,7 @@ export default function Landing() {
       <footer className="border-t border-border py-8 mt-auto">
         <div className="container max-w-6xl text-center">
           <p className="text-sm text-muted-foreground font-body">
-            Equity Research Vault — Preserving civil rights history for researchers,
+            {PROGRAM_DISPLAY_NAME} — Preserving civil rights history for researchers,
             educators, and advocates.
           </p>
         </div>

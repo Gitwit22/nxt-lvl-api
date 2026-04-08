@@ -4,6 +4,7 @@ import { Shield, Building2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { PROGRAM_DISPLAY_NAME, PROGRAM_SYSTEM_NAME } from "@/lib/programInfo";
 import {
   Card,
   CardContent,
@@ -60,7 +61,7 @@ export default function OrgSetup() {
           "Content-Type": "application/json",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ organizationName: name, programDomain: "community-chronicle" }),
+        body: JSON.stringify({ organizationName: name, programDomain: PROGRAM_SYSTEM_NAME }),
       });
 
       if (!res.ok) {
@@ -103,7 +104,7 @@ export default function OrgSetup() {
             </div>
             <div>
               <h1 className="font-display text-xl font-bold text-foreground leading-tight">
-                Equity Research Vault
+                {PROGRAM_DISPLAY_NAME}
               </h1>
               <p className="text-xs text-muted-foreground font-body">
                 Organization Setup
@@ -223,7 +224,7 @@ export default function OrgSetup() {
       <footer className="border-t border-border py-6">
         <div className="container max-w-6xl text-center">
           <p className="text-xs text-muted-foreground font-body">
-            Equity Research Vault — Preserving civil rights history for researchers,
+            {PROGRAM_DISPLAY_NAME} — Preserving civil rights history for researchers,
             educators, and advocates.
           </p>
         </div>

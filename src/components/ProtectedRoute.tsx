@@ -1,6 +1,7 @@
 import { Navigate } from "react-router-dom";
 import type { ReactNode } from "react";
 import { useAuth } from "@/context/AuthContext";
+import { PROGRAM_SYSTEM_NAME } from "@/lib/programInfo";
 
 const ROLE_LEVEL: Record<string, number> = {
   uploader: 1,
@@ -44,7 +45,7 @@ export function ProtectedRoute({
     return <Navigate to="/org-setup" replace />;
   }
 
-  if (!programDomain || programDomain !== "community-chronicle") {
+  if (!programDomain || programDomain !== PROGRAM_SYSTEM_NAME) {
     return <Navigate to="/org-setup" replace />;
   }
 

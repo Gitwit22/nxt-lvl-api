@@ -1,6 +1,7 @@
 import { Shield, AlertCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuth } from "@/contexts/AuthContext";
+import { PROGRAM_DISPLAY_NAME } from "@/lib/programInfo";
 
 /**
  * Shown when a user is authenticated but their account is missing valid
@@ -83,7 +84,7 @@ export default function OrgSetupPage() {
 
         <div className="flex items-center gap-2 justify-center text-xs text-muted-foreground font-body">
           <Shield className="h-3 w-3" />
-          <span>Community Chronicle · Tenant-scoped access</span>
+          <span>{PROGRAM_DISPLAY_NAME} · Tenant-scoped access</span>
         </div>
       </div>
     </div>

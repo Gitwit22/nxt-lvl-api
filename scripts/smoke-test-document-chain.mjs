@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 /**
- * Real end-to-end smoke test for Document Vault / Community Chronicle
+ * Real end-to-end smoke test for Community Chronicle
  *
  * What it verifies:
  * - Login/auth endpoint is real
@@ -107,7 +107,7 @@ function extractDocumentList(payload) {
 
 function makeTestFile(marker) {
   const content = `
-DOCUMENT VAULT REAL SMOKE TEST
+COMMUNITY CHRONICLE REAL SMOKE TEST
 Marker: ${marker}
 
 This file exists to prove the upload, persistence, and retrieval chain is real.

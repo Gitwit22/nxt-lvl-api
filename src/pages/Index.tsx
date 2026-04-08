@@ -26,6 +26,7 @@ import StorageSettingsPanel from "@/components/StorageSettingsPanel";
 import { useDocuments, useDocumentYears, useResolveReview } from "@/hooks/useDocuments";
 import { resolveReview } from "@/services/reviewQueueService";
 import { retryProcessing } from "@/services/processingPipeline";
+import { PROGRAM_DISPLAY_NAME, PROGRAM_SYSTEM_NAME } from "@/lib/programInfo";
 import type { ArchiveDocument, ReviewMetadata } from "@/types/document";
 
 const ROLE_LABEL: Record<string, string> = {
@@ -114,7 +115,7 @@ const Index = () => {
             </div>
             <div>
               <h1 className="font-display text-xl font-bold text-foreground leading-tight">
-                Equity Research Vault
+                {PROGRAM_DISPLAY_NAME}
               </h1>
               <p className="text-xs text-muted-foreground font-body">
                 Civil Rights Document Archive
@@ -173,7 +174,7 @@ const Index = () => {
                     </div>
                     <div className="flex items-center gap-2 text-xs text-muted-foreground font-body">
                       <Settings className="h-3 w-3 shrink-0" />
-                      <span className="truncate">{programDomain || "community-chronicle"}</span>
+                      <span className="truncate">{programDomain || PROGRAM_SYSTEM_NAME}</span>
                     </div>
                     <Badge variant="secondary" className="text-xs font-body h-5">
                       {ROLE_LABEL[role ?? ""] ?? role}
@@ -346,7 +347,7 @@ const Index = () => {
       <footer className="border-t border-border py-8">
         <div className="container max-w-6xl text-center">
           <p className="text-sm text-muted-foreground font-body">
-            Equity Research Vault — Preserving civil rights history for researchers, educators, and advocates.
+            {PROGRAM_DISPLAY_NAME} — Preserving civil rights history for researchers, educators, and advocates.
           </p>
         </div>
       </footer>

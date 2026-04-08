@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useAuth } from "@/contexts/AuthContext";
+import { PROGRAM_DISPLAY_NAME } from "@/lib/programInfo";
 
 export default function LoginPage() {
   const { login, user, isLoading } = useAuth();
@@ -48,7 +49,7 @@ export default function LoginPage() {
           </div>
           <div className="text-center">
             <h1 className="font-display text-2xl font-bold text-foreground">
-              Community Chronicle
+              {PROGRAM_DISPLAY_NAME}
             </h1>
             <p className="text-sm text-muted-foreground font-body mt-1">
               Sign in to your account
