@@ -5,6 +5,8 @@ import request from "supertest";
 vi.mock("../src/db.js", () => {
   const doc = {
     id: "doc-1",
+    organizationId: "default-org",
+    programDomain: "community-chronicle",
     title: "Test Doc",
     description: "",
     author: "Test",
@@ -42,6 +44,7 @@ vi.mock("../src/db.js", () => {
     searchIndex: null,
     needsReview: false,
     aiSummary: "",
+    createdByUserId: null,
     uploadedById: null,
     reviewedById: null,
   };
@@ -51,6 +54,7 @@ vi.mock("../src/db.js", () => {
       $queryRaw: vi.fn().mockResolvedValue([]),
       document: {
         findMany: vi.fn().mockResolvedValue([doc]),
+        findFirst: vi.fn().mockResolvedValue(doc),
         findUnique: vi.fn().mockResolvedValue(doc),
         findUniqueOrThrow: vi.fn().mockResolvedValue(doc),
         create: vi.fn().mockResolvedValue(doc),
@@ -92,6 +96,8 @@ beforeEach(() => {
   // Re-apply default mock return values after clearAllMocks
   const doc = {
     id: "doc-1",
+    organizationId: "default-org",
+    programDomain: "community-chronicle",
     title: "Test Doc",
     description: "",
     author: "Test",
@@ -129,10 +135,12 @@ beforeEach(() => {
     searchIndex: null,
     needsReview: false,
     aiSummary: "",
+    createdByUserId: null,
     uploadedById: null,
     reviewedById: null,
   };
   (prisma.document.findMany as ReturnType<typeof vi.fn>).mockResolvedValue([doc]);
+  (prisma.document.findFirst as ReturnType<typeof vi.fn>).mockResolvedValue(doc);
   (prisma.document.findUnique as ReturnType<typeof vi.fn>).mockResolvedValue(doc);
   (prisma.document.findUniqueOrThrow as ReturnType<typeof vi.fn>).mockResolvedValue(doc);
   (prisma.document.create as ReturnType<typeof vi.fn>).mockResolvedValue(doc);
@@ -147,7 +155,7 @@ describe("GET /api/health", () => {
   it("returns ok: true", async () => {
     const res = await request(app).get("/api/health");
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true });
+    expect(res.body.ok).toBe(true);
   });
 });
 
@@ -155,15 +163,17 @@ describe("GET /api/health", () => {
 // GET /api/documents
 // ---------------------------------------------------------------------------
 describe("GET /api/documents", () => {
-  it("returns document list without auth", async () => {
+  it("returns 401 without auth", async () => {
     const res = await request(app).get("/api/documents");
-    expect(res.status).toBe(200);
-    expect(Array.isArray(res.body)).toBe(true);
+    expect(res.status).toBe(401);
   });
 
-  it("supports search filter", async () => {
-    const res = await request(app).get("/api/documents?search=test");
+  it("supports search filter for authenticated users", async () => {
+    const res = await request(app)
+      .get("/api/documents?search=test")
+      .set("Authorization", reviewerToken());
     expect(res.status).toBe(200);
+    expect(Array.isArray(res.body)).toBe(true);
   });
 });
 
@@ -171,15 +181,24 @@ describe("GET /api/documents", () => {
 // GET /api/documents/:id
 // ---------------------------------------------------------------------------
 describe("GET /api/documents/:id", () => {
-  it("returns document by id", async () => {
+  it("returns 401 without auth", async () => {
     const res = await request(app).get("/api/documents/doc-1");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns document by id for authenticated users", async () => {
+    const res = await request(app)
+      .get("/api/documents/doc-1")
+      .set("Authorization", reviewerToken());
     expect(res.status).toBe(200);
     expect(res.body.id).toBe("doc-1");
   });
 
   it("returns 404 for unknown id", async () => {
-    (prisma.document.findUnique as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
-    const res = await request(app).get("/api/documents/nonexistent");
+    (prisma.document.findFirst as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    const res = await request(app)
+      .get("/api/documents/nonexistent")
+      .set("Authorization", reviewerToken());
     expect(res.status).toBe(404);
   });
 });
@@ -255,7 +274,7 @@ describe("PATCH /api/documents/:id", () => {
   });
 
   it("returns 404 for unknown doc", async () => {
-    (prisma.document.findUnique as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (prisma.document.findFirst as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
     const res = await request(app)
       .patch("/api/documents/unknown")
       .set("Authorization", reviewerToken())
@@ -347,7 +366,7 @@ describe("POST /api/review-queue/:id/resolve", () => {
   });
 
   it("returns 404 for unknown doc", async () => {
-    (prisma.document.findUnique as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
+    (prisma.document.findFirst as ReturnType<typeof vi.fn>).mockResolvedValueOnce(null);
     const res = await request(app)
       .post("/api/review-queue/unknown/resolve")
       .set("Authorization", reviewerToken())

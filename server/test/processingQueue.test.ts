@@ -25,6 +25,7 @@ vi.mock("../src/db.js", () => ({ prisma: prismaMock }));
 // Config mock (keep MAX_ATTEMPTS controllable)
 // ---------------------------------------------------------------------------
 vi.mock("../src/config.js", () => ({
+  CURRENT_PROGRAM_DOMAIN: "community-chronicle",
   MAX_ATTEMPTS: 3,
   JOB_TIMEOUT_MS: 5000,
   RETRY_BACKOFF_BASE_MS: 100, // short for tests
@@ -45,6 +46,8 @@ import fs from "fs/promises";
 const mockJob = {
   id: "job-1",
   documentId: "doc-1",
+  organizationId: "default-org",
+  programDomain: "community-chronicle",
   attempts: 1,
   maxAttempts: 3,
   errorLog: null,

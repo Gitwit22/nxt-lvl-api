@@ -5,6 +5,8 @@ import { signToken } from "../src/auth.js";
 vi.mock("../src/db.js", () => {
   const job = {
     id: "job-1",
+    organizationId: "default-org",
+    programDomain: "community-chronicle",
     documentId: "doc-1",
     document: {
       id: "doc-1",
@@ -81,6 +83,8 @@ describe("GET /api/jobs", () => {
   it("returns job list for admin", async () => {
     const job = {
       id: "job-1",
+      organizationId: "default-org",
+      programDomain: "community-chronicle",
       documentId: "doc-1",
       document: {
         id: "doc-1",
@@ -119,6 +123,8 @@ describe("GET /api/jobs", () => {
 
     const call = (prisma.processingJob.findMany as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(call.where.status).toBe("failed");
+    expect(call.where.organizationId).toBe("default-org");
+    expect(call.where.programDomain).toBe("community-chronicle");
   });
 });
 

@@ -1,6 +1,7 @@
 import express from "express";
 import { prisma } from "./db.js";
 import { requireAuth, requireRole } from "./auth.js";
+import { getRequestTenantScope } from "./tenant.js";
 
 const router = express.Router();
 
@@ -10,9 +11,14 @@ router.get("/", requireAuth, requireRole("admin"), async (req, res) => {
   const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
   const statusFilter =
     typeof req.query.status === "string" ? req.query.status : undefined;
+  const tenantScope = getRequestTenantScope(req);
 
   const jobs = await prisma.processingJob.findMany({
-    where: statusFilter ? { status: statusFilter } : undefined,
+    where: {
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+      ...(statusFilter ? { status: statusFilter } : {}),
+    },
     orderBy: { createdAt: "desc" },
     take: limit,
     include: {
@@ -57,18 +63,24 @@ router.get("/", requireAuth, requireRole("admin"), async (req, res) => {
 });
 
 // GET /api/jobs/stats — aggregate queue statistics (admin only)
-router.get("/stats", requireAuth, requireRole("admin"), async (_req, res) => {
+router.get("/stats", requireAuth, requireRole("admin"), async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const baseWhere = {
+    organizationId: tenantScope.organizationId,
+    programDomain: tenantScope.programDomain,
+  };
   const [queued, processing, completed, failed, deadLetter] = await Promise.all([
-    prisma.processingJob.count({ where: { status: "queued" } }),
-    prisma.processingJob.count({ where: { status: "processing" } }),
-    prisma.processingJob.count({ where: { status: "completed" } }),
-    prisma.processingJob.count({ where: { status: "failed" } }),
-    prisma.processingJob.count({ where: { status: "dead_letter" } }),
+    prisma.processingJob.count({ where: { ...baseWhere, status: "queued" } }),
+    prisma.processingJob.count({ where: { ...baseWhere, status: "processing" } }),
+    prisma.processingJob.count({ where: { ...baseWhere, status: "completed" } }),
+    prisma.processingJob.count({ where: { ...baseWhere, status: "failed" } }),
+    prisma.processingJob.count({ where: { ...baseWhere, status: "dead_letter" } }),
   ]);
 
   // Average processing time for completed jobs (milliseconds)
   const completedJobs = await prisma.processingJob.findMany({
     where: {
+      ...baseWhere,
       status: "completed",
       startedAt: { not: null },
       completedAt: { not: null },

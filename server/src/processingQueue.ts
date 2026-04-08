@@ -4,6 +4,7 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "./db.js";
 import { logger } from "./logger.js";
 import {
+  CURRENT_PROGRAM_DOMAIN,
   MAX_ATTEMPTS,
   JOB_TIMEOUT_MS,
   RETRY_BACKOFF_BASE_MS,
@@ -11,6 +12,7 @@ import {
   OCR_CONFIDENCE_REVIEW_THRESHOLD,
   MAX_FILE_SIZE_BYTES,
 } from "./config.js";
+import type { TenantScope } from "./tenant.js";
 
 let workerRunning = false;
 let workerTimer: NodeJS.Timeout | null = null;
@@ -388,9 +390,12 @@ async function compareAgainstExistingDocuments(
   year: number,
   autoLabels: AutoLabelingResult,
   fingerprint: Fingerprint,
+  tenantScope: TenantScope,
 ): Promise<SimilarityResult> {
   const candidates = await prisma.document.findMany({
     where: {
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
       id: { not: documentId },
       extractedText: { not: "" },
     },
@@ -498,9 +503,12 @@ async function assignDocumentFamily(
   year: number,
   month: number | null,
   autoLabels: AutoLabelingResult,
+  tenantScope: TenantScope,
 ): Promise<FamilyResult> {
   const candidates = await prisma.document.findMany({
     where: {
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
       id: { not: documentId },
       year: { gte: year - 1, lte: year + 1 },
     },
@@ -635,9 +643,16 @@ function asStringArray(value: unknown): string[] {
   return value.map((item) => String(item));
 }
 
-async function resolveStableTaxonomy(autoLabels: AutoLabelingResult): Promise<{ stableCategory: string; confidence: number }> {
+async function resolveStableTaxonomy(
+  autoLabels: AutoLabelingResult,
+  tenantScope: TenantScope,
+): Promise<{ stableCategory: string; confidence: number }> {
   const fallback = buildStableTaxonomyKey(autoLabels);
   const docs = await prisma.document.findMany({
+    where: {
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+    },
     select: { classificationResult: true },
     take: 300,
     orderBy: { updatedAt: "desc" },
@@ -924,6 +939,7 @@ async function handleJobFailure(
 async function processSingleJob(): Promise<void> {
   const job = await prisma.processingJob.findFirst({
     where: {
+      programDomain: CURRENT_PROGRAM_DOMAIN,
       status: "queued",
       scheduledAt: { lte: new Date() },
     },
@@ -948,6 +964,10 @@ async function processSingleJob(): Promise<void> {
     where: { id: job.id },
     include: { document: true },
   });
+  const tenantScope: TenantScope = {
+    organizationId: updatedJob.organizationId,
+    programDomain: updatedJob.programDomain,
+  };
 
   await prisma.document.update({
     where: { id: job.documentId },
@@ -995,6 +1015,7 @@ async function processSingleJob(): Promise<void> {
       job.document.year,
       autoLabels,
       fingerprint,
+      tenantScope,
     );
     const family = await assignDocumentFamily(
       job.documentId,
@@ -1003,8 +1024,9 @@ async function processSingleJob(): Promise<void> {
       job.document.year,
       job.document.month,
       autoLabels,
+      tenantScope,
     );
-    const taxonomy = await resolveStableTaxonomy(autoLabels);
+    const taxonomy = await resolveStableTaxonomy(autoLabels, tenantScope);
 
     const existingTags = asStringArray(job.document.tags);
     const topicTags = autoLabels.topicLabels.map((topic) => topic.label);
@@ -1201,6 +1223,7 @@ async function tick(): Promise<void> {
 
 export async function enqueueProcessing(
   documentId: string,
+  tenantScope: TenantScope,
   options?: { maxAttempts?: number; delayMs?: number },
 ): Promise<void> {
   const scheduledAt = options?.delayMs
@@ -1209,6 +1232,8 @@ export async function enqueueProcessing(
   await prisma.processingJob.create({
     data: {
       documentId,
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
       status: "queued",
       scheduledAt,
       maxAttempts: options?.maxAttempts ?? MAX_ATTEMPTS,

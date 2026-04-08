@@ -1,4 +1,5 @@
 import type { ArchiveDocument, DocumentFilters, DocumentIntakeInput, ReviewMetadata } from "@/types/document";
+import { getAuthHeaders } from "@/lib/tokenStorage";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
@@ -53,12 +54,16 @@ function appendOptionalMetadata(formData: FormData, metadata?: Partial<DocumentI
 }
 
 export async function apiGetAllDocuments(filters: DocumentFilters = {}): Promise<ArchiveDocument[]> {
-  const response = await fetch(`${API_BASE}/documents${buildQuery(filters)}`);
+  const response = await fetch(`${API_BASE}/documents${buildQuery(filters)}`, {
+    headers: getAuthHeaders(),
+  });
   return parseJsonResponse<ArchiveDocument[]>(response);
 }
 
 export async function apiGetDocumentById(id: string): Promise<ArchiveDocument | undefined> {
-  const response = await fetch(`${API_BASE}/documents/${id}`);
+  const response = await fetch(`${API_BASE}/documents/${id}`, {
+    headers: getAuthHeaders(),
+  });
   if (response.status === 404) return undefined;
   return parseJsonResponse<ArchiveDocument>(response);
 }
@@ -73,6 +78,7 @@ export async function apiUploadSingleFile(
 
   const response = await fetch(`${API_BASE}/documents/upload`, {
     method: "POST",
+    headers: getAuthHeaders(),
     body: formData,
   });
 
@@ -89,6 +95,7 @@ export async function apiUploadMultipleFiles(
 
   const response = await fetch(`${API_BASE}/documents/upload/batch`, {
     method: "POST",
+    headers: getAuthHeaders(),
     body: formData,
   });
 
@@ -100,9 +107,7 @@ export async function apiCreateManualEntry(
 ): Promise<ArchiveDocument> {
   const response = await fetch(`${API_BASE}/documents/manual`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(input),
   });
 
@@ -115,9 +120,7 @@ export async function apiUpdateDocument(
 ): Promise<ArchiveDocument> {
   const response = await fetch(`${API_BASE}/documents/${id}`, {
     method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(updates),
   });
 
@@ -127,6 +130,7 @@ export async function apiUpdateDocument(
 export async function apiDeleteDocument(id: string): Promise<boolean> {
   const response = await fetch(`${API_BASE}/documents/${id}`, {
     method: "DELETE",
+    headers: getAuthHeaders(),
   });
 
   if (response.status === 404) return false;
@@ -137,13 +141,16 @@ export async function apiDeleteDocument(id: string): Promise<boolean> {
 export async function apiRetryProcessing(id: string): Promise<ArchiveDocument> {
   const response = await fetch(`${API_BASE}/documents/${id}/retry`, {
     method: "POST",
+    headers: getAuthHeaders(),
   });
 
   return parseJsonResponse<ArchiveDocument>(response);
 }
 
 export async function apiGetReviewQueue(): Promise<ArchiveDocument[]> {
-  const response = await fetch(`${API_BASE}/review-queue`);
+  const response = await fetch(`${API_BASE}/review-queue`, {
+    headers: getAuthHeaders(),
+  });
   return parseJsonResponse<ArchiveDocument[]>(response);
 }
 
@@ -154,9 +161,7 @@ export async function apiResolveReview(
 ): Promise<ArchiveDocument> {
   const response = await fetch(`${API_BASE}/review-queue/${docId}/resolve`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ resolution, notes }),
   });
 
@@ -170,9 +175,7 @@ export async function apiMarkForReview(
 ): Promise<ArchiveDocument> {
   const response = await fetch(`${API_BASE}/review-queue/${docId}/mark`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ reasons, priority }),
   });
 

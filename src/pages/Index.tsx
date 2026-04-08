@@ -1,7 +1,16 @@
 import { useState, useMemo } from "react";
-import { Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe, PenLine, LayoutDashboard, Eye, Settings } from "lucide-react";
+import { Clock, FileText, Search as SearchIcon, Shield, Database, Upload, Globe, PenLine, LayoutDashboard, Eye, Settings, LogOut, User, Building2, ChevronDown } from "lucide-react";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Badge } from "@/components/ui/badge";
 import SearchBar from "@/components/SearchBar";
 import FilterBar from "@/components/FilterBar";
 import DocumentCard from "@/components/DocumentCard";
@@ -16,8 +25,16 @@ import { useDocuments, useDocumentYears, useResolveReview } from "@/hooks/useDoc
 import { resolveReview } from "@/services/reviewQueueService";
 import { retryProcessing } from "@/services/processingPipeline";
 import type { ArchiveDocument, ReviewMetadata } from "@/types/document";
+import { useAuth } from "@/contexts/AuthContext";
+
+const ROLE_LABEL: Record<string, string> = {
+  admin: "Admin",
+  reviewer: "Reviewer",
+  uploader: "Uploader",
+};
 
 const Index = () => {
+  const { user, organizationId, programDomain, role, logout } = useAuth();
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState({ year: "", month: "", category: "", type: "", financialCategory: "", financialDocumentType: "", intakeSource: "", processingStatus: "" });
   const [selectedDoc, setSelectedDoc] = useState<ArchiveDocument | null>(null);
@@ -97,7 +114,7 @@ const Index = () => {
               </p>
             </div>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3">
             <div className="flex items-center gap-2 text-sm text-muted-foreground font-body">
               <FileText className="h-4 w-4" />
               <span>{documentCount} documents</span>
@@ -119,6 +136,58 @@ const Index = () => {
               <PenLine className="h-4 w-4" />
               New Entry
             </Button>
+
+            {/* Account / org menu */}
+            {user && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="sm" className="gap-2 font-body text-sm">
+                    <User className="h-4 w-4" />
+                    <span className="hidden sm:inline max-w-[120px] truncate">
+                      {user.displayName || user.email}
+                    </span>
+                    <ChevronDown className="h-3 w-3 text-muted-foreground" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-60">
+                  <DropdownMenuLabel className="font-normal">
+                    <div className="flex flex-col gap-1">
+                      <p className="text-sm font-medium font-body leading-none">
+                        {user.displayName || user.email}
+                      </p>
+                      <p className="text-xs text-muted-foreground font-body truncate">
+                        {user.email}
+                      </p>
+                    </div>
+                  </DropdownMenuLabel>
+                  <DropdownMenuSeparator />
+                  <div className="px-2 py-1.5 space-y-1.5">
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground font-body">
+                      <Building2 className="h-3 w-3 shrink-0" />
+                      <span className="truncate">{organizationId ?? "—"}</span>
+                    </div>
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground font-body">
+                      <Settings className="h-3 w-3 shrink-0" />
+                      <span className="truncate">{programDomain ?? "—"}</span>
+                    </div>
+                    <Badge
+                      variant="secondary"
+                      className="text-xs font-body h-5"
+                    >
+                      {ROLE_LABEL[role ?? ""] ?? role}
+                    </Badge>
+                  </div>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    className="gap-2 font-body text-destructive focus:text-destructive cursor-pointer"
+                    onClick={logout}
+                  >
+                    <LogOut className="h-4 w-4" />
+                    Sign out
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </div>
         </div>
       </header>

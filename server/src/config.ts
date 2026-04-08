@@ -4,6 +4,9 @@ export const PORT = Number(process.env.PORT || 4000);
 export const NODE_ENV = process.env.NODE_ENV || "development";
 export const API_PREFIX = "/api";
 export const UPLOAD_DIR = process.env.UPLOAD_DIR || path.resolve(process.cwd(), "uploads");
+export const DEFAULT_ORGANIZATION_ID = process.env.DEFAULT_ORGANIZATION_ID || "default-org";
+export const CURRENT_PROGRAM_DOMAIN =
+  process.env.CURRENT_PROGRAM_DOMAIN || "community-chronicle";
 
 // The public base URL of this backend (used to build absolute file URLs for the frontend)
 export const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;

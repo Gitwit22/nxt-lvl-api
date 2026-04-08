@@ -9,6 +9,7 @@ datasource db {
 
 model User {
   id           String   @id @default(cuid())
+  organizationId String @default("default-org")
   email        String   @unique
   passwordHash String
   role         String   @default("uploader")
@@ -16,12 +17,18 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  createdDocuments  Document[] @relation("CreatedBy")
   uploadedDocuments Document[] @relation("UploadedBy")
   reviewedDocuments Document[] @relation("ReviewedBy")
+
+  @@unique([organizationId, email])
+  @@index([organizationId])
 }
 
 model Document {
   id                    String    @id
+  organizationId        String    @default("default-org")
+  programDomain         String    @default("community-chronicle")
   title                 String
   description           String    @default("")
   author                String    @default("Unknown")
@@ -60,16 +67,23 @@ model Document {
   needsReview           Boolean   @default(false)
   aiSummary             String    @default("") @db.Text
 
+  createdByUserId String?
   uploadedById  String?
   reviewedById  String?
+  createdBy     User?   @relation("CreatedBy", fields: [createdByUserId], references: [id])
   uploadedBy    User?   @relation("UploadedBy", fields: [uploadedById], references: [id])
   reviewedBy    User?   @relation("ReviewedBy", fields: [reviewedById], references: [id])
 
   jobs ProcessingJob[]
+
+  @@index([organizationId, programDomain, createdAt])
+  @@index([organizationId, programDomain, needsReview, updatedAt])
 }
 
 model ProcessingJob {
   id          String    @id @default(cuid())
+  organizationId String @default("default-org")
+  programDomain  String @default("community-chronicle")
   documentId  String
   status      String    @default("queued")
   attempts    Int       @default(0)
@@ -87,4 +101,5 @@ model ProcessingJob {
 
   @@index([status, scheduledAt])
   @@index([documentId])
+  @@index([organizationId, programDomain, status, scheduledAt])
 }

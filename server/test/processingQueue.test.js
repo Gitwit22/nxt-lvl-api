@@ -14,6 +14,7 @@ const prismaMock = vi.hoisted(() => ({
     document: {
         update: vi.fn(),
         findUniqueOrThrow: vi.fn(),
+        findMany: vi.fn(),
     },
 }));
 vi.mock("../src/db.js", () => ({ prisma: prismaMock }));
@@ -21,6 +22,7 @@ vi.mock("../src/db.js", () => ({ prisma: prismaMock }));
 // Config mock (keep MAX_ATTEMPTS controllable)
 // ---------------------------------------------------------------------------
 vi.mock("../src/config.js", () => ({
+    CURRENT_PROGRAM_DOMAIN: "community-chronicle",
     MAX_ATTEMPTS: 3,
     JOB_TIMEOUT_MS: 5000,
     RETRY_BACKOFF_BASE_MS: 100, // short for tests
@@ -39,6 +41,8 @@ import fs from "fs/promises";
 const mockJob = {
     id: "job-1",
     documentId: "doc-1",
+    organizationId: "default-org",
+    programDomain: "community-chronicle",
     attempts: 1,
     maxAttempts: 3,
     errorLog: null,
@@ -55,6 +59,10 @@ const mockJob = {
         title: "Test Doc",
         description: "desc",
         author: "Author",
+        year: 2024,
+        month: 3,
+        tags: [],
+        sourceReference: null,
         filePath: null,
         mimeType: null,
         processingHistory: [],
@@ -64,6 +72,7 @@ beforeEach(() => {
     vi.clearAllMocks();
     prismaMock.processingJob.update.mockResolvedValue(mockJob);
     prismaMock.document.update.mockResolvedValue({});
+    prismaMock.document.findMany.mockResolvedValue([]);
 });
 // ---------------------------------------------------------------------------
 // runExtraction unit tests

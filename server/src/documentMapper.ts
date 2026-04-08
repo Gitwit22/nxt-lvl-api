@@ -1,4 +1,5 @@
 import type { Document } from "@prisma/client";
+import { API_PREFIX } from "./config.js";
 
 type JsonObject = Record<string, unknown>;
 
@@ -40,7 +41,7 @@ export function toApiDocument(doc: Document) {
     originalFileName: doc.originalFileName ?? undefined,
     mimeType: doc.mimeType ?? undefined,
     fileSize: doc.fileSize ?? undefined,
-    fileUrl: doc.fileUrl,
+    fileUrl: `${API_PREFIX}/documents/${doc.id}/download`,
     processingStatus: doc.processingStatus,
     ocrStatus: doc.ocrStatus,
     extractedText: doc.extractedText,

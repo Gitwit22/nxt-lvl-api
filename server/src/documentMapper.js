@@ -1,3 +1,4 @@
+import { API_PREFIX } from "./config.js";
 function asStringArray(value) {
     if (Array.isArray(value)) {
         return value.map((item) => String(item));
@@ -33,7 +34,7 @@ export function toApiDocument(doc) {
         originalFileName: doc.originalFileName ?? undefined,
         mimeType: doc.mimeType ?? undefined,
         fileSize: doc.fileSize ?? undefined,
-        fileUrl: doc.fileUrl,
+        fileUrl: `${API_PREFIX}/documents/${doc.id}/download`,
         processingStatus: doc.processingStatus,
         ocrStatus: doc.ocrStatus,
         extractedText: doc.extractedText,

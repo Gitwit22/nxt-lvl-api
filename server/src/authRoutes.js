@@ -1,7 +1,9 @@
 import express from "express";
 import { prisma } from "./db.js";
 import { hashPassword, verifyPassword, signToken, requireAuth, requireRole, getRequestUser, } from "./auth.js";
+import { CURRENT_PROGRAM_DOMAIN } from "./config.js";
 import { logger } from "./logger.js";
+import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
 const router = express.Router();
 // POST /api/auth/login
 router.post("/login", async (req, res) => {
@@ -24,11 +26,30 @@ router.post("/login", async (req, res) => {
         res.status(401).json({ error: "Invalid credentials" });
         return;
     }
-    const token = signToken({ userId: user.id, email: user.email, role: user.role });
-    logger.info("User logged in", { userId: user.id, role: user.role });
+    const tenantScope = getTenantScopeForUser(user);
+    const token = signToken({
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        organizationId: tenantScope.organizationId,
+        programDomain: CURRENT_PROGRAM_DOMAIN,
+    });
+    logger.info("User logged in", {
+        userId: user.id,
+        role: user.role,
+        organizationId: tenantScope.organizationId,
+        programDomain: CURRENT_PROGRAM_DOMAIN,
+    });
     res.json({
         token,
-        user: { id: user.id, email: user.email, role: user.role, displayName: user.displayName },
+        user: {
+            id: user.id,
+            email: user.email,
+            role: user.role,
+            displayName: user.displayName,
+            organizationId: tenantScope.organizationId,
+            programDomain: CURRENT_PROGRAM_DOMAIN,
+        },
     });
 });
 // POST /api/auth/register  (admin only after first user)
@@ -65,12 +86,33 @@ router.post("/register", (req, res, next) => {
         return;
     }
     const passwordHash = await hashPassword(password);
+    const tenantScope = getRequestUser(req)
+        ? getTenantScopeForUser(getRequestUser(req))
+        : getDefaultTenantScope();
     const user = await prisma.user.create({
-        data: { email, passwordHash, role, displayName },
+        data: {
+            organizationId: tenantScope.organizationId,
+            email,
+            passwordHash,
+            role,
+            displayName,
+        },
     });
-    logger.info("User registered", { userId: user.id, role: user.role });
+    logger.info("User registered", {
+        userId: user.id,
+        role: user.role,
+        organizationId: tenantScope.organizationId,
+        programDomain: CURRENT_PROGRAM_DOMAIN,
+    });
     res.status(201).json({
-        user: { id: user.id, email: user.email, role: user.role, displayName: user.displayName },
+        user: {
+            id: user.id,
+            email: user.email,
+            role: user.role,
+            displayName: user.displayName,
+            organizationId: tenantScope.organizationId,
+            programDomain: CURRENT_PROGRAM_DOMAIN,
+        },
     });
 });
 // GET /api/auth/me
@@ -86,7 +128,14 @@ router.get("/me", requireAuth, async (req, res) => {
         return;
     }
     res.json({
-        user: { id: user.id, email: user.email, role: user.role, displayName: user.displayName },
+        user: {
+            id: user.id,
+            email: user.email,
+            role: user.role,
+            displayName: user.displayName,
+            organizationId: user.organizationId,
+            programDomain: CURRENT_PROGRAM_DOMAIN,
+        },
     });
 });
 // Timing-safe dummy hash comparison to prevent user enumeration on login miss

@@ -8,6 +8,7 @@ import { toApiDocument } from "./documentMapper.js";
 import { createDocumentPayload } from "./documentFactory.js";
 import { enqueueProcessing } from "./processingQueue.js";
 import { requireAuth, requireRole, getRequestUser } from "./auth.js";
+import { getRequestTenantScope, type TenantScope } from "./tenant.js";
 import { upload } from "./validators.js";
 import { logger } from "./logger.js";
 import { authRouter } from "./authRoutes.js";
@@ -26,7 +27,6 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "10mb" }));
-app.use("/uploads", express.static(UPLOAD_DIR));
 
 /** Build a file URL that the frontend can use. In production, prefix with BACKEND_URL. */
 function buildFileUrl(relativePath: string): string {
@@ -70,6 +70,22 @@ function parseRouteId(value: string | string[] | undefined): string | null {
   return null;
 }
 
+function getDocumentScope(scope: TenantScope) {
+  return {
+    organizationId: scope.organizationId,
+    programDomain: scope.programDomain,
+  };
+}
+
+async function findScopedDocument(id: string, scope: TenantScope) {
+  return prisma.document.findFirst({
+    where: {
+      id,
+      ...getDocumentScope(scope),
+    },
+  });
+}
+
 function parseFilters(query: Record<string, unknown>) {
   return {
     search: typeof query.search === "string" ? query.search.toLowerCase() : undefined,
@@ -90,9 +106,19 @@ app.get(`${API_PREFIX}/health`, async (_req, res) => {
   }
 });
 
-app.get(`${API_PREFIX}/documents`, async (req, res) => {
-  const docs = await prisma.document.findMany({ orderBy: { createdAt: "desc" } });
+app.get(`${API_PREFIX}/documents`, requireAuth, async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
   const filters = parseFilters(req.query as Record<string, unknown>);
+  const docs = await prisma.document.findMany({
+    where: {
+      ...getDocumentScope(tenantScope),
+      year: filters.year,
+      category: filters.category,
+      processingStatus: filters.processingStatus,
+      intakeSource: filters.intakeSource,
+    },
+    orderBy: { createdAt: "desc" },
+  });
 
   const filtered = docs.filter((doc: (typeof docs)[number]) => {
     if (filters.search) {
@@ -111,8 +137,15 @@ app.get(`${API_PREFIX}/documents`, async (req, res) => {
   res.json(filtered.map(toApiDocument));
 });
 
-app.get(`${API_PREFIX}/documents/:id`, async (req, res) => {
-  const doc = await prisma.document.findUnique({ where: { id: req.params.id } });
+app.get(`${API_PREFIX}/documents/:id`, requireAuth, async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const id = parseRouteId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Invalid document id" });
+    return;
+  }
+
+  const doc = await findScopedDocument(id, tenantScope);
   if (!doc) {
     res.status(404).json({ error: "Document not found" });
     return;
@@ -120,8 +153,32 @@ app.get(`${API_PREFIX}/documents/:id`, async (req, res) => {
   res.json(toApiDocument(doc));
 });
 
+app.get(`${API_PREFIX}/documents/:id/download`, requireAuth, async (req, res) => {
+  const id = parseRouteId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Invalid document id" });
+    return;
+  }
+
+  const tenantScope = getRequestTenantScope(req);
+  const doc = await findScopedDocument(id, tenantScope);
+  if (!doc?.filePath) {
+    res.status(404).json({ error: "File not found" });
+    return;
+  }
+
+  if (!fs.existsSync(doc.filePath)) {
+    res.status(404).json({ error: "Stored file is missing" });
+    return;
+  }
+
+  res.download(doc.filePath, doc.originalFileName ?? path.basename(doc.filePath));
+});
+
 app.post(`${API_PREFIX}/documents/manual`, requireAuth, requireRole("uploader"), async (req, res) => {
   const body = req.body as Record<string, unknown>;
+  const user = getRequestUser(req);
+  const tenantScope = getRequestTenantScope(req);
 
   const payload = createDocumentPayload({
     title: typeof body.title === "string" ? body.title : undefined,
@@ -143,9 +200,19 @@ app.post(`${API_PREFIX}/documents/manual`, requireAuth, requireRole("uploader"),
   });
 
   const created = await prisma.document.create({
-    data: { ...payload, uploadedById: getRequestUser(req)?.userId ?? null } as never,
+    data: {
+      ...payload,
+      ...getDocumentScope(tenantScope),
+      createdByUserId: user?.userId ?? null,
+      uploadedById: user?.userId ?? null,
+    } as never,
   });
-  logger.info("Manual document created", { docId: created.id, userId: getRequestUser(req)?.userId });
+  logger.info("Manual document created", {
+    docId: created.id,
+    userId: user?.userId,
+    organizationId: tenantScope.organizationId,
+    programDomain: tenantScope.programDomain,
+  });
   res.status(201).json(toApiDocument(created));
 });
 
@@ -156,6 +223,8 @@ app.post(`${API_PREFIX}/documents/upload`, requireAuth, requireRole("uploader"),
   }
 
   const body = req.body as Record<string, unknown>;
+  const user = getRequestUser(req);
+  const tenantScope = getRequestTenantScope(req);
   const payload = createDocumentPayload({
     title: typeof body.title === "string" ? body.title : undefined,
     description: typeof body.description === "string" ? body.description : undefined,
@@ -182,10 +251,21 @@ app.post(`${API_PREFIX}/documents/upload`, requireAuth, requireRole("uploader"),
   });
 
   const created = await prisma.document.create({
-    data: { ...payload, uploadedById: getRequestUser(req)?.userId ?? null } as never,
+    data: {
+      ...payload,
+      ...getDocumentScope(tenantScope),
+      createdByUserId: user?.userId ?? null,
+      uploadedById: user?.userId ?? null,
+    } as never,
   });
-  await enqueueProcessing(created.id);
-  logger.info("File uploaded", { docId: created.id, file: req.file!.originalname, userId: getRequestUser(req)?.userId });
+  await enqueueProcessing(created.id, tenantScope);
+  logger.info("File uploaded", {
+    docId: created.id,
+    file: req.file!.originalname,
+    userId: user?.userId,
+    organizationId: tenantScope.organizationId,
+    programDomain: tenantScope.programDomain,
+  });
   res.status(201).json(toApiDocument(created));
 });
 
@@ -197,6 +277,8 @@ app.post(`${API_PREFIX}/documents/upload/batch`, requireAuth, requireRole("uploa
   }
 
   const intakeSource = typeof req.body.intakeSource === "string" ? req.body.intakeSource : "multi_upload";
+  const user = getRequestUser(req);
+  const tenantScope = getRequestTenantScope(req);
 
   const created = [];
   for (const file of files) {
@@ -212,9 +294,14 @@ app.post(`${API_PREFIX}/documents/upload/batch`, requireAuth, requireRole("uploa
     });
 
     const doc = await prisma.document.create({
-      data: { ...payload, uploadedById: getRequestUser(req)?.userId ?? null } as never,
+      data: {
+        ...payload,
+        ...getDocumentScope(tenantScope),
+        createdByUserId: user?.userId ?? null,
+        uploadedById: user?.userId ?? null,
+      } as never,
     });
-    await enqueueProcessing(doc.id);
+    await enqueueProcessing(doc.id, tenantScope);
     created.push(doc);
   }
 
@@ -228,7 +315,8 @@ app.patch(`${API_PREFIX}/documents/:id`, requireAuth, requireRole("reviewer"), a
     return;
   }
 
-  const current = await prisma.document.findUnique({ where: { id } });
+  const tenantScope = getRequestTenantScope(req);
+  const current = await findScopedDocument(id, tenantScope);
   if (!current) {
     res.status(404).json({ error: "Document not found" });
     return;
@@ -268,13 +356,20 @@ app.delete(`${API_PREFIX}/documents/:id`, requireAuth, requireRole("admin"), asy
     return;
   }
 
-  const current = await prisma.document.findUnique({ where: { id } });
+  const tenantScope = getRequestTenantScope(req);
+  const current = await findScopedDocument(id, tenantScope);
   if (!current) {
     res.status(404).json({ error: "Document not found" });
     return;
   }
 
-  await prisma.processingJob.deleteMany({ where: { documentId: id } });
+  await prisma.processingJob.deleteMany({
+    where: {
+      documentId: id,
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+    },
+  });
   await prisma.document.delete({ where: { id } });
 
   if (current.filePath && fs.existsSync(current.filePath)) {
@@ -291,7 +386,8 @@ app.post(`${API_PREFIX}/documents/:id/retry`, requireAuth, requireRole("admin"),
     return;
   }
 
-  const current = await prisma.document.findUnique({ where: { id } });
+  const tenantScope = getRequestTenantScope(req);
+  const current = await findScopedDocument(id, tenantScope);
   if (!current) {
     res.status(404).json({ error: "Document not found" });
     return;
@@ -308,14 +404,19 @@ app.post(`${API_PREFIX}/documents/:id/retry`, requireAuth, requireRole("admin"),
     },
   });
 
-  await enqueueProcessing(id);
-  const refreshed = await prisma.document.findUniqueOrThrow({ where: { id } });
+  await enqueueProcessing(id, tenantScope);
+  const refreshed = await findScopedDocument(id, tenantScope);
+  if (!refreshed) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
   res.json(toApiDocument(refreshed));
 });
 
-app.get(`${API_PREFIX}/review-queue`, requireAuth, requireRole("reviewer"), async (_req, res) => {
+app.get(`${API_PREFIX}/review-queue`, requireAuth, requireRole("reviewer"), async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
   const docs = await prisma.document.findMany({
-    where: { needsReview: true },
+    where: { needsReview: true, ...getDocumentScope(tenantScope) },
     orderBy: { updatedAt: "desc" },
   });
   res.json(docs.map(toApiDocument));
@@ -328,7 +429,8 @@ app.post(`${API_PREFIX}/review-queue/:id/resolve`, requireAuth, requireRole("rev
     return;
   }
 
-  const doc = await prisma.document.findUnique({ where: { id } });
+  const tenantScope = getRequestTenantScope(req);
+  const doc = await findScopedDocument(id, tenantScope);
   if (!doc) {
     res.status(404).json({ error: "Document not found" });
     return;
@@ -364,7 +466,8 @@ app.post(`${API_PREFIX}/review-queue/:id/mark`, requireAuth, requireRole("review
     return;
   }
 
-  const doc = await prisma.document.findUnique({ where: { id } });
+  const tenantScope = getRequestTenantScope(req);
+  const doc = await findScopedDocument(id, tenantScope);
   if (!doc) {
     res.status(404).json({ error: "Document not found" });
     return;

@@ -52,6 +52,7 @@ describe("POST /api/auth/login", () => {
     const hash = await hashPassword("correct-password");
     prismaMock.user.findUnique.mockResolvedValueOnce({
       id: "u-1",
+      organizationId: "default-org",
       email: "user@example.com",
       passwordHash: hash,
       role: "reviewer",
@@ -67,6 +68,7 @@ describe("POST /api/auth/login", () => {
     const hash = await hashPassword("correct-password");
     prismaMock.user.findUnique.mockResolvedValueOnce({
       id: "u-1",
+      organizationId: "default-org",
       email: "user@example.com",
       passwordHash: hash,
       role: "reviewer",
@@ -90,6 +92,7 @@ describe("POST /api/auth/register", () => {
     prismaMock.user.findUnique.mockResolvedValueOnce(null);
     prismaMock.user.create.mockResolvedValueOnce({
       id: "u-new",
+      organizationId: "default-org",
       email: "first@test.com",
       role: "admin",
       displayName: "First Admin",
@@ -148,6 +151,7 @@ describe("GET /api/auth/me", () => {
   it("returns user profile for valid token", async () => {
     prismaMock.user.findUnique.mockResolvedValueOnce({
       id: "admin-1",
+      organizationId: "default-org",
       email: "admin@test.com",
       role: "admin",
       displayName: "Admin",
@@ -155,6 +159,8 @@ describe("GET /api/auth/me", () => {
     const res = await request(app).get("/api/auth/me").set("Authorization", adminToken());
     expect(res.status).toBe(200);
     expect(res.body.user.email).toBe("admin@test.com");
+    expect(res.body.user.organizationId).toBe("default-org");
+    expect(res.body.user.programDomain).toBe("community-chronicle");
     expect(res.body.user.passwordHash).toBeUndefined();
   });
 });

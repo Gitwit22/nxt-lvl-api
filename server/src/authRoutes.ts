@@ -8,12 +8,15 @@ import {
   requireRole,
   getRequestUser,
 } from "./auth.js";
+import { CURRENT_PROGRAM_DOMAIN } from "./config.js";
 import { logger } from "./logger.js";
+import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
 
 const router = express.Router();
 
 type AuthUserRecord = {
   id: string;
+  organizationId: string;
   email: string;
   passwordHash: string;
   role: string;
@@ -25,7 +28,13 @@ const prismaUser = prisma as typeof prisma & {
     findUnique: (args: { where: { email?: string; id?: string } }) => Promise<AuthUserRecord | null>;
     count: () => Promise<number>;
     create: (args: {
-      data: { email: string; passwordHash: string; role: string; displayName: string };
+      data: {
+        organizationId: string;
+        email: string;
+        passwordHash: string;
+        role: string;
+        displayName: string;
+      };
     }) => Promise<AuthUserRecord>;
   };
 };
@@ -55,12 +64,31 @@ router.post("/login", async (req, res) => {
     return;
   }
 
-  const token = signToken({ userId: user.id, email: user.email, role: user.role });
-  logger.info("User logged in", { userId: user.id, role: user.role });
+  const tenantScope = getTenantScopeForUser(user);
+  const token = signToken({
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    organizationId: tenantScope.organizationId,
+    programDomain: CURRENT_PROGRAM_DOMAIN,
+  });
+  logger.info("User logged in", {
+    userId: user.id,
+    role: user.role,
+    organizationId: tenantScope.organizationId,
+    programDomain: CURRENT_PROGRAM_DOMAIN,
+  });
 
   res.json({
     token,
-    user: { id: user.id, email: user.email, role: user.role, displayName: user.displayName },
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      displayName: user.displayName,
+      organizationId: tenantScope.organizationId,
+      programDomain: CURRENT_PROGRAM_DOMAIN,
+    },
   });
 });
 
@@ -106,14 +134,35 @@ router.post(
     }
 
     const passwordHash = await hashPassword(password);
+    const tenantScope = getRequestUser(req)
+      ? getTenantScopeForUser(getRequestUser(req))
+      : getDefaultTenantScope();
     const user = await prismaUser.user.create({
-      data: { email, passwordHash, role, displayName },
+      data: {
+        organizationId: tenantScope.organizationId,
+        email,
+        passwordHash,
+        role,
+        displayName,
+      },
     });
 
-    logger.info("User registered", { userId: user.id, role: user.role });
+    logger.info("User registered", {
+      userId: user.id,
+      role: user.role,
+      organizationId: tenantScope.organizationId,
+      programDomain: CURRENT_PROGRAM_DOMAIN,
+    });
 
     res.status(201).json({
-      user: { id: user.id, email: user.email, role: user.role, displayName: user.displayName },
+      user: {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+        displayName: user.displayName,
+        organizationId: tenantScope.organizationId,
+        programDomain: CURRENT_PROGRAM_DOMAIN,
+      },
     });
   },
 );
@@ -131,7 +180,14 @@ router.get("/me", requireAuth, async (req, res) => {
     return;
   }
   res.json({
-    user: { id: user.id, email: user.email, role: user.role, displayName: user.displayName },
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      displayName: user.displayName,
+      organizationId: user.organizationId,
+      programDomain: CURRENT_PROGRAM_DOMAIN,
+    },
   });
 });
 

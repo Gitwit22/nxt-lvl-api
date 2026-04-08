@@ -1,7 +1,12 @@
 import path from "path";
 export const PORT = Number(process.env.PORT || 4000);
+export const NODE_ENV = process.env.NODE_ENV || "development";
 export const API_PREFIX = "/api";
 export const UPLOAD_DIR = process.env.UPLOAD_DIR || path.resolve(process.cwd(), "uploads");
+export const DEFAULT_ORGANIZATION_ID = process.env.DEFAULT_ORGANIZATION_ID || "default-org";
+export const CURRENT_PROGRAM_DOMAIN = process.env.CURRENT_PROGRAM_DOMAIN || "community-chronicle";
+export const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+export const CORS_ORIGIN = process.env.CORS_ORIGIN || "*";
 // Auth
 export const JWT_SECRET = process.env.JWT_SECRET || "changeme-dev-secret-replace-in-production";
 export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "8h";

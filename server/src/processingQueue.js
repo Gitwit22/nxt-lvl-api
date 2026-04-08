@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import crypto from "crypto";
 import { prisma } from "./db.js";
 import { logger } from "./logger.js";
-import { MAX_ATTEMPTS, JOB_TIMEOUT_MS, RETRY_BACKOFF_BASE_MS, SCANNED_PDF_WORDS_PER_PAGE_THRESHOLD, OCR_CONFIDENCE_REVIEW_THRESHOLD, MAX_FILE_SIZE_BYTES, } from "./config.js";
+import { CURRENT_PROGRAM_DOMAIN, MAX_ATTEMPTS, JOB_TIMEOUT_MS, RETRY_BACKOFF_BASE_MS, SCANNED_PDF_WORDS_PER_PAGE_THRESHOLD, OCR_CONFIDENCE_REVIEW_THRESHOLD, MAX_FILE_SIZE_BYTES, } from "./config.js";
 let workerRunning = false;
 let workerTimer = null;
 const DOCUMENT_TYPE_RULES = [
@@ -281,9 +281,11 @@ function buildStableTaxonomyKey(auto) {
     const subtype = auto.subtype ?? "general";
     return `${auto.canonicalType}::${subtype}::${topTopic}`;
 }
-async function compareAgainstExistingDocuments(documentId, title, extractedText, month, year, autoLabels, fingerprint) {
+async function compareAgainstExistingDocuments(documentId, title, extractedText, month, year, autoLabels, fingerprint, tenantScope) {
     const candidates = await prisma.document.findMany({
         where: {
+            organizationId: tenantScope.organizationId,
+            programDomain: tenantScope.programDomain,
             id: { not: documentId },
             extractedText: { not: "" },
         },
@@ -363,9 +365,11 @@ async function compareAgainstExistingDocuments(documentId, title, extractedText,
         clusterId,
     };
 }
-async function assignDocumentFamily(documentId, title, sourceReference, year, month, autoLabels) {
+async function assignDocumentFamily(documentId, title, sourceReference, year, month, autoLabels, tenantScope) {
     const candidates = await prisma.document.findMany({
         where: {
+            organizationId: tenantScope.organizationId,
+            programDomain: tenantScope.programDomain,
             id: { not: documentId },
             year: { gte: year - 1, lte: year + 1 },
         },
@@ -479,9 +483,13 @@ function asStringArray(value) {
         return [];
     return value.map((item) => String(item));
 }
-async function resolveStableTaxonomy(autoLabels) {
+async function resolveStableTaxonomy(autoLabels, tenantScope) {
     const fallback = buildStableTaxonomyKey(autoLabels);
     const docs = await prisma.document.findMany({
+        where: {
+            organizationId: tenantScope.organizationId,
+            programDomain: tenantScope.programDomain,
+        },
         select: { classificationResult: true },
         take: 300,
         orderBy: { updatedAt: "desc" },
@@ -719,6 +727,7 @@ async function handleJobFailure(job, error) {
 async function processSingleJob() {
     const job = await prisma.processingJob.findFirst({
         where: {
+            programDomain: CURRENT_PROGRAM_DOMAIN,
             status: "queued",
             scheduledAt: { lte: new Date() },
         },
@@ -741,6 +750,10 @@ async function processSingleJob() {
         where: { id: job.id },
         include: { document: true },
     });
+    const tenantScope = {
+        organizationId: updatedJob.organizationId,
+        programDomain: updatedJob.programDomain,
+    };
     await prisma.document.update({
         where: { id: job.documentId },
         data: {
@@ -770,9 +783,9 @@ async function processSingleJob() {
             `${job.document.title}\n\n${typeof docRecord.description === "string" ? docRecord.description : ""}`;
         const autoLabels = classifyDocumentTypeAndTopics(job.document.title, baseText);
         const fingerprint = await computeFingerprint(baseText, job.document.title, job.document.filePath);
-        const similarity = await compareAgainstExistingDocuments(job.documentId, job.document.title, baseText, job.document.month, job.document.year, autoLabels, fingerprint);
-        const family = await assignDocumentFamily(job.documentId, job.document.title, job.document.sourceReference, job.document.year, job.document.month, autoLabels);
-        const taxonomy = await resolveStableTaxonomy(autoLabels);
+        const similarity = await compareAgainstExistingDocuments(job.documentId, job.document.title, baseText, job.document.month, job.document.year, autoLabels, fingerprint, tenantScope);
+        const family = await assignDocumentFamily(job.documentId, job.document.title, job.document.sourceReference, job.document.year, job.document.month, autoLabels, tenantScope);
+        const taxonomy = await resolveStableTaxonomy(autoLabels, tenantScope);
         const existingTags = asStringArray(job.document.tags);
         const topicTags = autoLabels.topicLabels.map((topic) => topic.label);
         const entityTags = [
@@ -941,13 +954,15 @@ async function tick() {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
-export async function enqueueProcessing(documentId, options) {
+export async function enqueueProcessing(documentId, tenantScope, options) {
     const scheduledAt = options?.delayMs
         ? new Date(Date.now() + options.delayMs)
         : new Date();
     await prisma.processingJob.create({
         data: {
             documentId,
+            organizationId: tenantScope.organizationId,
+            programDomain: tenantScope.programDomain,
             status: "queued",
             scheduledAt,
             maxAttempts: options?.maxAttempts ?? MAX_ATTEMPTS,
