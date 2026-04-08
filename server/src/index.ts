@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { app } from "./app.js";
 import { prisma } from "./db.js";
-import { PORT, NODE_ENV, UPLOAD_DIR, CORS_ORIGIN, BACKEND_URL, PROGRAM_DISPLAY_NAME } from "./config.js";
+import { PORT, NODE_ENV, UPLOAD_DIR, CORS_ORIGIN, BACKEND_URL, PLATFORM_DISPLAY_NAME } from "./config.js";
 import { startProcessingWorker, stopProcessingWorker } from "./processingQueue.js";
 import { logger } from "./logger.js";
 
@@ -12,7 +12,7 @@ async function bootstrap() {
   startProcessingWorker();
 
   app.listen(PORT, () => {
-    logger.info(`${PROGRAM_DISPLAY_NAME} API started`, {
+    logger.info(`${PLATFORM_DISPLAY_NAME} API started`, {
       port: PORT,
       env: NODE_ENV,
       uploadDir: UPLOAD_DIR,

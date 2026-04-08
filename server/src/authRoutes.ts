@@ -1,14 +1,13 @@
 import express from "express";
-import { prisma } from "./db.js";
+import { prisma } from "./core/db/prisma.js";
 import {
   hashPassword,
   verifyPassword,
   signToken,
-  requireAuth,
-  requireRole,
   getRequestUser,
-} from "./auth.js";
-import { CURRENT_PROGRAM_DOMAIN } from "./config.js";
+} from "./core/auth/auth.service.js";
+import { requireAuth, requireRole } from "./core/middleware/auth.middleware.js";
+import { CURRENT_PROGRAM_DOMAIN } from "./core/config/env.js";
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
 

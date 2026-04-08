@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import crypto from "crypto";
 import type { Prisma } from "@prisma/client";
-import { prisma } from "./db.js";
+import { prisma } from "./core/db/prisma.js";
 import { logger } from "./logger.js";
 import {
   CURRENT_PROGRAM_DOMAIN,
@@ -11,7 +11,7 @@ import {
   SCANNED_PDF_WORDS_PER_PAGE_THRESHOLD,
   OCR_CONFIDENCE_REVIEW_THRESHOLD,
   MAX_FILE_SIZE_BYTES,
-} from "./config.js";
+} from "./core/config/env.js";
 import type { TenantScope } from "./tenant.js";
 
 let workerRunning = false;

@@ -1,4 +1,4 @@
-import { prisma } from "./db.js";
+import { prisma } from "./core/db/prisma.js";
 import { createDocumentPayload } from "./documentFactory.js";
 
 export async function seedLegacyData(): Promise<void> {

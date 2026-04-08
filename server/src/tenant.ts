@@ -1,6 +1,6 @@
 import type { Request } from "express";
-import { CURRENT_PROGRAM_DOMAIN, DEFAULT_ORGANIZATION_ID } from "./config.js";
-import { getRequestUser } from "./auth.js";
+import { CURRENT_PROGRAM_DOMAIN, DEFAULT_ORGANIZATION_ID } from "./core/config/env.js";
+import { getRequestUser } from "./core/auth/auth.service.js";
 
 export interface TenantScope {
   organizationId: string;

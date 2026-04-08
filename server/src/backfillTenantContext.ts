@@ -1,6 +1,6 @@
 import "dotenv/config";
-import { prisma } from "./db.js";
-import { CURRENT_PROGRAM_DOMAIN, DEFAULT_ORGANIZATION_ID } from "./config.js";
+import { prisma } from "./core/db/prisma.js";
+import { CURRENT_PROGRAM_DOMAIN, DEFAULT_ORGANIZATION_ID } from "./core/config/env.js";
 import { logger } from "./logger.js";
 
 async function backfillTenantContext(): Promise<void> {

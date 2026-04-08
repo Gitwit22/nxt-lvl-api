@@ -1,6 +1,6 @@
 import express from "express";
-import { prisma } from "./db.js";
-import { requireAuth, requireRole } from "./auth.js";
+import { prisma } from "./core/db/prisma.js";
+import { requireAuth, requireRole } from "./core/middleware/auth.middleware.js";
 import { getRequestTenantScope } from "./tenant.js";
 
 const router = express.Router();

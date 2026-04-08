@@ -1,7 +1,7 @@
 import multer from "multer";
 import path from "path";
 import type { Request } from "express";
-import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, UPLOAD_DIR } from "./config.js";
+import { ALLOWED_MIME_TYPES, MAX_FILE_SIZE_BYTES, UPLOAD_DIR } from "./core/config/env.js";
 
 export const uploadStorage = multer.diskStorage({
   destination: (_req: Request, _file: Express.Multer.File, cb) => cb(null, UPLOAD_DIR),
