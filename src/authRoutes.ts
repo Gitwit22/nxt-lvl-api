@@ -6,7 +6,7 @@ import {
   signToken,
   getRequestUser,
 } from "./core/auth/auth.service.js";
-import { requireAuth, requireRole } from "./core/middleware/auth.middleware.js";
+import { requireAuth, requireRole, tryAttachAuthUser } from "./core/middleware/auth.middleware.js";
 import { CURRENT_PROGRAM_DOMAIN, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
@@ -101,6 +101,21 @@ router.post("/login", async (req, res) => {
 
   // Backward/forward compatibility: different frontends may read different token keys.
   res.setHeader("Authorization", `Bearer ${token}`);
+  const secureCookie = process.env.NODE_ENV === "production";
+  res.cookie("accessToken", token, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: secureCookie ? "none" : "lax",
+    maxAge: 8 * 60 * 60 * 1000,
+    path: "/",
+  });
+  res.cookie("token", token, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: secureCookie ? "none" : "lax",
+    maxAge: 8 * 60 * 60 * 1000,
+    path: "/",
+  });
 
   res.json({
     token,
@@ -112,6 +127,76 @@ router.post("/login", async (req, res) => {
     appInitialized: appInitState === "ready",
     appInitState,
   });
+});
+
+function buildUserPayloadFromToken(payload: {
+  userId: string;
+  email: string;
+  role: string;
+  organizationId: string;
+  programDomain: string;
+}) {
+  return {
+    id: payload.userId,
+    email: payload.email,
+    role: payload.role,
+    displayName: "",
+    organizationId: payload.organizationId,
+    programDomain: payload.programDomain,
+  };
+}
+
+async function handleRefresh(req: express.Request, res: express.Response): Promise<void> {
+  if (!tryAttachAuthUser(req)) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  const payload = getRequestUser(req);
+  if (!payload) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+
+  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } });
+  const token = signToken({
+    userId: payload.userId,
+    email: payload.email,
+    role: payload.role,
+    organizationId: payload.organizationId,
+    programDomain: payload.programDomain,
+  });
+
+  const secureCookie = process.env.NODE_ENV === "production";
+  res.cookie("accessToken", token, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: secureCookie ? "none" : "lax",
+    maxAge: 8 * 60 * 60 * 1000,
+    path: "/",
+  });
+
+  const appInitState = user
+    ? resolveAppInitState(user)
+    : payload.organizationId ? "ready" : "no_org";
+
+  res.json({
+    token,
+    accessToken: token,
+    authToken: token,
+    auth: { token },
+    data: { token },
+    user: user ? buildUserPayload(user, payload.organizationId) : buildUserPayloadFromToken(payload),
+    appInitialized: appInitState === "ready",
+    appInitState,
+  });
+}
+
+router.get("/refresh", (req, res) => {
+  void handleRefresh(req, res);
+});
+
+router.post("/refresh", (req, res) => {
+  void handleRefresh(req, res);
 });
 
 // POST /api/auth/register  (admin only after first user)

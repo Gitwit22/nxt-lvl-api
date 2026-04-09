@@ -2,28 +2,52 @@ import type { NextFunction, Request, Response } from "express";
 import { CURRENT_PROGRAM_DOMAIN } from "../config/env.js";
 import { decodeToken, getRequestUser, ROLE_LEVEL, setRequestUser, type Role } from "../auth/auth.service.js";
 
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    res.status(401).json({ error: "Authentication required" });
-    return;
+function readTokenFromCookieHeader(cookieHeader?: string): string | undefined {
+  if (!cookieHeader) return undefined;
+  const cookies = cookieHeader.split(";");
+  for (const item of cookies) {
+    const [rawKey, ...rawValue] = item.trim().split("=");
+    const key = rawKey?.trim();
+    if (!key) continue;
+    if (["token", "accessToken", "authToken", "jwt", "session"].includes(key)) {
+      return decodeURIComponent(rawValue.join("=") || "");
+    }
   }
-  const token = authHeader.slice(7);
+  return undefined;
+}
+
+function extractToken(req: Request): string | undefined {
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith("Bearer ")) {
+    return authHeader.slice(7);
+  }
+  return readTokenFromCookieHeader(req.headers.cookie);
+}
+
+export function tryAttachAuthUser(req: Request): boolean {
+  const token = extractToken(req);
+  if (!token) return false;
   try {
     const payload = decodeToken(token);
     if (!payload.organizationId || !payload.programDomain) {
-      res.status(401).json({ error: "Invalid tenant context" });
-      return;
+      return false;
     }
     if (payload.programDomain !== CURRENT_PROGRAM_DOMAIN) {
-      res.status(403).json({ error: "Program access denied" });
-      return;
+      return false;
     }
     setRequestUser(req, payload);
-    next();
+    return true;
   } catch {
-    res.status(401).json({ error: "Invalid or expired token" });
+    return false;
   }
+}
+
+export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+  if (!tryAttachAuthUser(req)) {
+    res.status(401).json({ error: "Authentication required" });
+    return;
+  }
+  next();
 }
 
 export function requireRole(minRole: Role) {
