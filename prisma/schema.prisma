@@ -56,6 +56,41 @@ model Membership {
   @@index([organizationId])
 }
 
+model Program {
+  id               String   @id @default(cuid())
+  programDomain    String   @default("community-chronicle")
+  organizationId   String?
+  slug             String
+  name             String
+  shortDescription String
+  longDescription  String   @default("")
+  category         String   @default("General")
+  tags             Json
+  status           String
+  type             String
+  origin           String   @default("suite-native")
+  internalRoute    String?
+  externalUrl      String?
+  openInNewTab     Boolean  @default(false)
+  logoUrl          String?
+  screenshotUrl    String?
+  accentColor      String?
+  isFeatured       Boolean  @default(false)
+  isPublic         Boolean  @default(true)
+  requiresLogin    Boolean  @default(false)
+  requiresApproval Boolean  @default(false)
+  launchLabel      String   @default("Launch")
+  displayOrder     Int      @default(999)
+  notes            String   @default("")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+
+  @@unique([programDomain, slug])
+  @@index([programDomain, deletedAt, displayOrder])
+  @@index([programDomain, organizationId])
+}
+
 model Document {
   id                    String    @id
   organizationId        String    @default("default-org")
