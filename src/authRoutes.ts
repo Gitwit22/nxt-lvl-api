@@ -7,7 +7,7 @@ import {
   getRequestUser,
 } from "./core/auth/auth.service.js";
 import { requireAuth, requireRole } from "./core/middleware/auth.middleware.js";
-import { CURRENT_PROGRAM_DOMAIN } from "./core/config/env.js";
+import { CURRENT_PROGRAM_DOMAIN, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
 
@@ -111,7 +111,15 @@ router.post("/login", async (req, res) => {
 router.post(
   "/register",
   (req, res, next) => {
-    // First user can self-register (bootstrapping); subsequent registrations require admin
+    // First user can self-register (bootstrapping).
+    // Subsequent registrations require either an admin JWT or a valid PLATFORM_SETUP_TOKEN.
+    const body = req.body as Record<string, unknown>;
+    const providedToken = typeof body.platformSetupToken === "string"
+      ? body.platformSetupToken.trim()
+      : typeof body.setupToken === "string" ? body.setupToken.trim() : "";
+    if (PLATFORM_SETUP_TOKEN && providedToken && providedToken === PLATFORM_SETUP_TOKEN) {
+      return next(); // valid setup token bypass
+    }
     void prismaUser.user
       .count()
       .then((count) => {

@@ -34,6 +34,8 @@ export function getCorsOrigins(): true | string[] {
     .filter(Boolean);
 }
 
+export const PLATFORM_SETUP_TOKEN = process.env.PLATFORM_SETUP_TOKEN || "";
+
 export const JWT_SECRET = process.env.JWT_SECRET || "changeme-dev-secret-replace-in-production";
 export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "8h";
 
