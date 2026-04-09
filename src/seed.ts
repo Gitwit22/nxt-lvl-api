@@ -5,7 +5,7 @@ export async function seedLegacyData(): Promise<void> {
   const existing = await prisma.document.count();
   if (existing > 0) return;
 
-  const { mockDocuments } = await import("../../src/data/documents.js");
+  const { mockDocuments } = await import("./data/documents.js");
 
   for (const doc of mockDocuments) {
     const payload = createDocumentPayload({

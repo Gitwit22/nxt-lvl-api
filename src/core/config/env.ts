@@ -1,7 +1,7 @@
 import path from "path";
 import { programs } from "./programs.js";
 
-export const PLATFORM_DISPLAY_NAME = "Nxt Lvl Platform";
+export const PLATFORM_DISPLAY_NAME = "Nxt Lvl Platform API";
 export const PLATFORM_SYSTEM_NAME = "nxt-lvl-platform";
 
 export const PORT = Number(process.env.PORT || 4000);

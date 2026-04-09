@@ -14,14 +14,45 @@ model User {
   passwordHash String
   role         String   @default("uploader")
   displayName  String   @default("")
+  firstName    String   @default("")
+  lastName     String   @default("")
+  isActive     Boolean  @default(true)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
   createdDocuments  Document[] @relation("CreatedBy")
   uploadedDocuments Document[] @relation("UploadedBy")
   reviewedDocuments Document[] @relation("ReviewedBy")
+  memberships       Membership[] @relation("UserMembers")
 
   @@unique([organizationId, email])
+  @@index([organizationId])
+}
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members Membership[] @relation("OrgMembers")
+
+  @@index([isActive])
+}
+
+model Membership {
+  id             String   @id @default(cuid())
+  userId         String
+  organizationId String
+  role           String   @default("member")
+  createdAt      DateTime @default(now())
+
+  user         User         @relation("UserMembers", fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation("OrgMembers", fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
   @@index([organizationId])
 }
 

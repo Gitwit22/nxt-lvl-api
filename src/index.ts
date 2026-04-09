@@ -5,14 +5,30 @@ import { PORT, NODE_ENV, UPLOAD_DIR, CORS_ORIGIN, BACKEND_URL, PLATFORM_DISPLAY_
 import { startProcessingWorker, stopProcessingWorker } from "./processingQueue.js";
 import { logger } from "./logger.js";
 
+async function canStartProcessingWorker(): Promise<boolean> {
+  try {
+    await prisma.$queryRawUnsafe('SELECT 1 FROM "ProcessingJob" LIMIT 1');
+    return true;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("ProcessingJob") && message.includes("does not exist")) {
+      logger.warn("Processing worker disabled because queue tables are not migrated yet");
+      return false;
+    }
+    throw err;
+  }
+}
+
 async function bootstrap() {
   await prisma.$connect();
   logger.info("Database connected");
 
-  startProcessingWorker();
+  if (await canStartProcessingWorker()) {
+    startProcessingWorker();
+  }
 
   app.listen(PORT, () => {
-    logger.info(`${PLATFORM_DISPLAY_NAME} API started`, {
+    logger.info(`${PLATFORM_DISPLAY_NAME} started`, {
       port: PORT,
       env: NODE_ENV,
       uploadDir: UPLOAD_DIR,
