@@ -30,7 +30,7 @@ export function getCorsOrigins(): true | string[] {
     return true;
   }
   return CORS_ORIGIN.split(",")
-    .map((origin) => origin.trim())
+    .map((origin) => origin.trim().replace(/\/$/, ""))
     .filter(Boolean);
 }
 
