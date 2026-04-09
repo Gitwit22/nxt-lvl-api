@@ -7,6 +7,7 @@ import { logger } from "./logger.js";
 import { authRouter } from "./core/routes/auth.routes.js";
 import { healthRouter } from "./core/routes/health.routes.js";
 import { organizationRouter } from "./core/routes/organization.routes.js";
+import { platformAuthRouter } from "./core/routes/platform-auth.routes.js";
 import { programRouter } from "./core/routes/program.routes.js";
 import { shellRouter } from "./core/routes/shell.routes.js";
 import { communityChronicleRouter } from "./programs/community-chronicle/routes/index.js";
@@ -29,6 +30,7 @@ app.use(express.json({ limit: "10mb" }));
 // Routers
 app.use(`${API_PREFIX}/auth`, authRouter);
 app.use(`${API_PREFIX}`, healthRouter);
+app.use(`${API_PREFIX}/platform-auth`, platformAuthRouter);
 
 // Partition middleware is global for program modules, but auth remains platform-wide.
 app.use(partitionMiddleware);

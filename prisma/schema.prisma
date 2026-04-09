@@ -30,16 +30,34 @@ model User {
 }
 
 model Organization {
-  id        String   @id @default(cuid())
-  name      String
-  slug      String   @unique
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                String    @id @default(cuid())
+  name              String
+  slug              String    @unique
+  subdomain         String?
+  contactEmail      String?
+  ownerEmail        String?
+  supportEmail      String?
+  phoneNumber       String?
+  industryType      String?
+  notes             String?
+  logoUrl           String?
+  bannerUrl         String?
+  primaryColor      String?
+  accentColor       String?
+  assignedBundleIds Json      @default("[]")
+  assignedProgramIds Json     @default("[]")
+  planType          String    @default("starter")
+  status            String    @default("active")
+  seatLimit         Int       @default(25)
+  trialEndsAt       DateTime?
+  isActive          Boolean   @default(true)
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
 
   members Membership[] @relation("OrgMembers")
 
   @@index([isActive])
+  @@index([status])
 }
 
 model Membership {

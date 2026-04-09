@@ -13,6 +13,9 @@ export const CURRENT_PROGRAM_DOMAIN =
   process.env.CURRENT_PROGRAM_DOMAIN || "community-chronicle";
 
 export const BACKEND_URL = process.env.BACKEND_URL || `http://localhost:${PORT}`;
+export const PLATFORM_API_BASE_URL = process.env.PLATFORM_API_BASE_URL || "";
+export const PLATFORM_VALIDATE_LAUNCH_URL = process.env.PLATFORM_VALIDATE_LAUNCH_URL || "";
+export const PLATFORM_AUTH_TIMEOUT_MS = Number(process.env.PLATFORM_AUTH_TIMEOUT_MS || 8_000);
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
