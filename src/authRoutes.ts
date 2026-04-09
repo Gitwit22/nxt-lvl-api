@@ -99,8 +99,15 @@ router.post("/login", async (req, res) => {
   });
   logger.info("User logged in", { userId: user.id, role: user.role, organizationId: tenantScope.organizationId, programDomain: CURRENT_PROGRAM_DOMAIN });
 
+  // Backward/forward compatibility: different frontends may read different token keys.
+  res.setHeader("Authorization", `Bearer ${token}`);
+
   res.json({
     token,
+    accessToken: token,
+    authToken: token,
+    auth: { token },
+    data: { token },
     user: buildUserPayload(user, tenantScope.organizationId),
     appInitialized: appInitState === "ready",
     appInitState,
