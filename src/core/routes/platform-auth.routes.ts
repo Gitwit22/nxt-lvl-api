@@ -320,12 +320,16 @@ router.post("/consume", async (req, res) => {
 
   res.setHeader("Authorization", `Bearer ${chronicleToken}`);
 
+  const appInitState = chronicleUser.organizationId ? "ready" : "no_org";
+
   res.json({
     token: chronicleToken,
     accessToken: chronicleToken,
     authToken: chronicleToken,
     auth: { token: chronicleToken },
     data: { token: chronicleToken },
+    appInitState,
+    appInitialized: appInitState === "ready",
     user: {
       id: chronicleUser.id,
       email: chronicleUser.email,
