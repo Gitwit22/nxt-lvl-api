@@ -24,7 +24,9 @@ export const programs: Record<string, ProgramDefinition> = {
     displayName: "Nxt Lvl Suite",
     routePrefix: "/api/nxt-lvl-suite",
     allowedOrigins: ["https://nltops.com", "https://ntlops.com"],
-    authMode: "platform_only",
+    // Suite host is the central identity provider entry point, so it must allow
+    // direct local login/register while child apps can remain platform_only.
+    authMode: "hybrid",
   },
 };
 

@@ -59,8 +59,8 @@ describe("POST /api/auth/login", () => {
       .set("x-app-partition", "nxt-lvl-suites")
       .send({ email: "user@example.com", password: "password123" });
 
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe("suite_login_required");
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBeUndefined();
   });
 });
 
@@ -76,13 +76,26 @@ describe("POST /api/auth/register", () => {
   });
 
   it("rejects Suite partition registration when authMode is platform_only", async () => {
+    prismaMock.user.create.mockResolvedValueOnce({
+      id: "usr-100",
+      email: "new@test.com",
+      role: "uploader",
+      displayName: "",
+      organizationId: "default-org",
+      organizationName: "Default Organization",
+      passwordHash: "hashed",
+      identitySource: "local",
+      platformUserId: null,
+    });
+
     const res = await request(app)
       .post("/api/auth/register")
       .set("x-app-partition", "nxt-lvl-suites")
       .send({ email: "new@test.com", password: "password123" });
 
-    expect(res.status).toBe(403);
-    expect(res.body.code).toBe("suite_login_required");
+    expect(res.status).toBe(201);
+    expect(res.body.code).toBeUndefined();
+    expect(res.body.user.email).toBe("new@test.com");
   });
 });
 
