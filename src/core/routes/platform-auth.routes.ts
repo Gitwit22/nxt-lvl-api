@@ -5,11 +5,12 @@ import {
   PLATFORM_AUTH_TIMEOUT_MS,
   PLATFORM_VALIDATE_LAUNCH_URL,
 } from "../config/env.js";
-import { signToken } from "../auth/auth.service.js";
+import { decodeToken, signToken } from "../auth/auth.service.js";
 import { prisma } from "../db/prisma.js";
 import { logger } from "../../logger.js";
 
 const router = express.Router();
+const SUITE_PROGRAM_DOMAIN = "nxt-lvl-suites";
 
 type LaunchClaims = {
   userId: string;
@@ -113,6 +114,21 @@ function readErrorMessage(payload: unknown): string | undefined {
   return firstString(payload.error, payload.message, payload.detail);
 }
 
+function readLaunchClaimsFromToken(token: string): LaunchClaims | undefined {
+  try {
+    const payload = decodeToken(token);
+    return {
+      userId: payload.userId,
+      email: payload.email,
+      role: normalizeRole(payload.role),
+      organizationId: payload.organizationId,
+      programDomain: payload.programDomain,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 router.post("/consume", async (req, res) => {
   const body = isRecord(req.body) ? req.body : {};
   const launchToken = firstString(
@@ -129,71 +145,53 @@ router.post("/consume", async (req, res) => {
   }
 
   const validateLaunchUrl = resolveValidateLaunchUrl();
-  if (!validateLaunchUrl) {
-    res.status(503).json({
-      error: "Platform auth service unavailable",
-      code: "platform_unavailable",
-      detail: "Platform validation URL is not configured",
-    });
-    return;
+  let claims: LaunchClaims | undefined;
+
+  if (validateLaunchUrl) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PLATFORM_AUTH_TIMEOUT_MS);
+
+    try {
+      const validateResponse = await fetch(validateLaunchUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          launchToken,
+          token: launchToken,
+          expectedProgramDomain: CURRENT_PROGRAM_DOMAIN,
+          programDomain: CURRENT_PROGRAM_DOMAIN,
+        }),
+        signal: controller.signal,
+      });
+
+      let validatePayload: unknown;
+      try {
+        validatePayload = await validateResponse.json();
+      } catch {
+        validatePayload = undefined;
+      }
+
+      if (validateResponse.ok) {
+        claims = readLaunchClaims(validatePayload);
+      } else {
+        logger.warn("Platform launch validation failed; attempting local token decode fallback", {
+          status: validateResponse.status,
+          error: readErrorMessage(validatePayload),
+        });
+      }
+    } catch {
+      logger.warn("Platform launch validation endpoint unreachable; attempting local token decode fallback");
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), PLATFORM_AUTH_TIMEOUT_MS);
-
-  let validateResponse: Response;
-  let validatePayload: unknown;
-
-  try {
-    validateResponse = await fetch(validateLaunchUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        launchToken,
-        token: launchToken,
-        expectedProgramDomain: CURRENT_PROGRAM_DOMAIN,
-        programDomain: CURRENT_PROGRAM_DOMAIN,
-      }),
-      signal: controller.signal,
-    });
-  } catch {
-    clearTimeout(timeout);
-    res.status(503).json({
-      error: "Platform auth service unavailable",
-      code: "platform_unavailable",
-      detail: "Unable to reach platform validation endpoint",
-    });
-    return;
+  if (!claims) {
+    claims = readLaunchClaimsFromToken(launchToken);
   }
 
-  clearTimeout(timeout);
-
-  try {
-    validatePayload = await validateResponse.json();
-  } catch {
-    validatePayload = undefined;
-  }
-
-  if (validateResponse.status >= 500) {
-    res.status(503).json({
-      error: "Platform auth service unavailable",
-      code: "platform_unavailable",
-      detail: "Platform validation endpoint returned a server error",
-    });
-    return;
-  }
-
-  if (!validateResponse.ok) {
-    res.status(401).json({
-      error: readErrorMessage(validatePayload) || "Invalid, expired, or mismatched launch token",
-      code: "invalid_launch_token",
-    });
-    return;
-  }
-
-  const claims = readLaunchClaims(validatePayload);
   if (!claims) {
     res.status(401).json({
       error: "Invalid, expired, or mismatched launch token",
@@ -202,7 +200,11 @@ router.post("/consume", async (req, res) => {
     return;
   }
 
-  if (claims.programDomain && claims.programDomain !== CURRENT_PROGRAM_DOMAIN) {
+  if (
+    claims.programDomain &&
+    claims.programDomain !== CURRENT_PROGRAM_DOMAIN &&
+    claims.programDomain !== SUITE_PROGRAM_DOMAIN
+  ) {
     res.status(401).json({
       error: "Launch token program does not match this API",
       code: "invalid_launch_token",
