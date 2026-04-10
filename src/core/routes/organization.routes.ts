@@ -2,6 +2,7 @@ import express from "express";
 import { prisma } from "../db/prisma.js";
 import { DEFAULT_ORGANIZATION_ID } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.middleware.js";
+import { hashPassword, getRequestUser } from "../auth/auth.service.js";
 
 const router = express.Router();
 
@@ -179,6 +180,185 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
     res.json(users);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch organization users";
+    res.status(500).json({ error: message });
+  }
+});
+
+// ─── Org user management ─────────────────────────────────────────────────────
+
+// POST /api/orgs/:orgId/users — create a user and add them to the org
+router.post("/:orgId/users", requireAuth, async (req, res) => {
+  const orgId = getOrgId(req.params.orgId);
+  const body = req.body as Record<string, unknown>;
+
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+  const role = typeof body.role === "string" ? body.role : "staff";
+  const initialPassword = typeof body.initialPassword === "string" ? body.initialPassword.trim() : "";
+
+  if (!email) {
+    res.status(400).json({ error: "email is required" });
+    return;
+  }
+
+  if (initialPassword && initialPassword.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+
+  try {
+    const passwordHash = initialPassword ? await hashPassword(initialPassword) : "";
+    const [firstName, ...rest] = name.split(" ");
+    const lastName = rest.join(" ");
+
+    // Find existing user by email, or create new
+    let user = await prisma.user.findFirst({ where: { email } });
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          email,
+          passwordHash,
+          role: "uploader",
+          displayName: name || email.split("@")[0],
+          firstName: firstName || "",
+          lastName: lastName || "",
+          organizationId: orgId,
+          identitySource: "local",
+        },
+      });
+    } else if (initialPassword) {
+      // Update password hash if one was provided
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { passwordHash },
+      });
+    }
+
+    // Upsert membership
+    const existing = await prisma.membership.findFirst({
+      where: { userId: user.id, organizationId: orgId },
+    });
+
+    if (!existing) {
+      await prisma.membership.create({
+        data: { userId: user.id, organizationId: orgId, role },
+      });
+    } else {
+      await prisma.membership.update({
+        where: { id: existing.id },
+        data: { role },
+      });
+    }
+
+    res.status(201).json({
+      id: user.id,
+      email: user.email,
+      name: user.displayName,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      role,
+      organizationId: orgId,
+      active: user.isActive,
+      assignedProgramIds: Array.isArray(body.assignedProgramIds) ? body.assignedProgramIds : [],
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to create user";
+    res.status(500).json({ error: message });
+  }
+});
+
+// PUT /api/orgs/:orgId/users/:userId — update a user's role or program access
+router.put("/:orgId/users/:userId", requireAuth, async (req, res) => {
+  const orgId = getOrgId(req.params.orgId);
+  const userId = typeof req.params.userId === "string" ? req.params.userId : "";
+  const body = req.body as Record<string, unknown>;
+
+  if (!userId) {
+    res.status(400).json({ error: "userId is required" });
+    return;
+  }
+
+  try {
+    const membership = await prisma.membership.findFirst({
+      where: { userId, organizationId: orgId },
+    });
+
+    if (!membership) {
+      res.status(404).json({ error: "User not found in this organization" });
+      return;
+    }
+
+    const updates: Record<string, unknown> = {};
+    if (typeof body.role === "string") updates.role = body.role;
+
+    if (Object.keys(updates).length > 0) {
+      await prisma.membership.update({ where: { id: membership.id }, data: updates });
+    }
+
+    // Update user display info if provided
+    const userUpdates: Record<string, unknown> = {};
+    if (typeof body.name === "string") {
+      userUpdates.displayName = body.name.trim();
+      const [firstName, ...rest] = body.name.trim().split(" ");
+      userUpdates.firstName = firstName || "";
+      userUpdates.lastName = rest.join(" ") || "";
+    }
+    if (typeof body.isActive === "boolean") userUpdates.isActive = body.isActive;
+
+    if (Object.keys(userUpdates).length > 0) {
+      await prisma.user.update({ where: { id: userId }, data: userUpdates });
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to update user";
+    res.status(500).json({ error: message });
+  }
+});
+
+// POST /api/orgs/:orgId/users/:userId/set-password — org admin sets password for a user
+router.post("/:orgId/users/:userId/set-password", requireAuth, async (req, res) => {
+  const requestingUser = getRequestUser(req);
+  if (!requestingUser) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+
+  const orgId = getOrgId(req.params.orgId);
+  const userId = typeof req.params.userId === "string" ? req.params.userId : "";
+  const body = req.body as Record<string, unknown>;
+  const newPassword = typeof body.newPassword === "string" ? body.newPassword.trim() : "";
+
+  if (!newPassword) {
+    res.status(400).json({ error: "newPassword is required" });
+    return;
+  }
+  if (newPassword.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+
+  try {
+    // Verify the requesting user is a member of this org with admin role
+    const requesterMembership = await prisma.membership.findFirst({
+      where: { userId: requestingUser.userId, organizationId: orgId },
+    });
+
+    const isOwnPassword = requestingUser.userId === userId;
+    const isAdmin = requesterMembership?.role === "org_admin" || requesterMembership?.role === "super_admin"
+      || requestingUser.role === "admin";
+
+    if (!isOwnPassword && !isAdmin) {
+      res.status(403).json({ error: "Only org admins can set passwords for other users" });
+      return;
+    }
+
+    const passwordHash = await hashPassword(newPassword);
+    await prisma.user.update({ where: { id: userId }, data: { passwordHash } });
+
+    res.json({ success: true });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to set password";
     res.status(500).json({ error: message });
   }
 });
