@@ -17,13 +17,13 @@ export const programs: Record<string, ProgramDefinition> = {
   "community-chronicle": {
     displayName: "Community Chronicle",
     routePrefix: "/api/community-chronicle",
-    allowedOrigins: ["https://community-chronicle.onrender.com"],
+    allowedOrigins: ["https://community-chronicle.ntlops.com"],
     authMode: "platform_only",
   },
   "nxt-lvl-suites": {
     displayName: "Nxt Lvl Suite",
     routePrefix: "/api/nxt-lvl-suite",
-    allowedOrigins: ["https://nltops.com", "https://ntlops.com"],
+    allowedOrigins: ["https://nltops.com", "https://ntlops.com", "https://www.ntlops.com", "https://www.nltops.com"],
     // Suite host is the central identity provider entry point, so it must allow
     // direct local login/register while child apps can remain platform_only.
     authMode: "hybrid",

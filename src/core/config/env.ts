@@ -19,7 +19,9 @@ export const PLATFORM_AUTH_TIMEOUT_MS = Number(process.env.PLATFORM_AUTH_TIMEOUT
 
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
-  "https://community-chronicle.onrender.com",
+  "http://localhost:8080",
+  "https://community-chronicle.ntlops.com",
+  "https://ntlops.com",
   "https://nltops.com",
 ];
 
