@@ -10,8 +10,10 @@ import { requireAuth, requireRole, tryAttachAuthUser } from "./core/middleware/a
 import { CURRENT_PROGRAM_DOMAIN, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
+import { programs } from "./core/config/programs.js";
 
 const router = express.Router();
+const currentProgramAuthMode = programs[CURRENT_PROGRAM_DOMAIN]?.authMode ?? "local_only";
 
 type AuthUserRecord = {
   id: string;
@@ -21,6 +23,8 @@ type AuthUserRecord = {
   displayName: string;
   organizationId?: string | null;
   organizationName?: string | null;
+  identitySource?: string | null;
+  platformUserId?: string | null;
 };
 
 const prismaUser = prisma as typeof prisma & {
@@ -34,6 +38,7 @@ const prismaUser = prisma as typeof prisma & {
         passwordHash: string;
         role: string;
         displayName: string;
+        identitySource?: string;
       };
     }) => Promise<AuthUserRecord>;
   };
@@ -60,11 +65,20 @@ function buildUserPayload(user: AuthUserRecord, organizationId: string) {
     organizationId,
     organizationName: user.organizationName ?? undefined,
     programDomain: CURRENT_PROGRAM_DOMAIN,
+    identitySource: (user.identitySource ?? "local") as "platform" | "local",
   };
 }
 
 // POST /api/auth/login
 router.post("/login", async (req, res) => {
+  if (currentProgramAuthMode === "platform_only") {
+    res.status(403).json({
+      error: "Direct local login is deprecated for this app. Sign in through Suite.",
+      code: "suite_login_required",
+    });
+    return;
+  }
+
   const body = req.body as Record<string, unknown>;
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const password = typeof body.password === "string" ? body.password : "";
@@ -77,6 +91,15 @@ router.post("/login", async (req, res) => {
   const user = await prismaUser.user.findUnique({ where: { email } });
   if (!user) {
     // Constant-time comparison even on miss — avoids user enumeration
+    await bcryptFakeCompare();
+    res.status(401).json({ error: "Invalid credentials" });
+    return;
+  }
+
+  const userIdentitySource = (user as AuthUserRecord).identitySource ?? null;
+
+  // Platform-linked users have no local password — deny password login at constant time
+  if (userIdentitySource === "platform" && !user.passwordHash) {
     await bcryptFakeCompare();
     res.status(401).json({ error: "Invalid credentials" });
     return;
@@ -199,18 +222,32 @@ router.post("/refresh", (req, res) => {
   void handleRefresh(req, res);
 });
 
-// POST /api/auth/register  (admin only after first user)
+// POST /api/auth/register
+// - First user can always self-register (bootstrapping).
+// - Hybrid-mode programs allow open self-registration for local accounts.
+// - All other programs require admin JWT or PLATFORM_SETUP_TOKEN for subsequent users.
 router.post(
   "/register",
   (req, res, next) => {
-    // First user can self-register (bootstrapping).
-    // Subsequent registrations require either an admin JWT or a valid PLATFORM_SETUP_TOKEN.
+    if (currentProgramAuthMode === "platform_only") {
+      res.status(403).json({
+        error: "Direct local registration is deprecated for this app. Sign in through Suite.",
+        code: "suite_login_required",
+      });
+      return;
+    }
+
     const body = req.body as Record<string, unknown>;
     const providedToken = typeof body.platformSetupToken === "string"
       ? body.platformSetupToken.trim()
       : typeof body.setupToken === "string" ? body.setupToken.trim() : "";
     if (PLATFORM_SETUP_TOKEN && providedToken && providedToken === PLATFORM_SETUP_TOKEN) {
       return next(); // valid setup token bypass
+    }
+    // Hybrid-mode programs allow open local registration
+    const currentProgram = programs[CURRENT_PROGRAM_DOMAIN];
+    if (currentProgram?.authMode === "hybrid") {
+      return next();
     }
     void prismaUser.user
       .count()
@@ -259,6 +296,7 @@ router.post(
         passwordHash,
         role,
         displayName,
+        identitySource: "local",
       },
     });
 

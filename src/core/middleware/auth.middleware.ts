@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from "express";
 import { CURRENT_PROGRAM_DOMAIN } from "../config/env.js";
 import { decodeToken, getRequestUser, ROLE_LEVEL, setRequestUser, type Role } from "../auth/auth.service.js";
+import { getRequestProgram } from "./partition.middleware.js";
 
 function readTokenFromCookieHeader(cookieHeader?: string): string | undefined {
   if (!cookieHeader) return undefined;
@@ -32,7 +33,8 @@ export function tryAttachAuthUser(req: Request): boolean {
     if (!payload.organizationId || !payload.programDomain) {
       return false;
     }
-    if (payload.programDomain !== CURRENT_PROGRAM_DOMAIN) {
+    const requestProgram = getRequestProgram(req)?.key || CURRENT_PROGRAM_DOMAIN;
+    if (payload.programDomain !== requestProgram) {
       return false;
     }
     setRequestUser(req, payload);

@@ -6,6 +6,8 @@ import {
   PLATFORM_VALIDATE_LAUNCH_URL,
 } from "../config/env.js";
 import { signToken } from "../auth/auth.service.js";
+import { prisma } from "../db/prisma.js";
+import { logger } from "../../logger.js";
 
 const router = express.Router();
 
@@ -35,6 +37,17 @@ function firstString(...values: Array<unknown>): string | undefined {
 
 function normalizeRole(input: unknown): string {
   const value = typeof input === "string" ? input.toLowerCase().trim() : "";
+  const roleAliasMap: Record<string, string> = {
+    "executive director": "admin",
+    "deputy director": "reviewer",
+    finance: "reviewer",
+    admin: "admin",
+  };
+
+  if (roleAliasMap[value]) {
+    return roleAliasMap[value];
+  }
+
   if (["admin", "reviewer", "uploader"].includes(value)) {
     return value;
   }
@@ -197,11 +210,69 @@ router.post("/consume", async (req, res) => {
     return;
   }
 
+  // -------------------------------------------------------------------------
+  // Find-or-create the Chronicle-local User record for this platform identity.
+  // This ensures:
+  //   1. The JWT userId references a real row in the Chronicle DB.
+  //   2. Platform-linked users and local users are separately tracked.
+  //   3. If a local user with the same (org, email) already exists, their
+  //      platform identity is linked rather than creating a duplicate.
+  // -------------------------------------------------------------------------
+  const userStore = prisma as unknown as {
+    user: {
+      findFirst: (args: { where: Record<string, unknown> }) => Promise<Record<string, unknown> | null>;
+      create: (args: { data: Record<string, unknown> }) => Promise<Record<string, unknown>>;
+      update: (args: { where: Record<string, unknown>; data: Record<string, unknown> }) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  let chronicleUser = await userStore.user.findFirst({
+    where: { platformUserId: claims.userId, identitySource: "platform" },
+  });
+
+  if (!chronicleUser) {
+    // Check if a local user with the same org+email already exists (account linking)
+    const existingByEmail = await userStore.user.findFirst({
+      where: { organizationId: claims.organizationId, email: claims.email },
+    });
+
+    if (existingByEmail) {
+      // Link the platform identity to the existing local user
+      chronicleUser = await userStore.user.update({
+        where: { id: existingByEmail.id as string },
+        data: { platformUserId: claims.userId },
+      });
+      logger.info("Linked platform identity to existing Chronicle user", {
+        chronicleUserId: chronicleUser.id,
+        platformUserId: claims.userId,
+        email: claims.email,
+      });
+    } else {
+      // Create a new platform-linked Chronicle user
+      chronicleUser = await userStore.user.create({
+        data: {
+          organizationId: claims.organizationId,
+          email: claims.email,
+          passwordHash: "",
+          role: claims.role,
+          displayName: (claims.email as string).split("@")[0] ?? claims.email,
+          identitySource: "platform",
+          platformUserId: claims.userId,
+        },
+      });
+      logger.info("Created Chronicle user for platform identity", {
+        chronicleUserId: chronicleUser.id,
+        platformUserId: claims.userId,
+        email: claims.email,
+      });
+    }
+  }
+
   const chronicleToken = signToken({
-    userId: claims.userId,
-    email: claims.email,
-    role: claims.role,
-    organizationId: claims.organizationId,
+    userId: chronicleUser.id as string,
+    email: chronicleUser.email as string,
+    role: chronicleUser.role as string,
+    organizationId: chronicleUser.organizationId as string,
     programDomain: CURRENT_PROGRAM_DOMAIN,
   });
 
@@ -231,11 +302,12 @@ router.post("/consume", async (req, res) => {
     auth: { token: chronicleToken },
     data: { token: chronicleToken },
     user: {
-      id: claims.userId,
-      email: claims.email,
-      role: claims.role,
-      organizationId: claims.organizationId,
+      id: chronicleUser.id,
+      email: chronicleUser.email,
+      role: chronicleUser.role,
+      organizationId: chronicleUser.organizationId,
       programDomain: CURRENT_PROGRAM_DOMAIN,
+      identitySource: chronicleUser.identitySource,
     },
   });
 });
