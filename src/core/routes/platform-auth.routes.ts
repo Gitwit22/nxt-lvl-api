@@ -140,12 +140,14 @@ router.post("/consume", async (req, res) => {
   );
 
   if (!launchToken) {
+    logger.warn("[platform-auth] consume rejected: missing launch token");
     res.status(400).json({ error: "launchToken is required" });
     return;
   }
 
   const validateLaunchUrl = resolveValidateLaunchUrl();
   let claims: LaunchClaims | undefined;
+  let validationMode: "external" | "local-fallback" | "none" = "none";
 
   if (validateLaunchUrl) {
     const controller = new AbortController();
@@ -175,6 +177,14 @@ router.post("/consume", async (req, res) => {
 
       if (validateResponse.ok) {
         claims = readLaunchClaims(validatePayload);
+        if (claims) {
+          validationMode = "external";
+          logger.info("[platform-auth] consume validated via external endpoint", {
+            userId: claims.userId,
+            organizationId: claims.organizationId,
+            programDomain: claims.programDomain,
+          });
+        }
       } else {
         logger.warn("Platform launch validation failed; attempting local token decode fallback", {
           status: validateResponse.status,
@@ -190,9 +200,18 @@ router.post("/consume", async (req, res) => {
 
   if (!claims) {
     claims = readLaunchClaimsFromToken(launchToken);
+    if (claims) {
+      validationMode = "local-fallback";
+      logger.info("[platform-auth] consume accepted via local token fallback", {
+        userId: claims.userId,
+        organizationId: claims.organizationId,
+        programDomain: claims.programDomain,
+      });
+    }
   }
 
   if (!claims) {
+    logger.warn("[platform-auth] consume rejected: invalid launch token after validation + fallback");
     res.status(401).json({
       error: "Invalid, expired, or mismatched launch token",
       code: "invalid_launch_token",
@@ -205,6 +224,10 @@ router.post("/consume", async (req, res) => {
     claims.programDomain !== CURRENT_PROGRAM_DOMAIN &&
     claims.programDomain !== SUITE_PROGRAM_DOMAIN
   ) {
+    logger.warn("[platform-auth] consume rejected: program mismatch", {
+      incomingProgramDomain: claims.programDomain,
+      expectedProgramDomain: CURRENT_PROGRAM_DOMAIN,
+    });
     res.status(401).json({
       error: "Launch token program does not match this API",
       code: "invalid_launch_token",
@@ -311,6 +334,13 @@ router.post("/consume", async (req, res) => {
       programDomain: CURRENT_PROGRAM_DOMAIN,
       identitySource: chronicleUser.identitySource,
     },
+  });
+
+  logger.info("[platform-auth] consume success", {
+    validationMode,
+    chronicleUserId: chronicleUser.id,
+    organizationId: chronicleUser.organizationId,
+    programDomain: CURRENT_PROGRAM_DOMAIN,
   });
 });
 
