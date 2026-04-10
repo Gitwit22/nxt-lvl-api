@@ -1,11 +1,13 @@
 import express from "express";
+import jwt from "jsonwebtoken";
 import {
   CURRENT_PROGRAM_DOMAIN,
   PLATFORM_API_BASE_URL,
   PLATFORM_AUTH_TIMEOUT_MS,
+  PLATFORM_LAUNCH_TOKEN_SECRET,
   PLATFORM_VALIDATE_LAUNCH_URL,
 } from "../config/env.js";
-import { decodeToken, signToken } from "../auth/auth.service.js";
+import { signToken } from "../auth/auth.service.js";
 import { prisma } from "../db/prisma.js";
 import { logger } from "../../logger.js";
 
@@ -116,14 +118,10 @@ function readErrorMessage(payload: unknown): string | undefined {
 
 function readLaunchClaimsFromToken(token: string): LaunchClaims | undefined {
   try {
-    const payload = decodeToken(token);
-    return {
-      userId: payload.userId,
-      email: payload.email,
-      role: normalizeRole(payload.role),
-      organizationId: payload.organizationId,
-      programDomain: payload.programDomain,
-    };
+    // Verify with the shared platform launch secret (signed by nxt-lvl-hub)
+    const payload = jwt.verify(token, PLATFORM_LAUNCH_TOKEN_SECRET) as Record<string, unknown>;
+    const claims = readLaunchClaims(payload);
+    return claims;
   } catch {
     return undefined;
   }

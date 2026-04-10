@@ -1,4 +1,5 @@
 import express from "express";
+import jwt from "jsonwebtoken";
 import { prisma } from "./core/db/prisma.js";
 import {
   hashPassword,
@@ -7,7 +8,7 @@ import {
   getRequestUser,
 } from "./core/auth/auth.service.js";
 import { requireAuth, requireRole, tryAttachAuthUser } from "./core/middleware/auth.middleware.js";
-import { CURRENT_PROGRAM_DOMAIN, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
+import { CURRENT_PROGRAM_DOMAIN, PLATFORM_LAUNCH_TOKEN_SECRET, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
 import { getProgramDefinition, programs } from "./core/config/programs.js";
@@ -424,6 +425,48 @@ router.get("/me", requireAuth, async (req, res) => {
     appInitialized: appInitState === "ready",
     appInitState,
   });
+});
+
+// POST /api/auth/launch-token
+// Called by nxt-lvl-hub when a user clicks "Launch" on a program card.
+// Issues a short-lived token the target program uses to auto-authenticate the user.
+router.post("/launch-token", requireAuth, (req, res) => {
+  const payload = getRequestUser(req);
+  if (!payload) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const organizationId =
+    typeof body.organizationId === "string" ? body.organizationId : payload.organizationId;
+  const programDomain = typeof body.programDomain === "string" ? body.programDomain : "";
+
+  if (!organizationId || !programDomain) {
+    res.status(400).json({ error: "organizationId and programDomain are required" });
+    return;
+  }
+
+  const launchToken = jwt.sign(
+    {
+      type: "launch",
+      userId: payload.userId,
+      email: payload.email,
+      role: payload.role,
+      organizationId,
+      programDomain,
+    },
+    PLATFORM_LAUNCH_TOKEN_SECRET,
+    { expiresIn: "5m" },
+  );
+
+  logger.info("[auth] launch token issued", {
+    userId: payload.userId,
+    organizationId,
+    programDomain,
+  });
+
+  res.json({ launchToken });
 });
 
 // Timing-safe dummy hash comparison to prevent user enumeration on login miss
