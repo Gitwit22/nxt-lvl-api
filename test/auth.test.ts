@@ -52,6 +52,16 @@ describe("POST /api/auth/login", () => {
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("suite_login_required");
   });
+
+  it("rejects Suite partition login when authMode is platform_only", async () => {
+    const res = await request(app)
+      .post("/api/auth/login")
+      .set("x-app-partition", "nxt-lvl-suites")
+      .send({ email: "user@example.com", password: "password123" });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("suite_login_required");
+  });
 });
 
 describe("POST /api/auth/register", () => {
@@ -60,6 +70,16 @@ describe("POST /api/auth/register", () => {
       email: "new@test.com",
       password: "secure-pass-1",
     });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe("suite_login_required");
+  });
+
+  it("rejects Suite partition registration when authMode is platform_only", async () => {
+    const res = await request(app)
+      .post("/api/auth/register")
+      .set("x-app-partition", "nxt-lvl-suites")
+      .send({ email: "new@test.com", password: "password123" });
 
     expect(res.status).toBe(403);
     expect(res.body.code).toBe("suite_login_required");

@@ -10,10 +10,10 @@ import { requireAuth, requireRole, tryAttachAuthUser } from "./core/middleware/a
 import { CURRENT_PROGRAM_DOMAIN, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
-import { programs } from "./core/config/programs.js";
+import { getProgramDefinition, programs } from "./core/config/programs.js";
+import { resolveProgramKey } from "./core/middleware/partition.middleware.js";
 
 const router = express.Router();
-const currentProgramAuthMode = programs[CURRENT_PROGRAM_DOMAIN]?.authMode ?? "local_only";
 
 type AuthUserRecord = {
   id: string;
@@ -56,7 +56,7 @@ function resolveAppInitState(user: AuthUserRecord): "not_initialized" | "no_org"
 }
 
 /** Build the safe user payload included in API responses. */
-function buildUserPayload(user: AuthUserRecord, organizationId: string) {
+function buildUserPayload(user: AuthUserRecord, organizationId: string, programDomain: string) {
   return {
     id: user.id,
     email: user.email,
@@ -64,13 +64,26 @@ function buildUserPayload(user: AuthUserRecord, organizationId: string) {
     displayName: user.displayName,
     organizationId,
     organizationName: user.organizationName ?? undefined,
-    programDomain: CURRENT_PROGRAM_DOMAIN,
+    programDomain,
     identitySource: (user.identitySource ?? "local") as "platform" | "local",
   };
 }
 
+function resolveAuthProgramDomain(req: express.Request): string {
+  const headerValue =
+    typeof req.headers["x-app-partition"] === "string"
+      ? req.headers["x-app-partition"]
+      : undefined;
+
+  const resolved = resolveProgramKey(headerValue);
+  return getProgramDefinition(resolved) ? resolved : CURRENT_PROGRAM_DOMAIN;
+}
+
 // POST /api/auth/login
 router.post("/login", async (req, res) => {
+  const programDomain = resolveAuthProgramDomain(req);
+  const currentProgramAuthMode = programs[programDomain]?.authMode ?? "local_only";
+
   if (currentProgramAuthMode === "platform_only") {
     res.status(403).json({
       error: "Direct local login is deprecated for this app. Sign in through Suite.",
@@ -118,9 +131,9 @@ router.post("/login", async (req, res) => {
     email: user.email,
     role: user.role,
     organizationId: tenantScope.organizationId,
-    programDomain: CURRENT_PROGRAM_DOMAIN,
+    programDomain,
   });
-  logger.info("User logged in", { userId: user.id, role: user.role, organizationId: tenantScope.organizationId, programDomain: CURRENT_PROGRAM_DOMAIN });
+  logger.info("User logged in", { userId: user.id, role: user.role, organizationId: tenantScope.organizationId, programDomain });
 
   // Backward/forward compatibility: different frontends may read different token keys.
   res.setHeader("Authorization", `Bearer ${token}`);
@@ -146,7 +159,7 @@ router.post("/login", async (req, res) => {
     authToken: token,
     auth: { token },
     data: { token },
-    user: buildUserPayload(user, tenantScope.organizationId),
+    user: buildUserPayload(user, tenantScope.organizationId, programDomain),
     appInitialized: appInitState === "ready",
     appInitState,
   });
@@ -208,7 +221,7 @@ async function handleRefresh(req: express.Request, res: express.Response): Promi
     authToken: token,
     auth: { token },
     data: { token },
-    user: user ? buildUserPayload(user, payload.organizationId) : buildUserPayloadFromToken(payload),
+    user: user ? buildUserPayload(user, payload.organizationId, payload.programDomain) : buildUserPayloadFromToken(payload),
     appInitialized: appInitState === "ready",
     appInitState,
   });
@@ -229,6 +242,9 @@ router.post("/refresh", (req, res) => {
 router.post(
   "/register",
   (req, res, next) => {
+    const programDomain = resolveAuthProgramDomain(req);
+    const currentProgramAuthMode = programs[programDomain]?.authMode ?? "local_only";
+
     if (currentProgramAuthMode === "platform_only") {
       res.status(403).json({
         error: "Direct local registration is deprecated for this app. Sign in through Suite.",
@@ -245,7 +261,7 @@ router.post(
       return next(); // valid setup token bypass
     }
     // Hybrid-mode programs allow open local registration
-    const currentProgram = programs[CURRENT_PROGRAM_DOMAIN];
+    const currentProgram = programs[programDomain];
     if (currentProgram?.authMode === "hybrid") {
       return next();
     }
@@ -258,6 +274,7 @@ router.post(
       .catch(next);
   },
   async (req, res) => {
+    const programDomain = resolveAuthProgramDomain(req);
     const body = req.body as Record<string, unknown>;
     const email =
       typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -304,11 +321,11 @@ router.post(
       userId: user.id,
       role: user.role,
       organizationId: tenantScope.organizationId,
-      programDomain: CURRENT_PROGRAM_DOMAIN,
+      programDomain,
     });
 
     res.status(201).json({
-      user: buildUserPayload(user, tenantScope.organizationId),
+      user: buildUserPayload(user, tenantScope.organizationId, programDomain),
     });
   },
 );
@@ -330,7 +347,7 @@ router.get("/me", requireAuth, async (req, res) => {
   const tenantScope = getTenantScopeForUser(user);
   const appInitState = resolveAppInitState(user);
   res.json({
-    user: buildUserPayload(user, tenantScope.organizationId),
+    user: buildUserPayload(user, tenantScope.organizationId, payload.programDomain),
     appInitialized: appInitState === "ready",
     appInitState,
   });
