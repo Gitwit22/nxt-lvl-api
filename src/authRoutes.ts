@@ -235,6 +235,26 @@ router.post("/refresh", (req, res) => {
   void handleRefresh(req, res);
 });
 
+// POST /api/auth/logout
+// Clears auth cookies so refresh/session restoration cannot silently re-authenticate.
+router.post("/logout", (_req, res) => {
+  const secureCookie = process.env.NODE_ENV === "production";
+  const cookieOptions = {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: (secureCookie ? "none" : "lax") as "none" | "lax",
+    path: "/",
+  };
+
+  res.clearCookie("accessToken", cookieOptions);
+  res.clearCookie("token", cookieOptions);
+  res.clearCookie("authToken", cookieOptions);
+  res.clearCookie("jwt", cookieOptions);
+  res.clearCookie("session", cookieOptions);
+
+  res.status(204).send();
+});
+
 // POST /api/auth/register
 // - First user can always self-register (bootstrapping).
 // - Hybrid-mode programs allow open self-registration for local accounts.
