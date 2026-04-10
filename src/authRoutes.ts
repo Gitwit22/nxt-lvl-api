@@ -31,6 +31,10 @@ const prismaUser = prisma as typeof prisma & {
   user: {
     findUnique: (args: { where: { email?: string; id?: string } }) => Promise<AuthUserRecord | null>;
     count: () => Promise<number>;
+    update: (args: {
+      where: { id: string };
+      data: { passwordHash: string };
+    }) => Promise<AuthUserRecord>;
     create: (args: {
       data: {
         organizationId: string;
@@ -251,6 +255,55 @@ router.post("/logout", (_req, res) => {
   res.clearCookie("authToken", cookieOptions);
   res.clearCookie("jwt", cookieOptions);
   res.clearCookie("session", cookieOptions);
+
+  res.status(204).send();
+});
+
+// POST /api/auth/change-password
+// Authenticated users can rotate their own local password.
+router.post("/change-password", requireAuth, async (req, res) => {
+  const payload = getRequestUser(req);
+  if (!payload) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const currentPassword = typeof body.currentPassword === "string" ? body.currentPassword : "";
+  const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+
+  if (!currentPassword || !newPassword) {
+    res.status(400).json({ error: "Current password and new password are required" });
+    return;
+  }
+
+  if (newPassword.length < 8) {
+    res.status(400).json({ error: "New password must be at least 8 characters" });
+    return;
+  }
+
+  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } });
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+
+  if (!user.passwordHash) {
+    res.status(400).json({ error: "This account does not support local password changes" });
+    return;
+  }
+
+  const valid = await verifyPassword(currentPassword, user.passwordHash);
+  if (!valid) {
+    res.status(401).json({ error: "Current password is incorrect" });
+    return;
+  }
+
+  const nextHash = await hashPassword(newPassword);
+  await prismaUser.user.update({
+    where: { id: user.id },
+    data: { passwordHash: nextHash },
+  });
 
   res.status(204).send();
 });
