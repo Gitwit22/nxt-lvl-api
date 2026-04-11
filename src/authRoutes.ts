@@ -144,7 +144,7 @@ router.post("/login", async (req, res) => {
     userId: user.id,
     email: user.email,
     role: user.role,
-    platformRole: user.platformRole ?? "user",
+    platformRole: (user as AuthUserRecord).platformRole ?? "user",
     organizationId: tenantScope.organizationId,
     programDomain,
   });
@@ -344,7 +344,7 @@ router.post("/complete-force-reset", requireAuth, async (req, res) => {
     return;
   }
 
-  if (!user.mustChangePassword) {
+  if (!(user as AuthUserRecord).mustChangePassword) {
     res.status(400).json({ error: "No forced password reset is pending for this account." });
     return;
   }
