@@ -2,7 +2,7 @@ import express from "express";
 import { prisma } from "../db/prisma.js";
 import { DEFAULT_ORGANIZATION_ID } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.middleware.js";
-import { hashPassword, getRequestUser } from "../auth/auth.service.js";
+import { hashPassword, getRequestUser, generateTempPassword } from "../auth/auth.service.js";
 
 const router = express.Router();
 
@@ -61,6 +61,8 @@ router.get("/", requireAuth, async (_req, res) => {
 });
 
 // Create organization
+// Optionally accepts contactUser: { name, email } to provision the org owner automatically.
+// When provided, a temp password is generated and returned once in the response.
 router.post("/", requireAuth, async (req, res) => {
   const body = req.body as Record<string, unknown>;
   if (!body.name || typeof body.name !== "string") {
@@ -74,6 +76,52 @@ router.post("/", requireAuth, async (req, res) => {
   try {
     const data = buildOrgData(body);
     const org = await prisma.organization.create({ data: data as Parameters<typeof prisma.organization.create>[0]["data"] });
+
+    // Optional: provision contact user as org owner
+    const contactUser = body.contactUser as { name?: string; email?: string } | undefined;
+    if (contactUser && typeof contactUser.email === "string" && contactUser.email.trim()) {
+      const email = contactUser.email.trim().toLowerCase();
+      const name = (typeof contactUser.name === "string" ? contactUser.name.trim() : "") || email.split("@")[0];
+      const tempPassword = generateTempPassword();
+      const passwordHash = await hashPassword(tempPassword);
+      const [firstName, ...rest] = name.split(" ");
+
+      let user = await prisma.user.findFirst({ where: { email } });
+      if (!user) {
+        user = await prisma.user.create({
+          data: {
+            email,
+            passwordHash,
+            role: "admin",
+            platformRole: "user",
+            displayName: name,
+            firstName: firstName || "",
+            lastName: rest.join(" ") || "",
+            organizationId: org.id,
+            identitySource: "local",
+            mustChangePassword: true,
+          },
+        });
+      } else {
+        // Existing user: assign temp password + flag
+        user = await prisma.user.update({
+          where: { id: user.id },
+          data: { passwordHash, mustChangePassword: true },
+        });
+      }
+
+      // Add as org_admin membership
+      const existing = await prisma.membership.findFirst({ where: { userId: user.id, organizationId: org.id } });
+      if (!existing) {
+        await prisma.membership.create({ data: { userId: user.id, organizationId: org.id, role: "org_admin" } });
+      } else {
+        await prisma.membership.update({ where: { id: existing.id }, data: { role: "org_admin" } });
+      }
+
+      res.status(201).json({ ...org, contactUserId: user.id, contactUserEmail: email, tempPassword });
+      return;
+    }
+
     res.status(201).json(org);
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to create organization";
@@ -187,6 +235,7 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
 // ─── Org user management ─────────────────────────────────────────────────────
 
 // POST /api/orgs/:orgId/users — create a user and add them to the org
+// Always generates a temp password. Returns it once in the response.
 router.post("/:orgId/users", requireAuth, async (req, res) => {
   const orgId = getOrgId(req.params.orgId);
   const body = req.body as Record<string, unknown>;
@@ -194,20 +243,15 @@ router.post("/:orgId/users", requireAuth, async (req, res) => {
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const name = typeof body.name === "string" ? body.name.trim() : "";
   const role = typeof body.role === "string" ? body.role : "staff";
-  const initialPassword = typeof body.initialPassword === "string" ? body.initialPassword.trim() : "";
 
   if (!email) {
     res.status(400).json({ error: "email is required" });
     return;
   }
 
-  if (initialPassword && initialPassword.length < 8) {
-    res.status(400).json({ error: "Password must be at least 8 characters" });
-    return;
-  }
-
   try {
-    const passwordHash = initialPassword ? await hashPassword(initialPassword) : "";
+    const tempPassword = generateTempPassword();
+    const passwordHash = await hashPassword(tempPassword);
     const [firstName, ...rest] = name.split(" ");
     const lastName = rest.join(" ");
 
@@ -219,18 +263,20 @@ router.post("/:orgId/users", requireAuth, async (req, res) => {
           email,
           passwordHash,
           role: "uploader",
+          platformRole: "user",
           displayName: name || email.split("@")[0],
           firstName: firstName || "",
           lastName: lastName || "",
           organizationId: orgId,
           identitySource: "local",
+          mustChangePassword: true,
         },
       });
-    } else if (initialPassword) {
-      // Update password hash if one was provided
+    } else {
+      // Existing user: assign a fresh temp password and require reset
       user = await prisma.user.update({
         where: { id: user.id },
-        data: { passwordHash },
+        data: { passwordHash, mustChangePassword: true },
       });
     }
 
@@ -260,6 +306,7 @@ router.post("/:orgId/users", requireAuth, async (req, res) => {
       organizationId: orgId,
       active: user.isActive,
       assignedProgramIds: Array.isArray(body.assignedProgramIds) ? body.assignedProgramIds : [],
+      tempPassword, // shown once — frontend must display and discard
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to create user";
@@ -354,7 +401,12 @@ router.post("/:orgId/users/:userId/set-password", requireAuth, async (req, res) 
     }
 
     const passwordHash = await hashPassword(newPassword);
-    await prisma.user.update({ where: { id: userId }, data: { passwordHash } });
+    // If an admin is resetting another user's password, mark it as temporary
+    const isReset = !isOwnPassword;
+    await prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash, mustChangePassword: isReset },
+    });
 
     res.json({ success: true });
   } catch (error) {

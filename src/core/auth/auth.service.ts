@@ -1,5 +1,6 @@
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
 import type { Request } from "express";
 import {
   CURRENT_PROGRAM_DOMAIN,
@@ -23,6 +24,16 @@ type SignableAuthTokenPayload = Omit<AuthTokenPayload, "organizationId" | "progr
 export type Role = "uploader" | "reviewer" | "admin";
 
 export const ROLE_LEVEL: Record<Role, number> = { uploader: 1, reviewer: 2, admin: 3 };
+
+// Generates a 12-character random password using unambiguous characters.
+// Intentionally excludes 0/O/l/1/I to prevent transcription errors.
+export function generateTempPassword(): string {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+  const bytes = crypto.randomBytes(12);
+  return Array.from(bytes)
+    .map((b) => chars[b % chars.length])
+    .join("");
+}
 
 export async function hashPassword(plaintext: string): Promise<string> {
   return bcrypt.hash(plaintext, 12);

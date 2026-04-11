@@ -27,6 +27,7 @@ type AuthUserRecord = {
   organizationName?: string | null;
   identitySource?: string | null;
   platformUserId?: string | null;
+  mustChangePassword?: boolean | null;
 };
 
 const prismaUser = prisma as typeof prisma & {
@@ -35,7 +36,11 @@ const prismaUser = prisma as typeof prisma & {
     count: () => Promise<number>;
     update: (args: {
       where: { id: string };
-      data: { passwordHash: string };
+      data: {
+        passwordHash?: string;
+        mustChangePassword?: boolean;
+        passwordSetAt?: Date | null;
+      };
     }) => Promise<AuthUserRecord>;
     create: (args: {
       data: {
@@ -74,6 +79,7 @@ function buildUserPayload(user: AuthUserRecord, organizationId: string, programD
     programDomain,
     identitySource: (user.identitySource ?? "local") as "platform" | "local",
     hasPassword: Boolean(user.passwordHash && user.passwordHash.length > 0),
+    mustChangePassword: user.mustChangePassword ?? false,
   };
 }
 
@@ -304,7 +310,49 @@ router.post("/set-password", requireAuth, async (req, res) => {
   const nextHash = await hashPassword(newPassword);
   await prismaUser.user.update({
     where: { id: user.id },
-    data: { passwordHash: nextHash },
+    data: { passwordHash: nextHash, mustChangePassword: false, passwordSetAt: new Date() },
+  });
+
+  res.status(204).send();
+});
+
+// POST /api/auth/complete-force-reset
+// For users who logged in with a temp password and must set a new one.
+// Only callable when mustChangePassword === true. No current password required.
+router.post("/complete-force-reset", requireAuth, async (req, res) => {
+  const payload = getRequestUser(req);
+  if (!payload) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+
+  if (!newPassword) {
+    res.status(400).json({ error: "New password is required" });
+    return;
+  }
+  if (newPassword.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+
+  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } });
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+
+  if (!user.mustChangePassword) {
+    res.status(400).json({ error: "No forced password reset is pending for this account." });
+    return;
+  }
+
+  const nextHash = await hashPassword(newPassword);
+  await prismaUser.user.update({
+    where: { id: user.id },
+    data: { passwordHash: nextHash, mustChangePassword: false, passwordSetAt: new Date() },
   });
 
   res.status(204).send();
@@ -353,7 +401,7 @@ router.post("/change-password", requireAuth, async (req, res) => {
   const nextHash = await hashPassword(newPassword);
   await prismaUser.user.update({
     where: { id: user.id },
-    data: { passwordHash: nextHash },
+    data: { passwordHash: nextHash, mustChangePassword: false, passwordSetAt: new Date() },
   });
 
   res.status(204).send();

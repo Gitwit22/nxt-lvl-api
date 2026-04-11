@@ -21,6 +21,9 @@ model User {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
+  mustChangePassword Boolean  @default(false)   // true after admin assigns a temp password
+  passwordSetAt      DateTime?                  // set when user first chooses their own password
+
   identitySource String  @default("local")   // "platform" | "local"
   platformUserId String?                      // nullable – the Suite user ID for platform-linked users
 
