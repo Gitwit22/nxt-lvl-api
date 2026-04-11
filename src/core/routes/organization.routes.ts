@@ -10,13 +10,25 @@ function getOrgId(param: string | string[]): string {
   return Array.isArray(param) ? param[0] : param;
 }
 
+/** Strip any domain suffix from a raw slug value (e.g. "acme.ntlops.com" → "acme"). */
+function sanitizeSlug(raw: string): string {
+  return raw
+    .toLowerCase()
+    .trim()
+    .replace(/\.ntlops\.com$/, "")
+    .replace(/\.nltops\.com$/, "")
+    .replace(/[^a-z0-9-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
 function buildOrgData(body: Record<string, unknown>) {
   const data: Record<string, unknown> = {};
   const str = (v: unknown) => (typeof v === "string" ? v : undefined);
   const num = (v: unknown) => (typeof v === "number" ? v : typeof v === "string" ? parseInt(v, 10) || undefined : undefined);
 
   if (str(body.name) !== undefined) data.name = str(body.name);
-  if (str(body.slug) !== undefined) data.slug = str(body.slug);
+  if (str(body.slug) !== undefined) data.slug = sanitizeSlug(str(body.slug)!);
   if ("subdomain" in body) data.subdomain = str(body.subdomain) ?? null;
   if ("contactEmail" in body) data.contactEmail = str(body.contactEmail) ?? null;
   if ("ownerEmail" in body) data.ownerEmail = str(body.ownerEmail) ?? null;

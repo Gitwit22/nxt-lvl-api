@@ -308,6 +308,203 @@ model TimeflowInvoice {
 
 // ─── End Timeflow ──────────────────────────────────────────────────────────────
 
+// ─── Mission Hub ──────────────────────────────────────────────────────────────
+
+model MissionHubProgram {
+  id              String   @id @default(cuid())
+  organizationId  String
+  userId          String
+  name            String
+  category        String   @default("")
+  manager         String   @default("")
+  status          String   @default("Active")   // Active|Completed|Planning|Suspended
+  startDate       String   @default("")
+  endDate         String?
+  budget          String   @default("")
+  budgetAmount    Float    @default(0)
+  progress        Int      @default(0)
+  description     String   @default("") @db.Text
+  targetAudience  String   @default("")
+  team            Json     @default("[]")
+  timeEntries     Json     @default("[]")
+  budgetItems     Json     @default("[]")
+  supporters      Json     @default("[]")
+  sponsors        Json     @default("[]")
+  documents       Json     @default("[]")
+  tasks           Json     @default("[]")
+  outcomes        Json     @default("[]")
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, status])
+}
+
+model MissionHubGrant {
+  id                 String   @id @default(cuid())
+  organizationId     String
+  userId             String
+  grantName          String
+  fundingSource      String   @default("")
+  amountAwarded      Float    @default(0)
+  startDate          String   @default("")
+  endDate            String?
+  status             String   @default("Active")
+  grantManager       String   @default("")
+  linkedPrograms     Json     @default("[]")
+  reportingStatus    String   @default("")
+  requirements       Json     @default("[]")
+  budgetAllocation   Json     @default("[]")
+  reportingDeadlines Json     @default("[]")
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, status])
+}
+
+model MissionHubExpense {
+  id              String   @id @default(cuid())
+  organizationId  String
+  userId          String
+  expenseName     String
+  amount          Float    @default(0)
+  date            String   @default("")
+  category        String   @default("")
+  type            String   @default("")
+  linkedProgramId String?
+  linkedProgram   String?
+  linkedGrant     String?
+  linkedCampaign  String?
+  fundingSource   String?
+  notes           String   @default("")
+  approvalStatus  String   @default("Pending")   // Pending|Approved|Rejected
+  recurring       Boolean  @default(false)
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, category])
+  @@index([organizationId, userId, approvalStatus])
+}
+
+model MissionHubSponsor {
+  id                 String   @id @default(cuid())
+  organizationId     String
+  userId             String
+  sponsorType        String   @default("")
+  organizationName   String
+  contactName        String   @default("")
+  email              String   @default("")
+  phone              String   @default("")
+  contributionAmount Float    @default(0)
+  contributionType   String   @default("")
+  paymentStatus      String   @default("")
+  status             String   @default("Active")
+  notes              String   @default("")
+  linkedPrograms     Json     @default("[]")
+  linkedCampaigns    Json     @default("[]")
+  linkedItems        Json     @default("[]")
+  isActive           Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, status])
+}
+
+model MissionHubCampaign {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  name           String
+  category       String   @default("Event")    // Event|Drive|Seasonal|Equipment
+  status         String   @default("Planning") // Planning|Active|Closed
+  owner          String   @default("")
+  startDate      String   @default("")
+  endDate        String?
+  goalAmount     Float    @default(0)
+  linkedPrograms Json     @default("[]")
+  tiers          Json     @default("[]")
+  items          Json     @default("[]")
+  donations      Json     @default("[]")
+  events         Json     @default("[]")
+  expenses       Json     @default("[]")
+  documents      Json     @default("[]")
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, status])
+}
+
+model MissionHubPersonnel {
+  id               String   @id @default(cuid())
+  organizationId   String
+  userId           String
+  firstName        String
+  lastName         String
+  email            String   @default("")
+  phone            String   @default("")
+  title            String   @default("")
+  department       String   @default("")
+  type             String   @default("Staff")  // Staff|Volunteer|Contractor|Board Member
+  role             String   @default("Admin")  // Executive Director|Deputy Director|Finance|Admin
+  status           String   @default("Active") // Active|Inactive|On Leave
+  accessLevel      String   @default("Basic")  // Full|Operational|Financial|Basic
+  assignedPrograms Json     @default("[]")
+  assignedGrants   Json     @default("[]")
+  notes            String   @default("")
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, status])
+  @@index([organizationId, userId, type])
+}
+
+model MissionHubCalendarEntry {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  title          String
+  date           String
+  type           String   @default("")
+  description    String   @default("")
+  linkedEntity   String?
+  linkedEntityId String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, date])
+}
+
+model MissionHubSavedReport {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  name           String
+  description    String   @default("")
+  config         Json     @default("{}")
+  isFavorite     Boolean  @default(false)
+  lastRun        String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, isFavorite])
+}
+
+// ─── End Mission Hub ──────────────────────────────────────────────────────────
+
 model Document {
   id                    String    @id
   organizationId        String    @default("default-org")
