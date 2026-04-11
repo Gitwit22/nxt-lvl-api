@@ -174,6 +174,140 @@ model Program {
   @@index([programDomain, organizationId])
 }
 
+// ─── Timeflow ─────────────────────────────────────────────────────────────────
+
+model TimeflowSettings {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  userId                String
+  businessName          String   @default("")
+  defaultClientId       String?
+  invoiceNotes          String   @default("")
+  paymentInstructions   String   @default("")
+  invoiceLogoDataUrl    String?  @db.Text
+  invoiceBannerDataUrl  String?  @db.Text
+  companyViewerAccess   Boolean  @default(false)
+  emailTemplate         String   @default("") @db.Text
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([organizationId, userId])
+  @@index([organizationId, userId])
+}
+
+model TimeflowClient {
+  id                   String   @id @default(cuid())
+  organizationId       String
+  userId               String
+  name                 String
+  contactName          String?
+  contactEmail         String?
+  contacts             Json     @default("[]")
+  hourlyRate           Float?
+  companyViewerEnabled Boolean  @default(false)
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  projects    TimeflowProject[]    @relation("ClientProjects")
+  timeEntries TimeflowTimeEntry[]  @relation("ClientTimeEntries")
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, isActive])
+}
+
+model TimeflowProject {
+  id           String   @id @default(cuid())
+  organizationId String
+  userId       String
+  clientId     String
+  name         String
+  status       String   @default("active")   // planning|active|on_hold|completed|archived
+  description  String   @default("") @db.Text
+  billingType  String   @default("hourly_uncapped")  // hourly_uncapped|hourly_capped|fixed_fee
+  hourlyRate   Float    @default(0)
+  maxPayoutCap Float    @default(0)
+  capHandling  String   @default("allow_overage")    // allow_overage|warn_only|block_billable
+  startDate    String
+  endDate      String?
+  notes        String   @default("") @db.Text
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  client      TimeflowClient      @relation("ClientProjects", fields: [clientId], references: [id], onDelete: Cascade)
+  timeEntries TimeflowTimeEntry[] @relation("ProjectTimeEntries")
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, clientId])
+  @@index([organizationId, userId, status])
+}
+
+model TimeflowTimeEntry {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  clientId       String
+  projectId      String?
+  date           String
+  startTime      String
+  endTime        String?
+  durationHours  Float    @default(0)
+  billingRate    Float?
+  billable       Boolean  @default(true)
+  invoiced       Boolean  @default(false)
+  invoiceId      String?
+  notes          String   @default("")
+  status         String   @default("completed")  // running|completed|invoiced
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  client  TimeflowClient   @relation("ClientTimeEntries", fields: [clientId], references: [id], onDelete: Cascade)
+  project TimeflowProject? @relation("ProjectTimeEntries", fields: [projectId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, clientId])
+  @@index([organizationId, userId, date])
+  @@index([organizationId, userId, invoiced])
+  @@index([organizationId, userId, status])
+}
+
+model TimeflowInvoice {
+  id            String   @id @default(cuid())
+  organizationId String
+  userId        String
+  clientId      String
+  periodStart   String
+  periodEnd     String
+  billingMode   String   @default("outstanding")  // range|outstanding
+  rangeStart    String?
+  rangeEnd      String?
+  grouping      String   @default("none")          // none|day|week
+  dueDate       String
+  entryIds      Json     @default("[]")
+  timeEntryIds  Json     @default("[]")
+  lineItems     Json     @default("[]")
+  projectIds    Json     @default("[]")
+  totalHours    Float    @default(0)
+  hourlyRate    Float    @default(0)
+  subtotal      Float    @default(0)
+  taxRate       Float    @default(0)
+  taxAmount     Float    @default(0)
+  totalAmount   Float    @default(0)
+  hasMixedRates Boolean  @default(false)
+  status        String   @default("draft")   // draft|issued|sent|paid
+  issuedAt      DateTime?
+  paidAt        DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, clientId])
+  @@index([organizationId, userId, status])
+}
+
+// ─── End Timeflow ──────────────────────────────────────────────────────────────
+
 model Document {
   id                    String    @id
   organizationId        String    @default("default-org")
