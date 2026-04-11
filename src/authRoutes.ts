@@ -73,6 +73,7 @@ function buildUserPayload(user: AuthUserRecord, organizationId: string, programD
     organizationName: user.organizationName ?? undefined,
     programDomain,
     identitySource: (user.identitySource ?? "local") as "platform" | "local",
+    hasPassword: Boolean(user.passwordHash && user.passwordHash.length > 0),
   };
 }
 
@@ -262,6 +263,49 @@ router.post("/logout", (_req, res) => {
   res.clearCookie("authToken", cookieOptions);
   res.clearCookie("jwt", cookieOptions);
   res.clearCookie("session", cookieOptions);
+
+  res.status(204).send();
+});
+
+// POST /api/auth/set-password
+// For accounts provisioned without a local password (e.g. platform-linked or admin-invited).
+// Does NOT require a current password — only requires the account to have no existing password hash.
+router.post("/set-password", requireAuth, async (req, res) => {
+  const payload = getRequestUser(req);
+  if (!payload) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const newPassword = typeof body.newPassword === "string" ? body.newPassword : "";
+
+  if (!newPassword) {
+    res.status(400).json({ error: "New password is required" });
+    return;
+  }
+
+  if (newPassword.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+
+  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } });
+  if (!user) {
+    res.status(404).json({ error: "User not found" });
+    return;
+  }
+
+  if (user.passwordHash && user.passwordHash.length > 0) {
+    res.status(400).json({ error: "Account already has a password. Use change-password instead." });
+    return;
+  }
+
+  const nextHash = await hashPassword(newPassword);
+  await prismaUser.user.update({
+    where: { id: user.id },
+    data: { passwordHash: nextHash },
+  });
 
   res.status(204).send();
 });
