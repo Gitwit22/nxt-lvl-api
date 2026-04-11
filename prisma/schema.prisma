@@ -13,6 +13,7 @@ model User {
   email        String   @unique
   passwordHash String   @default("")
   role         String   @default("uploader")
+  platformRole String   @default("user")      // "suite_admin" | "user"
   displayName  String   @default("")
   firstName    String   @default("")
   lastName     String   @default("")
@@ -27,11 +28,14 @@ model User {
   uploadedDocuments Document[] @relation("UploadedBy")
   reviewedDocuments Document[] @relation("ReviewedBy")
   memberships       Membership[] @relation("UserMembers")
+  programAccess     UserProgramAccess[] @relation("UserProgramAccess")
+  sentInvitations   OrgInvitation[] @relation("InvitedBy")
 
   @@unique([organizationId, email])
   @@index([organizationId])
   @@index([identitySource])
   @@index([platformUserId])
+  @@index([platformRole])
 }
 
 model Organization {
@@ -59,7 +63,9 @@ model Organization {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  members Membership[] @relation("OrgMembers")
+  members       Membership[]              @relation("OrgMembers")
+  programAccess OrganizationProgramAccess[] @relation("OrgProgramAccess")
+  invitations   OrgInvitation[]           @relation("OrgInvitations")
 
   @@index([isActive])
   @@index([status])
@@ -69,7 +75,7 @@ model Membership {
   id             String   @id @default(cuid())
   userId         String
   organizationId String
-  role           String   @default("member")
+  role           String   @default("member")  // owner | admin | manager | member | viewer
   createdAt      DateTime @default(now())
 
   user         User         @relation("UserMembers", fields: [userId], references: [id], onDelete: Cascade)
@@ -77,6 +83,56 @@ model Membership {
 
   @@unique([userId, organizationId])
   @@index([organizationId])
+  @@index([role])
+}
+
+model OrganizationProgramAccess {
+  id             String   @id @default(cuid())
+  organizationId String
+  programId      String
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation("OrgProgramAccess", fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, programId])
+  @@index([organizationId])
+}
+
+model UserProgramAccess {
+  id             String   @id @default(cuid())
+  userId         String
+  organizationId String
+  programId      String
+  enabled        Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user User @relation("UserProgramAccess", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId, programId])
+  @@index([userId, organizationId])
+}
+
+model OrgInvitation {
+  id             String    @id @default(cuid())
+  organizationId String
+  email          String
+  role           String    @default("member")
+  invitedById    String
+  token          String    @unique @default(cuid())
+  status         String    @default("pending")  // pending | accepted | revoked | expired
+  expiresAt      DateTime
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  invitedBy    User         @relation("InvitedBy", fields: [invitedById], references: [id])
+  organization Organization @relation("OrgInvitations", fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, email, status])
+  @@index([organizationId, status])
+  @@index([token])
 }
 
 model Program {

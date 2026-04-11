@@ -12,12 +12,13 @@ export interface AuthTokenPayload {
   userId: string;
   email: string;
   role: string;
+  platformRole: string;
   organizationId: string;
   programDomain: string;
 }
 
-type SignableAuthTokenPayload = Omit<AuthTokenPayload, "organizationId" | "programDomain"> &
-  Partial<Pick<AuthTokenPayload, "organizationId" | "programDomain">>;
+type SignableAuthTokenPayload = Omit<AuthTokenPayload, "organizationId" | "programDomain" | "platformRole"> &
+  Partial<Pick<AuthTokenPayload, "organizationId" | "programDomain" | "platformRole">>;
 
 export type Role = "uploader" | "reviewer" | "admin";
 
@@ -37,6 +38,7 @@ export function signToken(payload: SignableAuthTokenPayload): string {
       ...payload,
       organizationId: payload.organizationId || DEFAULT_ORGANIZATION_ID,
       programDomain: payload.programDomain || CURRENT_PROGRAM_DOMAIN,
+      platformRole: payload.platformRole || "user",
     },
     JWT_SECRET,
     { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions,

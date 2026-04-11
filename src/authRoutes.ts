@@ -21,6 +21,7 @@ type AuthUserRecord = {
   email: string;
   passwordHash: string;
   role: string;
+  platformRole?: string | null;
   displayName: string;
   organizationId?: string | null;
   organizationName?: string | null;
@@ -66,6 +67,7 @@ function buildUserPayload(user: AuthUserRecord, organizationId: string, programD
     id: user.id,
     email: user.email,
     role: user.role,
+    platformRole: (user.platformRole ?? "user") as "suite_admin" | "user",
     displayName: user.displayName,
     organizationId,
     organizationName: user.organizationName ?? undefined,
@@ -135,6 +137,7 @@ router.post("/login", async (req, res) => {
     userId: user.id,
     email: user.email,
     role: user.role,
+    platformRole: user.platformRole ?? "user",
     organizationId: tenantScope.organizationId,
     programDomain,
   });
@@ -174,6 +177,7 @@ function buildUserPayloadFromToken(payload: {
   userId: string;
   email: string;
   role: string;
+  platformRole?: string;
   organizationId: string;
   programDomain: string;
 }) {
@@ -181,6 +185,7 @@ function buildUserPayloadFromToken(payload: {
     id: payload.userId,
     email: payload.email,
     role: payload.role,
+    platformRole: (payload.platformRole ?? "user") as "suite_admin" | "user",
     displayName: "",
     organizationId: payload.organizationId,
     programDomain: payload.programDomain,
@@ -203,6 +208,7 @@ async function handleRefresh(req: express.Request, res: express.Response): Promi
     userId: payload.userId,
     email: payload.email,
     role: payload.role,
+    platformRole: (user as AuthUserRecord | null)?.platformRole ?? payload.platformRole ?? "user",
     organizationId: payload.organizationId,
     programDomain: payload.programDomain,
   });
