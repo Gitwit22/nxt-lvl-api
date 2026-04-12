@@ -94,9 +94,8 @@ router.post("/platform-auth/consume", async (req, res) => {
 
   let claims: { userId: string; email: string; role: string; organizationId: string } | undefined;
 
-  // Verify with platform launch secret
   try {
-    const payload = jwt.verify(launchToken, PLATFORM_LAUNCH_TOKEN_SECRET) as Record<string, unknown>;
+    const payload = jwt.verify(launchToken, JWT_SECRET) as Record<string, unknown>;
     const userId = typeof payload.userId === "string" ? payload.userId : undefined;
     const email = typeof payload.email === "string" ? payload.email : undefined;
     const organizationId = typeof payload.organizationId === "string" ? payload.organizationId : undefined;
@@ -106,24 +105,7 @@ router.post("/platform-auth/consume", async (req, res) => {
       claims = { userId, email, role, organizationId };
     }
   } catch {
-    // fall through — also try platform JWT secret as fallback
-  }
-
-  if (!claims) {
-    // Fallback: try decoding with the standard JWT secret (dev / same-domain scenario)
-    try {
-      const payload = jwt.verify(launchToken, JWT_SECRET) as Record<string, unknown>;
-      const userId = typeof payload.userId === "string" ? payload.userId : undefined;
-      const email = typeof payload.email === "string" ? payload.email : undefined;
-      const organizationId = typeof payload.organizationId === "string" ? payload.organizationId : undefined;
-      const role = typeof payload.role === "string" ? payload.role : "contractor";
-
-      if (userId && email && organizationId) {
-        claims = { userId, email, role, organizationId };
-      }
-    } catch {
-      // invalid token
-    }
+    // invalid token
   }
 
   if (!claims) {

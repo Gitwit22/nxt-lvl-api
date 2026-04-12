@@ -38,6 +38,10 @@ function isRecord(v: unknown): v is Record<string, unknown> {
   return Boolean(v) && typeof v === "object" && !Array.isArray(v);
 }
 
+function p(param: string | string[] | undefined): string {
+  return Array.isArray(param) ? (param[0] ?? "") : (param ?? "");
+}
+
 // ─── Organization lifecycle ───────────────────────────────────────────────────
 
 /**
@@ -54,7 +58,7 @@ router.get("/organizations", requireAuth, requirePlatformAdmin, async (_req, res
  * Soft-archive an organization (sets status = "archived", isActive = false).
  */
 router.post("/organizations/:orgId/archive", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId } = req.params;
+  const orgId = p(req.params.orgId);
   const existing = await prisma.organization.findUnique({ where: { id: orgId } });
   if (!existing) { res.status(404).json({ error: "Organization not found" }); return; }
 
@@ -72,7 +76,7 @@ router.post("/organizations/:orgId/archive", requireAuth, requirePlatformAdmin, 
  * Restore an archived/suspended organization (sets status = "active", isActive = true).
  */
 router.post("/organizations/:orgId/restore", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId } = req.params;
+  const orgId = p(req.params.orgId);
   const existing = await prisma.organization.findUnique({ where: { id: orgId } });
   if (!existing) { res.status(404).json({ error: "Organization not found" }); return; }
 
@@ -90,7 +94,7 @@ router.post("/organizations/:orgId/restore", requireAuth, requirePlatformAdmin, 
  * Suspend an organization (disables access without archiving).
  */
 router.post("/organizations/:orgId/suspend", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId } = req.params;
+  const orgId = p(req.params.orgId);
   const existing = await prisma.organization.findUnique({ where: { id: orgId } });
   if (!existing) { res.status(404).json({ error: "Organization not found" }); return; }
 
@@ -109,7 +113,7 @@ router.post("/organizations/:orgId/suspend", requireAuth, requirePlatformAdmin, 
  * Header: X-Confirm-Delete: permanently-delete
  */
 router.delete("/organizations/:orgId", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId } = req.params;
+  const orgId = p(req.params.orgId);
   const confirm = req.headers["x-confirm-delete"];
   if (confirm !== "permanently-delete") {
     res.status(400).json({
@@ -148,7 +152,7 @@ const prismaExt = prisma as typeof prisma & {
  * List all program subscriptions for an org.
  */
 router.get("/organizations/:orgId/subscriptions", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId } = req.params;
+  const orgId = p(req.params.orgId);
   const subs = await prismaExt.organizationProgramSubscription.findMany({
     where: { organizationId: orgId },
     orderBy: { programId: "asc" },
@@ -162,7 +166,8 @@ router.get("/organizations/:orgId/subscriptions", requireAuth, requirePlatformAd
  * Body: { status, subscriptionSource?, startsAt?, endsAt?, seatLimit?, notes? }
  */
 router.put("/organizations/:orgId/subscriptions/:programId", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId, programId } = req.params;
+  const orgId = p(req.params.orgId);
+  const programId = p(req.params.programId);
   const body = isRecord(req.body) ? req.body : {};
 
   const org = await prisma.organization.findUnique({ where: { id: orgId } });
@@ -192,7 +197,8 @@ router.put("/organizations/:orgId/subscriptions/:programId", requireAuth, requir
  * Remove a subscription row (revoke access entirely).
  */
 router.delete("/organizations/:orgId/subscriptions/:programId", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId, programId } = req.params;
+  const orgId = p(req.params.orgId);
+  const programId = p(req.params.programId);
   const existing = await prismaExt.organizationProgramSubscription.findFirst({
     where: { organizationId: orgId, programId },
   } as Record<string, unknown>);
@@ -224,7 +230,7 @@ router.get("/subscriptions", requireAuth, requirePlatformAdmin, async (_req, res
  * List per-user program access within an org.
  */
 router.get("/organizations/:orgId/user-access", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId } = req.params;
+  const orgId = p(req.params.orgId);
   const rows = await prisma.userProgramAccess.findMany({
     where: { organizationId: orgId },
     orderBy: [{ userId: "asc" }, { programId: "asc" }],
@@ -238,7 +244,9 @@ router.get("/organizations/:orgId/user-access", requireAuth, requirePlatformAdmi
  * Body: { enabled: boolean }
  */
 router.put("/organizations/:orgId/user-access/:userId/:programId", requireAuth, requirePlatformAdmin, async (req, res) => {
-  const { orgId, userId, programId } = req.params;
+  const orgId = p(req.params.orgId);
+  const userId = p(req.params.userId);
+  const programId = p(req.params.programId);
   const body = isRecord(req.body) ? req.body : {};
   const enabled = body.enabled !== false;
 

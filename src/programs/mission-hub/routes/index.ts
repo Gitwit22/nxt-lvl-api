@@ -92,24 +92,13 @@ router.post("/platform-auth/consume", async (req, res) => {
   let claims: { userId: string; email: string; role: string; organizationId: string } | undefined;
 
   try {
-    const payload = jwt.verify(launchToken, PLATFORM_LAUNCH_TOKEN_SECRET) as Record<string, unknown>;
+    const payload = jwt.verify(launchToken, JWT_SECRET) as Record<string, unknown>;
     const userId = typeof payload.userId === "string" ? payload.userId : undefined;
     const email = typeof payload.email === "string" ? payload.email : undefined;
     const organizationId = typeof payload.organizationId === "string" ? payload.organizationId : undefined;
     const role = typeof payload.role === "string" ? payload.role : "member";
     if (userId && email && organizationId) claims = { userId, email, role, organizationId };
-  } catch { /* fall through */ }
-
-  if (!claims) {
-    try {
-      const payload = jwt.verify(launchToken, JWT_SECRET) as Record<string, unknown>;
-      const userId = typeof payload.userId === "string" ? payload.userId : undefined;
-      const email = typeof payload.email === "string" ? payload.email : undefined;
-      const organizationId = typeof payload.organizationId === "string" ? payload.organizationId : undefined;
-      const role = typeof payload.role === "string" ? payload.role : "member";
-      if (userId && email && organizationId) claims = { userId, email, role, organizationId };
-    } catch { /* invalid */ }
-  }
+  } catch { /* invalid */ }
 
   if (!claims) {
     res.status(401).json({ error: "Invalid or expired launch token", code: "invalid_launch_token" });
