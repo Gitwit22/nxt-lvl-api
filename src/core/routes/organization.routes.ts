@@ -10,6 +10,79 @@ function getOrgId(param: string | string[]): string {
   return Array.isArray(param) ? param[0] : param;
 }
 
+function normalizeEmail(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function isPlatformAdmin(requestUser: ReturnType<typeof getRequestUser>): boolean {
+  if (!requestUser) return false;
+  return requestUser.platformRole === "suite_admin" || requestUser.role === "admin";
+}
+
+function toDisplayNameFromEmail(email: string): string {
+  return email.split("@")[0] || "owner";
+}
+
+async function findOrgOwner(orgId: string, ownerEmail: string) {
+  const ownerUser = await prisma.user.findFirst({ where: { email: ownerEmail } });
+  if (!ownerUser) {
+    return { ownerUser: null, membership: null };
+  }
+
+  const membership = await prisma.membership.findFirst({
+    where: { userId: ownerUser.id, organizationId: orgId },
+  });
+
+  return { ownerUser, membership };
+}
+
+async function ensureOwnerUserForOrganization(orgId: string, ownerEmail: string) {
+  const existing = await findOrgOwner(orgId, ownerEmail);
+  if (existing.ownerUser) {
+    if (!existing.membership) {
+      await prisma.membership.create({
+        data: { userId: existing.ownerUser.id, organizationId: orgId, role: "owner" },
+      });
+    } else if (existing.membership.role !== "owner") {
+      await prisma.membership.update({
+        where: { id: existing.membership.id },
+        data: { role: "owner" },
+      });
+    }
+
+    return existing.ownerUser;
+  }
+
+  const displayName = toDisplayNameFromEmail(ownerEmail);
+  const [firstName, ...rest] = displayName.split(" ");
+  const created = await prisma.user.create({
+    data: {
+      email: ownerEmail,
+      passwordHash: "",
+      role: "uploader",
+      platformRole: "user",
+      displayName,
+      firstName: firstName || "",
+      lastName: rest.join(" ") || "",
+      organizationId: orgId,
+      identitySource: "local",
+      mustChangePassword: false,
+    },
+  });
+
+  await prisma.membership.create({
+    data: { userId: created.id, organizationId: orgId, role: "owner" },
+  });
+
+  return created;
+}
+
+function resolveOwnerPasswordStatus(ownerUser: { passwordHash: string; mustChangePassword: boolean } | null) {
+  if (!ownerUser || !ownerUser.passwordHash) return "not_initialized" as const;
+  if (ownerUser.mustChangePassword) return "reset_pending" as const;
+  return "active" as const;
+}
+
 /** Strip any domain suffix from a raw slug value (e.g. "acme.ntlops.com" → "acme"). */
 function sanitizeSlug(raw: string): string {
   return raw
@@ -92,19 +165,20 @@ router.post("/", requireAuth, async (req, res) => {
     // Optional: provision contact user as org owner
     const contactUser = body.contactUser as { name?: string; email?: string } | undefined;
     if (contactUser && typeof contactUser.email === "string" && contactUser.email.trim()) {
-      const email = contactUser.email.trim().toLowerCase();
+      const email = normalizeEmail(contactUser.email);
       const name = (typeof contactUser.name === "string" ? contactUser.name.trim() : "") || email.split("@")[0];
-      const tempPassword = generateTempPassword();
-      const passwordHash = await hashPassword(tempPassword);
       const [firstName, ...rest] = name.split(" ");
+      let tempPassword: string | undefined;
 
       let user = await prisma.user.findFirst({ where: { email } });
       if (!user) {
+        tempPassword = generateTempPassword();
+        const passwordHash = await hashPassword(tempPassword);
         user = await prisma.user.create({
           data: {
             email,
             passwordHash,
-            role: "admin",
+            role: "uploader",
             platformRole: "user",
             displayName: name,
             firstName: firstName || "",
@@ -112,22 +186,17 @@ router.post("/", requireAuth, async (req, res) => {
             organizationId: org.id,
             identitySource: "local",
             mustChangePassword: true,
+            passwordSetAt: new Date(),
           },
-        });
-      } else {
-        // Existing user: assign temp password + flag
-        user = await prisma.user.update({
-          where: { id: user.id },
-          data: { passwordHash, mustChangePassword: true },
         });
       }
 
-      // Add as org_admin membership
+      // Add as owner membership for this organization.
       const existing = await prisma.membership.findFirst({ where: { userId: user.id, organizationId: org.id } });
       if (!existing) {
-        await prisma.membership.create({ data: { userId: user.id, organizationId: org.id, role: "org_admin" } });
+        await prisma.membership.create({ data: { userId: user.id, organizationId: org.id, role: "owner" } });
       } else {
-        await prisma.membership.update({ where: { id: existing.id }, data: { role: "org_admin" } });
+        await prisma.membership.update({ where: { id: existing.id }, data: { role: "owner" } });
       }
 
       res.status(201).json({ ...org, contactUserId: user.id, contactUserEmail: email, tempPassword });
@@ -143,6 +212,153 @@ router.post("/", requireAuth, async (req, res) => {
     }
     res.status(500).json({ error: message });
   }
+});
+
+// GET /api/orgs/:orgId/owner-access
+// Platform admin-only owner credential status for organization settings.
+router.get("/:orgId/owner-access", requireAuth, async (req, res) => {
+  const requestUser = getRequestUser(req);
+  if (!isPlatformAdmin(requestUser)) {
+    res.status(403).json({ error: "Only platform admins can access owner credentials" });
+    return;
+  }
+
+  const orgId = getOrgId(req.params.orgId);
+  const org = await prisma.organization.findUnique({ where: { id: orgId } });
+  if (!org) {
+    res.status(404).json({ error: "Organization not found" });
+    return;
+  }
+
+  const ownerEmail = normalizeEmail(org.ownerEmail);
+  if (!ownerEmail) {
+    res.status(400).json({ error: "Organization owner email is not configured" });
+    return;
+  }
+
+  const { ownerUser, membership } = await findOrgOwner(org.id, ownerEmail);
+  const passwordStatus = resolveOwnerPasswordStatus(ownerUser);
+
+  res.json({
+    organizationId: org.id,
+    ownerEmail,
+    ownerUserId: ownerUser?.id ?? null,
+    orgRole: membership?.role ?? "owner",
+    platformRole: ownerUser?.platformRole ?? "user",
+    passwordStatus,
+    mustChangePassword: ownerUser?.mustChangePassword ?? false,
+    passwordInitializedAt: ownerUser?.passwordSetAt ?? null,
+    temporaryPasswordIssuedAt: ownerUser?.mustChangePassword ? ownerUser?.passwordSetAt ?? null : null,
+    initialPasswordAllowed: !ownerUser?.passwordHash,
+    resetAllowed: Boolean(ownerUser?.passwordHash),
+  });
+});
+
+// POST /api/orgs/:orgId/owner-access/initialize-password
+// One-time initial password bootstrap for the configured organization owner.
+router.post("/:orgId/owner-access/initialize-password", requireAuth, async (req, res) => {
+  const requestUser = getRequestUser(req);
+  if (!isPlatformAdmin(requestUser)) {
+    res.status(403).json({ error: "Only platform admins can initialize owner credentials" });
+    return;
+  }
+
+  const orgId = getOrgId(req.params.orgId);
+  const org = await prisma.organization.findUnique({ where: { id: orgId } });
+  if (!org) {
+    res.status(404).json({ error: "Organization not found" });
+    return;
+  }
+
+  const ownerEmail = normalizeEmail(org.ownerEmail);
+  if (!ownerEmail) {
+    res.status(400).json({ error: "Organization owner email is not configured" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const shouldGenerate = body.generateTempPassword !== false;
+  const suppliedPassword = typeof body.newPassword === "string" ? body.newPassword.trim() : "";
+
+  let ownerUser = await ensureOwnerUserForOrganization(org.id, ownerEmail);
+  if (ownerUser.passwordHash) {
+    res.status(409).json({ error: "Initial password has already been set for this owner account" });
+    return;
+  }
+
+  const plainPassword = shouldGenerate ? generateTempPassword() : suppliedPassword;
+  if (!plainPassword || plainPassword.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+
+  const passwordHash = await hashPassword(plainPassword);
+  ownerUser = await prisma.user.update({
+    where: { id: ownerUser.id },
+    data: {
+      passwordHash,
+      mustChangePassword: true,
+      passwordSetAt: new Date(),
+    },
+  });
+
+  res.json({
+    organizationId: org.id,
+    ownerUserId: ownerUser.id,
+    ownerEmail,
+    tempPassword: shouldGenerate ? plainPassword : undefined,
+    mustChangePassword: true,
+    passwordStatus: resolveOwnerPasswordStatus(ownerUser),
+  });
+});
+
+// POST /api/orgs/:orgId/owner-access/reset-password
+// Generates a new temporary password and requires change on next login.
+router.post("/:orgId/owner-access/reset-password", requireAuth, async (req, res) => {
+  const requestUser = getRequestUser(req);
+  if (!isPlatformAdmin(requestUser)) {
+    res.status(403).json({ error: "Only platform admins can reset owner credentials" });
+    return;
+  }
+
+  const orgId = getOrgId(req.params.orgId);
+  const org = await prisma.organization.findUnique({ where: { id: orgId } });
+  if (!org) {
+    res.status(404).json({ error: "Organization not found" });
+    return;
+  }
+
+  const ownerEmail = normalizeEmail(org.ownerEmail);
+  if (!ownerEmail) {
+    res.status(400).json({ error: "Organization owner email is not configured" });
+    return;
+  }
+
+  const ownerUser = await ensureOwnerUserForOrganization(org.id, ownerEmail);
+  if (!ownerUser.passwordHash) {
+    res.status(400).json({ error: "Owner password has not been initialized yet" });
+    return;
+  }
+
+  const tempPassword = generateTempPassword();
+  const passwordHash = await hashPassword(tempPassword);
+  const updated = await prisma.user.update({
+    where: { id: ownerUser.id },
+    data: {
+      passwordHash,
+      mustChangePassword: true,
+      passwordSetAt: new Date(),
+    },
+  });
+
+  res.json({
+    organizationId: org.id,
+    ownerUserId: updated.id,
+    ownerEmail,
+    tempPassword,
+    mustChangePassword: true,
+    passwordStatus: resolveOwnerPasswordStatus(updated),
+  });
 });
 
 // Update organization
