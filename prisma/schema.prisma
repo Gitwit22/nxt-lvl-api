@@ -25,18 +25,11 @@ model User {
   passwordSetAt      DateTime?                  // set when user first chooses their own password
 
   // ── Deprecated / legacy platform-handoff fields ──────────────────────────
-
-    invitedById        String?                    // userId of the admin who created this account
-
-    // ── Deprecated / legacy platform-handoff fields ──────────────────────────
-    // These were used by the old suite→app JWT handoff flow that has been removed.
-    // Keep them nullable so existing rows are not broken; do not write new values.
-    identitySource String  @default("local")   // @deprecated — was "platform" | "local"
-    platformUserId String?                      // @deprecated — was Suite user ID for linked accounts
-    // ─────────────────────────────────────────────────────────────────────────
-
-    invitedByUser     User?      @relation("InvitedByUser", fields: [invitedById], references: [id])
-    invitedUsers      User[]     @relation("InvitedByUser")
+  // These were used by the old suite→app JWT handoff flow that has been removed.
+  // Keep them nullable so existing rows are not broken; do not write new values.
+  identitySource String  @default("local")   // @deprecated — was "platform" | "local"
+  platformUserId String?                      // @deprecated — was Suite user ID for linked accounts
+  // ─────────────────────────────────────────────────────────────────────────
   createdDocuments  Document[] @relation("CreatedBy")
   uploadedDocuments Document[] @relation("UploadedBy")
   reviewedDocuments Document[] @relation("ReviewedBy")
