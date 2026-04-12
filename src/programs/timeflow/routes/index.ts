@@ -8,8 +8,9 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import jwt from "jsonwebtoken";
 import { prisma } from "../../../core/db/prisma.js";
-import { JWT_SECRET, PLATFORM_LAUNCH_TOKEN_SECRET } from "../../../core/config/env.js";
+import { JWT_SECRET } from "../../../core/config/env.js";
 import { signToken } from "../../../core/auth/auth.service.js";
+import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
 import { logger } from "../../../logger.js";
 
 const router = express.Router();
@@ -190,6 +191,13 @@ router.post("/platform-auth/consume", async (req, res) => {
     organizationId: claims.organizationId,
   });
 });
+
+// ─── Subscription gate ────────────────────────────────────────────────────────
+// All routes below this point require both a valid Timeflow JWT AND an active
+// OrganizationProgramSubscription for "timeflow". The requireTimeflowAuth call
+// that runs here is redundant with per-route checks but ensures the user is
+// attached before the subscription check inspects it.
+router.use(requireTimeflowAuth, requireProgramSubscription("timeflow"));
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 

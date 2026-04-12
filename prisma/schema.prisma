@@ -24,8 +24,12 @@ model User {
   mustChangePassword Boolean  @default(false)   // true after admin assigns a temp password
   passwordSetAt      DateTime?                  // set when user first chooses their own password
 
-  identitySource String  @default("local")   // "platform" | "local"
-  platformUserId String?                      // nullable – the Suite user ID for platform-linked users
+  // ── Deprecated / legacy platform-handoff fields ──────────────────────────
+  // These were used by the old suite→app JWT handoff flow that has been removed.
+  // Keep them nullable so existing rows are not broken; do not write new values.
+  identitySource String  @default("local")   // @deprecated — was "platform" | "local"
+  platformUserId String?                      // @deprecated — was Suite user ID for linked accounts
+  // ─────────────────────────────────────────────────────────────────────────
 
   createdDocuments  Document[] @relation("CreatedBy")
   uploadedDocuments Document[] @relation("UploadedBy")
@@ -36,8 +40,6 @@ model User {
 
   @@unique([organizationId, email])
   @@index([organizationId])
-  @@index([identitySource])
-  @@index([platformUserId])
   @@index([platformRole])
 }
 
@@ -56,6 +58,7 @@ model Organization {
   bannerUrl         String?
   primaryColor      String?
   accentColor       String?
+  // @deprecated — replaced by OrganizationProgramSubscription; kept for read compatibility
   assignedBundleIds Json      @default("[]")
   assignedProgramIds Json     @default("[]")
   planType          String    @default("starter")
@@ -66,9 +69,10 @@ model Organization {
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
-  members       Membership[]              @relation("OrgMembers")
-  programAccess OrganizationProgramAccess[] @relation("OrgProgramAccess")
-  invitations   OrgInvitation[]           @relation("OrgInvitations")
+  members               Membership[]                      @relation("OrgMembers")
+  programAccess         OrganizationProgramAccess[]        @relation("OrgProgramAccess")
+  programSubscriptions  OrganizationProgramSubscription[]  @relation("OrgProgramSubscriptions")
+  invitations           OrgInvitation[]                    @relation("OrgInvitations")
 
   @@index([isActive])
   @@index([status])
@@ -138,6 +142,30 @@ model OrgInvitation {
   @@index([token])
 }
 
+// Subscription/entitlement: controls whether an org can launch a program.
+// Replaces the old assignedProgramIds JSON blob on Organization.
+// Platform admin manages these rows; app launch checks status === "active" | "trialing".
+model OrganizationProgramSubscription {
+  id                 String    @id @default(cuid())
+  organizationId     String
+  programId          String    // matches Program.id or a well-known slug like "mission-hub"
+  status             String    @default("inactive")  // active | inactive | trialing | past_due | canceled
+  subscriptionSource String    @default("manual")    // stripe | manual | comp
+  startsAt           DateTime?
+  endsAt             DateTime?
+  seatLimit          Int?
+  notes              String    @default("")
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  organization Organization @relation("OrgProgramSubscriptions", fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, programId])
+  @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([status])
+}
+
 model Program {
   id               String   @id @default(cuid())
   programDomain    String   @default("community-chronicle")
@@ -164,7 +192,8 @@ model Program {
   launchLabel      String   @default("Launch")
   displayOrder     Int      @default(999)
   notes            String   @default("")
-  authMode         String   @default("local_only")  // "platform_only" | "local_only" | "hybrid"
+  // @deprecated — platform_only / hybrid modes removed; all programs use local auth
+  authMode         String   @default("local_only")
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   deletedAt        DateTime?

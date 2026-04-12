@@ -8,12 +8,17 @@ import { createDocumentPayload } from "../../../documentFactory.js";
 import { enqueueProcessing } from "../../../processingQueue.js";
 import { requireAuth, requireRole } from "../../../core/middleware/auth.middleware.js";
 import { getRequestUser } from "../../../core/auth/auth.service.js";
+import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
 import { getRequestTenantScope, type TenantScope } from "../../../tenant.js";
 import { upload } from "../../../validators.js";
 import { logger } from "../../../logger.js";
 import { jobRouter } from "../../../jobRoutes.js";
 
 const router = express.Router();
+
+// ─── Subscription gate ────────────────────────────────────────────────────────
+// All routes require a valid JWT and an active community-chronicle subscription.
+router.use(requireAuth, requireProgramSubscription("community-chronicle"));
 
 function buildFileUrl(relativePath: string): string {
   if (BACKEND_URL && !BACKEND_URL.startsWith("http://localhost")) {

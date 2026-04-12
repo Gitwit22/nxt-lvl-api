@@ -1,5 +1,4 @@
 import express from "express";
-import jwt from "jsonwebtoken";
 import { prisma } from "./core/db/prisma.js";
 import {
   hashPassword,
@@ -8,10 +7,9 @@ import {
   getRequestUser,
 } from "./core/auth/auth.service.js";
 import { requireAuth, requireRole, tryAttachAuthUser } from "./core/middleware/auth.middleware.js";
-import { CURRENT_PROGRAM_DOMAIN, PLATFORM_LAUNCH_TOKEN_SECRET, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
+import { CURRENT_PROGRAM_DOMAIN, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
-import { getProgramDefinition, programs } from "./core/config/programs.js";
 import { resolveProgramKey } from "./core/middleware/partition.middleware.js";
 
 const router = express.Router();
@@ -90,21 +88,12 @@ function resolveAuthProgramDomain(req: express.Request): string {
       : undefined;
 
   const resolved = resolveProgramKey(headerValue);
-  return getProgramDefinition(resolved) ? resolved : CURRENT_PROGRAM_DOMAIN;
+  return resolved || CURRENT_PROGRAM_DOMAIN;
 }
 
 // POST /api/auth/login
 router.post("/login", async (req, res) => {
   const programDomain = resolveAuthProgramDomain(req);
-  const currentProgramAuthMode = programs[programDomain]?.authMode ?? "local_only";
-
-  if (currentProgramAuthMode === "platform_only") {
-    res.status(403).json({
-      error: "Direct local login is deprecated for this app. Sign in through Suite.",
-      code: "suite_login_required",
-    });
-    return;
-  }
 
   const body = req.body as Record<string, unknown>;
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
@@ -409,33 +398,16 @@ router.post("/change-password", requireAuth, async (req, res) => {
 
 // POST /api/auth/register
 // - First user can always self-register (bootstrapping).
-// - Hybrid-mode programs allow open self-registration for local accounts.
-// - All other programs require admin JWT or PLATFORM_SETUP_TOKEN for subsequent users.
+// - All other users require admin JWT or PLATFORM_SETUP_TOKEN.
 router.post(
   "/register",
   (req, res, next) => {
-    const programDomain = resolveAuthProgramDomain(req);
-    const currentProgramAuthMode = programs[programDomain]?.authMode ?? "local_only";
-
-    if (currentProgramAuthMode === "platform_only") {
-      res.status(403).json({
-        error: "Direct local registration is deprecated for this app. Sign in through Suite.",
-        code: "suite_login_required",
-      });
-      return;
-    }
-
     const body = req.body as Record<string, unknown>;
     const providedToken = typeof body.platformSetupToken === "string"
       ? body.platformSetupToken.trim()
       : typeof body.setupToken === "string" ? body.setupToken.trim() : "";
     if (PLATFORM_SETUP_TOKEN && providedToken && providedToken === PLATFORM_SETUP_TOKEN) {
       return next(); // valid setup token bypass
-    }
-    // Hybrid-mode programs allow open local registration
-    const currentProgram = programs[programDomain];
-    if (currentProgram?.authMode === "hybrid") {
-      return next();
     }
     void prismaUser.user
       .count()
@@ -523,48 +495,6 @@ router.get("/me", requireAuth, async (req, res) => {
     appInitialized: appInitState === "ready",
     appInitState,
   });
-});
-
-// POST /api/auth/launch-token
-// Called by nxt-lvl-hub when a user clicks "Launch" on a program card.
-// Issues a short-lived token the target program uses to auto-authenticate the user.
-router.post("/launch-token", requireAuth, (req, res) => {
-  const payload = getRequestUser(req);
-  if (!payload) {
-    res.status(401).json({ error: "Not authenticated" });
-    return;
-  }
-
-  const body = req.body as Record<string, unknown>;
-  const organizationId =
-    typeof body.organizationId === "string" ? body.organizationId : payload.organizationId;
-  const programDomain = typeof body.programDomain === "string" ? body.programDomain : "";
-
-  if (!organizationId || !programDomain) {
-    res.status(400).json({ error: "organizationId and programDomain are required" });
-    return;
-  }
-
-  const launchToken = jwt.sign(
-    {
-      type: "launch",
-      userId: payload.userId,
-      email: payload.email,
-      role: payload.role,
-      organizationId,
-      programDomain,
-    },
-    PLATFORM_LAUNCH_TOKEN_SECRET,
-    { expiresIn: "5m" },
-  );
-
-  logger.info("[auth] launch token issued", {
-    userId: payload.userId,
-    organizationId,
-    programDomain,
-  });
-
-  res.json({ launchToken });
 });
 
 // Timing-safe dummy hash comparison to prevent user enumeration on login miss
