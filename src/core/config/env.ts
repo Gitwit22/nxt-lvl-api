@@ -21,6 +21,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://localhost:8080",
   "https://community-chronicle.ntlops.com",
+  "https://community-chronicle.nltops.com",
   "https://ntlops.com",
   "https://nltops.com",
 ];
@@ -30,13 +31,52 @@ const PROGRAM_ALLOWED_ORIGINS = Object.values(programs).flatMap((program) => pro
 export const CORS_ORIGIN =
   process.env.CORS_ORIGIN || [...new Set([...DEFAULT_ALLOWED_ORIGINS, ...PROGRAM_ALLOWED_ORIGINS])].join(",");
 
-export function getCorsOrigins(): true | string[] {
+/**
+ * Allowed origin domains for dynamic subdomain matching.
+ * Any *.nltops.com, *.ntlops.com, or *.pages.dev subdomain is accepted
+ * so new program frontends don't require a config change.
+ */
+const ALLOWED_ORIGIN_PATTERNS = [
+  /^https?:\/\/localhost(:\d+)?$/,
+  /^https:\/\/([a-z0-9-]+\.)?nltops\.com$/,
+  /^https:\/\/([a-z0-9-]+\.)?ntlops\.com$/,
+  /^https:\/\/[a-z0-9-]+\.pages\.dev$/,
+  /^https:\/\/[a-z0-9-]+\.onrender\.com$/,
+];
+
+/**
+ * Returns a cors `origin` callback that allows:
+ * - Any origin explicitly listed in CORS_ORIGIN (or the code defaults)
+ * - Any subdomain of nltops.com, ntlops.com, pages.dev, or onrender.com
+ * - "*" allows all origins
+ */
+export function getCorsOrigins(): true | ((origin: string | undefined, cb: (err: Error | null, origin?: boolean | string) => void) => void) {
   if (CORS_ORIGIN === "*") {
     return true;
   }
-  return CORS_ORIGIN.split(",")
-    .map((origin) => origin.trim().replace(/\/$/, ""))
-    .filter(Boolean);
+
+  const explicitList = new Set(
+    CORS_ORIGIN.split(",")
+      .map((o) => o.trim().replace(/\/$/, ""))
+      .filter(Boolean),
+  );
+
+  return (origin, cb) => {
+    // Same-origin / server-to-server requests have no Origin header — allow them
+    if (!origin) {
+      cb(null, true);
+      return;
+    }
+    if (explicitList.has(origin)) {
+      cb(null, true);
+      return;
+    }
+    if (ALLOWED_ORIGIN_PATTERNS.some((re) => re.test(origin))) {
+      cb(null, true);
+      return;
+    }
+    cb(new Error(`CORS: origin not allowed — ${origin}`));
+  };
 }
 
 export const PLATFORM_SETUP_TOKEN = process.env.PLATFORM_SETUP_TOKEN || "";

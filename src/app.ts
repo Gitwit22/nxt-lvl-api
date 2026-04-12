@@ -10,6 +10,7 @@ import { organizationRouter } from "./core/routes/organization.routes.js";
 import { programRouter } from "./core/routes/program.routes.js";
 import { adminRouter } from "./core/routes/admin.routes.js";
 import { shellRouter } from "./core/routes/shell.routes.js";
+import { portalRouter } from "./core/routes/portal.routes.js";
 import { communityChronicleRouter } from "./programs/community-chronicle/routes/index.js";
 import { nxtLvlSuiteRouter } from "./programs/nxt-lvl-suite/routes/index.js";
 import { timeflowRouter } from "./programs/timeflow/routes/index.js";
@@ -40,6 +41,7 @@ app.use(`${API_PREFIX}`, programRouter);
 app.use(`${API_PREFIX}/orgs`, organizationRouter);
 app.use(`${API_PREFIX}/admin`, adminRouter);
 app.use(`${API_PREFIX}`, shellRouter);
+app.use(`${API_PREFIX}/portal`, portalRouter);
 
 app.use("/api/community-chronicle", communityChronicleRouter);
 app.use("/api/nxt-lvl-suite", nxtLvlSuiteRouter);

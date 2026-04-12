@@ -3,6 +3,8 @@ import { prisma } from "../db/prisma.js";
 import { DEFAULT_ORGANIZATION_ID } from "../config/env.js";
 import { requireAuth } from "../middleware/auth.middleware.js";
 import { hashPassword, getRequestUser, generateTempPassword } from "../auth/auth.service.js";
+import { provisionOrgSubscriptions, provisionOrgFromAssignedIds } from "../services/orgProvisioning.js";
+import { logger } from "../../logger.js";
 
 const router = express.Router();
 
@@ -17,6 +19,52 @@ function normalizeEmail(value: unknown): string {
 function isPlatformAdmin(requestUser: ReturnType<typeof getRequestUser>): boolean {
   if (!requestUser) return false;
   return requestUser.platformRole === "suite_admin" || requestUser.role === "admin";
+}
+
+function mapHubRoleToMembershipRole(role: string): "owner" | "admin" | "manager" | "member" | "viewer" {
+  switch (role) {
+    case "org_admin":
+      return "admin";
+    case "manager":
+      return "manager";
+    case "viewer":
+      return "viewer";
+    case "staff":
+      return "member";
+    case "super_admin":
+      return "admin";
+    default:
+      return "member";
+  }
+}
+
+function mapMembershipRoleToHubRole(role: string): "org_admin" | "manager" | "staff" | "viewer" {
+  switch (role) {
+    case "owner":
+    case "admin":
+      return "org_admin";
+    case "manager":
+      return "manager";
+    case "viewer":
+      return "viewer";
+    case "member":
+    default:
+      return "staff";
+  }
+}
+
+async function ensureOrgAdminAccess(
+  requestUser: ReturnType<typeof getRequestUser>,
+  orgId: string,
+): Promise<boolean> {
+  if (!requestUser) return false;
+  if (isPlatformAdmin(requestUser)) return true;
+
+  const membership = await prisma.membership.findFirst({
+    where: { userId: requestUser.userId, organizationId: orgId },
+  });
+
+  return Boolean(membership && ["owner", "admin"].includes(membership.role));
 }
 
 function toDisplayNameFromEmail(email: string): string {
@@ -161,6 +209,15 @@ router.post("/", requireAuth, async (req, res) => {
   try {
     const data = buildOrgData(body);
     const org = await prisma.organization.create({ data: data as Parameters<typeof prisma.organization.create>[0]["data"] });
+
+    // Provision OrganizationProgramSubscription rows for every assigned program
+    const programIds = Array.isArray(body.assignedProgramIds)
+      ? (body.assignedProgramIds as unknown[]).filter((id): id is string => typeof id === "string" && Boolean(id.trim()))
+      : [];
+    if (programIds.length > 0) {
+      const provResult = await provisionOrgSubscriptions(org.id, programIds);
+      logger.info("[orgs/create] subscriptions provisioned", { organizationId: org.id, ...provResult });
+    }
 
     // Optional: provision contact user as org owner
     const contactUser = body.contactUser as { name?: string; email?: string } | undefined;
@@ -381,11 +438,18 @@ router.put("/:orgId", requireAuth, async (req, res) => {
 });
 
 router.get("/:orgId/users", requireAuth, async (req, res) => {
+  const requestUser = getRequestUser(req);
   const orgIdParam = req.params.orgId;
   const orgId = Array.isArray(orgIdParam) ? orgIdParam[0] : orgIdParam;
 
   if (!orgId) {
     res.status(400).json({ error: "Organization id is required" });
+    return;
+  }
+
+  const hasAccess = await ensureOrgAdminAccess(requestUser, orgId);
+  if (!hasAccess) {
+    res.status(403).json({ error: "Only org admins can view organization users" });
     return;
   }
 
@@ -409,6 +473,8 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
           firstName: true,
           lastName: true,
           isActive: true,
+          mustChangePassword: true,
+          passwordSetAt: true,
           createdAt: true,
           updatedAt: true,
         },
@@ -424,9 +490,20 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
               email: user.email,
               firstName: user.firstName,
               lastName: user.lastName,
+              name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email,
               isActive: user.isActive,
-              role: entry.role,
+              role: mapMembershipRoleToHubRole(entry.role),
               organizationId: orgId,
+              mustChangePassword: user.mustChangePassword,
+              temporaryPasswordIssuedAt: user.mustChangePassword ? user.passwordSetAt : null,
+              passwordSetAt: user.passwordSetAt,
+              accountStatus: !user.isActive
+                ? "disabled"
+                : user.mustChangePassword
+                  ? "password_change_required"
+                  : user.passwordSetAt
+                    ? "active"
+                    : "invited",
               createdAt: user.createdAt,
               updatedAt: user.updatedAt,
             };
@@ -446,6 +523,8 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
         firstName: true,
         lastName: true,
         isActive: true,
+        mustChangePassword: true,
+        passwordSetAt: true,
         role: true,
         organizationId: true,
         createdAt: true,
@@ -453,7 +532,21 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
       },
     });
 
-    res.json(users);
+    res.json(
+      users.map((user) => ({
+        ...user,
+        name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email,
+        role: mapMembershipRoleToHubRole(user.role),
+        temporaryPasswordIssuedAt: user.mustChangePassword ? user.passwordSetAt : null,
+        accountStatus: !user.isActive
+          ? "disabled"
+          : user.mustChangePassword
+            ? "password_change_required"
+            : user.passwordSetAt
+              ? "active"
+              : "invited",
+      })),
+    );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to fetch organization users";
     res.status(500).json({ error: message });
@@ -465,26 +558,44 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
 // POST /api/orgs/:orgId/users — create a user and add them to the org
 // Always generates a temp password. Returns it once in the response.
 router.post("/:orgId/users", requireAuth, async (req, res) => {
+  const requestingUser = getRequestUser(req);
   const orgId = getOrgId(req.params.orgId);
   const body = req.body as Record<string, unknown>;
 
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
-  const name = typeof body.name === "string" ? body.name.trim() : "";
-  const role = typeof body.role === "string" ? body.role : "staff";
+  const firstName = typeof body.firstName === "string" ? body.firstName.trim() : "";
+  const lastName = typeof body.lastName === "string" ? body.lastName.trim() : "";
+  const fallbackName = typeof body.name === "string" ? body.name.trim() : "";
+  const displayName = [firstName, lastName].filter(Boolean).join(" ") || fallbackName || email.split("@")[0] || "User";
+  const hubRole = typeof body.role === "string" ? body.role : "staff";
+  const role = mapHubRoleToMembershipRole(hubRole);
+  const passwordMode = body.passwordMode === "manual" ? "manual" : "auto";
+  const manualPassword = typeof body.tempPassword === "string" ? body.tempPassword.trim() : "";
 
   if (!email) {
     res.status(400).json({ error: "email is required" });
     return;
   }
 
+  const hasAccess = await ensureOrgAdminAccess(requestingUser, orgId);
+  if (!hasAccess) {
+    res.status(403).json({ error: "Only org admins can create organization users" });
+    return;
+  }
+
+  if (passwordMode === "manual" && manualPassword.length < 8) {
+    res.status(400).json({ error: "Manual temporary password must be at least 8 characters" });
+    return;
+  }
+
   try {
-    const tempPassword = generateTempPassword();
+    const tempPassword = passwordMode === "manual" ? manualPassword : generateTempPassword();
     const passwordHash = await hashPassword(tempPassword);
-    const [firstName, ...rest] = name.split(" ");
-    const lastName = rest.join(" ");
+    const invitedById = requestingUser?.userId ?? null;
 
     // Find existing user by email, or create new
     let user = await prisma.user.findFirst({ where: { email } });
+    let existingUser = false;
     if (!user) {
       user = await prisma.user.create({
         data: {
@@ -492,19 +603,36 @@ router.post("/:orgId/users", requireAuth, async (req, res) => {
           passwordHash,
           role: "uploader",
           platformRole: "user",
-          displayName: name || email.split("@")[0],
+          displayName,
           firstName: firstName || "",
           lastName: lastName || "",
           organizationId: orgId,
           identitySource: "local",
           mustChangePassword: true,
+          passwordSetAt: new Date(),
         },
       });
     } else {
-      // Existing user: assign a fresh temp password and require reset
+      existingUser = true;
+      const existingMembership = await prisma.membership.findFirst({
+        where: { userId: user.id, organizationId: orgId },
+      });
+      if (existingMembership) {
+        res.status(409).json({ error: "User already exists in this organization" });
+        return;
+      }
+
+      // Existing user: attach to org and rotate to temporary credential for first login
       user = await prisma.user.update({
         where: { id: user.id },
-        data: { passwordHash, mustChangePassword: true },
+        data: {
+          passwordHash,
+          mustChangePassword: true,
+          passwordSetAt: new Date(),
+          firstName: firstName || user.firstName,
+          lastName: lastName || user.lastName,
+          displayName,
+        },
       });
     }
 
@@ -527,14 +655,22 @@ router.post("/:orgId/users", requireAuth, async (req, res) => {
     res.status(201).json({
       id: user.id,
       email: user.email,
-      name: user.displayName,
+      name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.displayName || user.email,
       firstName: user.firstName,
       lastName: user.lastName,
-      role,
+      role: hubRole,
       organizationId: orgId,
       active: user.isActive,
       assignedProgramIds: Array.isArray(body.assignedProgramIds) ? body.assignedProgramIds : [],
-      tempPassword, // shown once — frontend must display and discard
+      mustChangePassword: true,
+      accountStatus: "password_change_required",
+      invitedById,
+      temporaryPasswordIssuedAt: user.passwordSetAt,
+      passwordSetAt: user.passwordSetAt,
+      passwordWasGenerated: passwordMode === "auto",
+      existingUser,
+      tempPassword: passwordMode === "auto" ? tempPassword : undefined,
+      manualTempPassword: passwordMode === "manual" ? tempPassword : undefined,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to create user";
@@ -591,6 +727,64 @@ router.put("/:orgId/users/:userId", requireAuth, async (req, res) => {
   }
 });
 
+// POST /api/orgs/:orgId/users/:userId/reset-password — org admin resets user password
+router.post("/:orgId/users/:userId/reset-password", requireAuth, async (req, res) => {
+  const requestingUser = getRequestUser(req);
+  if (!requestingUser) {
+    res.status(401).json({ error: "Not authenticated" });
+    return;
+  }
+
+  const orgId = getOrgId(req.params.orgId);
+  const userId = typeof req.params.userId === "string" ? req.params.userId : "";
+
+  if (!userId) {
+    res.status(400).json({ error: "userId is required" });
+    return;
+  }
+
+  const hasAccess = await ensureOrgAdminAccess(requestingUser, orgId);
+  if (!hasAccess) {
+    res.status(403).json({ error: "Only org admins can reset user passwords" });
+    return;
+  }
+
+  try {
+    const membership = await prisma.membership.findFirst({
+      where: { userId, organizationId: orgId },
+      include: { user: true },
+    });
+
+    if (!membership || !membership.user) {
+      res.status(404).json({ error: "User not found in this organization" });
+      return;
+    }
+
+    const tempPassword = generateTempPassword();
+    const passwordHash = await hashPassword(tempPassword);
+    const updated = await prisma.user.update({
+      where: { id: membership.user.id },
+      data: {
+        passwordHash,
+        mustChangePassword: true,
+        passwordSetAt: new Date(),
+      },
+    });
+
+    res.json({
+      userId: updated.id,
+      email: updated.email,
+      tempPassword,
+      mustChangePassword: true,
+      accountStatus: "password_change_required",
+      temporaryPasswordIssuedAt: updated.passwordSetAt,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to reset user password";
+    res.status(500).json({ error: message });
+  }
+});
+
 // POST /api/orgs/:orgId/users/:userId/set-password — org admin sets password for a user
 router.post("/:orgId/users/:userId/set-password", requireAuth, async (req, res) => {
   const requestingUser = getRequestUser(req);
@@ -620,7 +814,9 @@ router.post("/:orgId/users/:userId/set-password", requireAuth, async (req, res) 
     });
 
     const isOwnPassword = requestingUser.userId === userId;
-    const isAdmin = requesterMembership?.role === "org_admin" || requesterMembership?.role === "super_admin"
+    const isAdmin = requesterMembership?.role === "owner"
+      || requesterMembership?.role === "admin"
+      || requestingUser.platformRole === "suite_admin"
       || requestingUser.role === "admin";
 
     if (!isOwnPassword && !isAdmin) {
@@ -633,12 +829,34 @@ router.post("/:orgId/users/:userId/set-password", requireAuth, async (req, res) 
     const isReset = !isOwnPassword;
     await prisma.user.update({
       where: { id: userId },
-      data: { passwordHash, mustChangePassword: isReset },
+      data: { passwordHash, mustChangePassword: isReset, passwordSetAt: new Date() },
     });
 
     res.json({ success: true });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to set password";
+    res.status(500).json({ error: message });
+  }
+});
+
+// POST /api/orgs/:orgId/provision
+// Idempotent backfill — creates/activates OrganizationProgramSubscription rows
+// for every program in the org's assignedProgramIds.
+// Safe to call multiple times; existing active subscriptions are left untouched.
+router.post("/:orgId/provision", requireAuth, async (req, res) => {
+  const orgId = getOrgId(req.params.orgId);
+  if (!orgId) {
+    res.status(400).json({ error: "orgId is required" });
+    return;
+  }
+
+  try {
+    const result = await provisionOrgFromAssignedIds(orgId);
+    logger.info("[orgs/provision] complete", { organizationId: orgId, ...result });
+    res.json({ success: true, organizationId: orgId, ...result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Provisioning failed";
+    logger.error("[orgs/provision] error", { organizationId: orgId, error: message });
     res.status(500).json({ error: message });
   }
 });
