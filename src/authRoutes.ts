@@ -1,4 +1,3 @@
-import jwt from "jsonwebtoken";
 import express from "express";
 import { prisma } from "./core/db/prisma.js";
 import {
@@ -8,7 +7,7 @@ import {
   getRequestUser,
 } from "./core/auth/auth.service.js";
 import { requireAuth, requireRole, tryAttachAuthUser } from "./core/middleware/auth.middleware.js";
-import { CURRENT_PROGRAM_DOMAIN, JWT_SECRET, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
+import { CURRENT_PROGRAM_DOMAIN, PLATFORM_SETUP_TOKEN } from "./core/config/env.js";
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
 import { resolveProgramKey } from "./core/middleware/partition.middleware.js";
@@ -521,72 +520,6 @@ router.get("/me", requireAuth, async (req, res) => {
     },
     appInitialized: appInitState === "ready",
     appInitState,
-  });
-});
-
-// POST /api/auth/program-token
-// Exchanges a valid Suite JWT for a short-lived, program-scoped JWT.
-// Used by program apps to obtain their own token when launched from the Suite.
-//
-// Body: { programDomain: string }
-// Auth: Bearer Suite JWT (requireAuth)
-//
-// Returns: { token: string; user: {...} }
-router.post("/program-token", requireAuth, async (req, res) => {
-  const payload = getRequestUser(req);
-  if (!payload) {
-    res.status(401).json({ error: "Not authenticated" });
-    return;
-  }
-
-  const body = req.body as Record<string, unknown>;
-  const requestedDomain = typeof body.programDomain === "string" ? body.programDomain.trim() : "";
-  if (!requestedDomain) {
-    res.status(400).json({ error: "programDomain is required" });
-    return;
-  }
-
-  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } }) as AuthUserRecord | null;
-  if (!user) {
-    res.status(404).json({ error: "User not found" });
-    return;
-  }
-
-  const orgId = user.organizationId ?? payload.organizationId;
-  if (!orgId) {
-    res.status(403).json({ error: "No organization context for this account" });
-    return;
-  }
-
-  const programToken = jwt.sign(
-    {
-      userId: user.id,
-      email: user.email,
-      role: user.role,
-      platformRole: user.platformRole ?? "user",
-      organizationId: orgId,
-      programDomain: requestedDomain,
-    },
-    JWT_SECRET,
-    { expiresIn: "8h" },
-  );
-
-  logger.info("[auth] program-token issued", {
-    userId: user.id,
-    organizationId: orgId,
-    programDomain: requestedDomain,
-  });
-
-  res.json({
-    token: programToken,
-    user: {
-      id: user.id,
-      email: user.email,
-      role: user.role,
-      organizationId: orgId,
-      organizationName: user.organizationName ?? undefined,
-      programDomain: requestedDomain,
-    },
   });
 });
 

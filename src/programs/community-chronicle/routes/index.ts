@@ -1,15 +1,13 @@
 import fs from "fs";
 import path from "path";
 import express from "express";
-import jwt from "jsonwebtoken";
-import { BACKEND_URL, JWT_SECRET } from "../../../core/config/env.js";
+import { BACKEND_URL } from "../../../core/config/env.js";
 import { prisma } from "../../../core/db/prisma.js";
 import { toApiDocument } from "../../../documentMapper.js";
 import { createDocumentPayload } from "../../../documentFactory.js";
 import { enqueueProcessing } from "../../../processingQueue.js";
 import { requireAuth, requireRole } from "../../../core/middleware/auth.middleware.js";
-import { getRequestUser, signToken } from "../../../core/auth/auth.service.js";
-import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
+import { getRequestUser } from "../../../core/auth/auth.service.js";
 import { getRequestTenantScope, type TenantScope } from "../../../tenant.js";
 import { upload } from "../../../validators.js";
 import { logger } from "../../../logger.js";
@@ -17,88 +15,8 @@ import { jobRouter } from "../../../jobRoutes.js";
 
 const router = express.Router();
 
-const CC_PROGRAM_DOMAIN = "community-chronicle";
-
-// ─── Platform Auth / Consume ──────────────────────────────────────────────────
-/**
- * POST /api/community-chronicle/platform-auth/consume
- * Accepts a Suite launch token (issued by POST /api/auth/program-token) and
- * returns a Chronicle-scoped JWT the frontend stores as its session token.
- */
-router.post("/platform-auth/consume", async (req, res) => {
-  const body = req.body as Record<string, unknown>;
-  const launchToken =
-    typeof body.launchToken === "string" ? body.launchToken :
-    typeof body.token === "string" ? body.token : undefined;
-
-  if (!launchToken) {
-    res.status(400).json({ error: "launchToken is required" });
-    return;
-  }
-
-  let claims: { userId: string; email: string; role: string; organizationId: string } | undefined;
-  try {
-    const payload = jwt.verify(launchToken, JWT_SECRET) as Record<string, unknown>;
-    const userId = typeof payload.userId === "string" ? payload.userId : undefined;
-    const email = typeof payload.email === "string" ? payload.email : undefined;
-    const organizationId = typeof payload.organizationId === "string" ? payload.organizationId : undefined;
-    const role = typeof payload.role === "string" ? payload.role : "member";
-    if (userId && email && organizationId) {
-      claims = { userId, email, role, organizationId };
-    }
-  } catch {
-    // invalid token
-  }
-
-  if (!claims) {
-    res.status(401).json({ error: "Invalid or expired launch token", code: "invalid_launch_token" });
-    return;
-  }
-
-  // Verify org has an active community-chronicle subscription
-  const prismaExt = prisma as typeof prisma & {
-    organizationProgramSubscription: {
-      findFirst: (args: Record<string, unknown>) => Promise<{ status: string } | null>;
-    };
-  };
-  const sub = await prismaExt.organizationProgramSubscription.findFirst({
-    where: { organizationId: claims.organizationId, programId: { contains: "community-chronicle" } },
-  } as Record<string, unknown>).catch(() => null);
-
-  if (!sub || !["active", "trialing"].includes(sub.status)) {
-    res.status(403).json({ error: "No active Community Chronicle subscription", code: "no_subscription" });
-    return;
-  }
-
-  const chronicleToken = signToken({
-    userId: claims.userId,
-    email: claims.email,
-    role: claims.role,
-    organizationId: claims.organizationId,
-    programDomain: CC_PROGRAM_DOMAIN,
-  });
-
-  logger.info("[community-chronicle] platform-auth/consume success", {
-    userId: claims.userId,
-    organizationId: claims.organizationId,
-  });
-
-  res.json({
-    token: chronicleToken,
-    user: {
-      id: claims.userId,
-      email: claims.email,
-      role: claims.role,
-      organizationId: claims.organizationId,
-      programDomain: CC_PROGRAM_DOMAIN,
-    },
-    appInitState: "ready",
-  });
-});
-
-// ─── Subscription gate ────────────────────────────────────────────────────────
-// All routes below require a valid JWT and an active community-chronicle subscription.
-router.use(requireAuth, requireProgramSubscription("community-chronicle"));
+// All document routes require a valid JWT.
+router.use(requireAuth);
 
 function buildFileUrl(relativePath: string): string {
   if (BACKEND_URL && !BACKEND_URL.startsWith("http://localhost")) {
