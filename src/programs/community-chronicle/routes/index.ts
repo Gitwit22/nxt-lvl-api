@@ -799,7 +799,7 @@ router.delete("/documents/:id", requireAuth, requireRole("admin"), async (req, r
   res.status(204).send();
 });
 
-router.post("/documents/:id/retry", requireAuth, requireRole("admin"), async (req, res) => {
+router.post("/documents/:id/retry", requireAuth, requireRole("reviewer"), async (req, res) => {
   const id = parseRouteId(req.params.id);
   if (!id) {
     res.status(400).json({ error: "Invalid document id" });
@@ -810,6 +810,13 @@ router.post("/documents/:id/retry", requireAuth, requireRole("admin"), async (re
   const current = await findScopedDocument(id, tenantScope);
   if (!current) {
     res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  if (!current.filePath) {
+    res.status(400).json({
+      error: "Document has no source file path and cannot be reprocessed.",
+    });
     return;
   }
 

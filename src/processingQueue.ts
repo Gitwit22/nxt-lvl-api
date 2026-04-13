@@ -6,7 +6,6 @@ import type { Prisma } from "@prisma/client";
 import { prisma } from "./core/db/prisma.js";
 import { logger } from "./logger.js";
 import {
-  CURRENT_PROGRAM_DOMAIN,
   MAX_ATTEMPTS,
   JOB_TIMEOUT_MS,
   RETRY_BACKOFF_BASE_MS,
@@ -1017,7 +1016,6 @@ async function handleJobFailure(
 async function processSingleJob(): Promise<void> {
   const job = await prisma.processingJob.findFirst({
     where: {
-      programDomain: CURRENT_PROGRAM_DOMAIN,
       status: "queued",
       scheduledAt: { lte: new Date() },
     },
