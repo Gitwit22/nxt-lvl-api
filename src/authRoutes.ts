@@ -60,8 +60,8 @@ const prismaUser = prisma as typeof prisma & {
  * - "no_org"          : user exists but has no org assignment
  * - "ready"           : user has org context
  */
-function resolveAppInitState(user: AuthUserRecord): "not_initialized" | "no_org" | "ready" {
-  if (!user.organizationId) return "no_org";
+function resolveAppInitState(user: AuthUserRecord, hasMemberships = false): "not_initialized" | "no_org" | "ready" {
+  if (!user.organizationId && !hasMemberships) return "no_org";
   return "ready";
 }
 
@@ -80,6 +80,24 @@ function buildUserPayload(user: AuthUserRecord, organizationId: string, programD
     hasPassword: Boolean(user.passwordHash && user.passwordHash.length > 0),
     mustChangePassword: user.mustChangePassword ?? false,
   };
+}
+
+/** Query the Membership table and return orgMemberships for a user. */
+async function fetchOrgMemberships(userId: string) {
+  try {
+    const memberships = await prisma.membership.findMany({
+      where: { userId },
+      include: { organization: { select: { id: true, name: true, slug: true } } },
+    });
+    return memberships.map((m) => ({
+      orgId: m.organizationId,
+      orgName: (m.organization as { name: string } | null)?.name ?? "Organization",
+      role: m.role,
+      active: true,
+    }));
+  } catch {
+    return [];
+  }
 }
 
 function resolveAuthProgramDomain(req: express.Request): string {
@@ -129,7 +147,8 @@ router.post("/login", async (req, res) => {
   }
 
   const tenantScope = getTenantScopeForUser(user);
-  const appInitState = resolveAppInitState(user);
+  const orgMemberships = await fetchOrgMemberships(user.id);
+  const appInitState = resolveAppInitState(user, orgMemberships.length > 0);
   const token = signToken({
     userId: user.id,
     email: user.email,
@@ -164,7 +183,10 @@ router.post("/login", async (req, res) => {
     authToken: token,
     auth: { token },
     data: { token },
-    user: buildUserPayload(user, tenantScope.organizationId, programDomain),
+    user: {
+      ...buildUserPayload(user, tenantScope.organizationId, programDomain),
+      orgMemberships,
+    },
     appInitialized: appInitState === "ready",
     appInitState,
   });
@@ -490,9 +512,13 @@ router.get("/me", requireAuth, async (req, res) => {
     return;
   }
   const tenantScope = getTenantScopeForUser(user);
-  const appInitState = resolveAppInitState(user);
+  const orgMemberships = await fetchOrgMemberships(user.id);
+  const appInitState = resolveAppInitState(user, orgMemberships.length > 0);
   res.json({
-    user: buildUserPayload(user, tenantScope.organizationId, payload.programDomain),
+    user: {
+      ...buildUserPayload(user, tenantScope.organizationId, payload.programDomain),
+      orgMemberships,
+    },
     appInitialized: appInitState === "ready",
     appInitState,
   });

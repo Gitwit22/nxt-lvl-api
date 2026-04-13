@@ -182,9 +182,24 @@ router.get("/", requireAuth, async (_req, res) => {
     const rows = await prisma.organization.findMany({
       orderBy: { createdAt: "asc" },
       take: 200,
+      include: {
+        programSubscriptions: {
+          where: { status: { in: ["active", "trialing"] } },
+          select: { programId: true },
+        },
+      },
     });
     if (rows.length > 0) {
-      res.json(rows);
+      // Merge active subscription program IDs into the assignedProgramIds array
+      const enriched = rows.map((org) => {
+        const subscriptionIds = org.programSubscriptions.map((s: { programId: string }) => s.programId);
+        const legacyIds = Array.isArray(org.assignedProgramIds) ? (org.assignedProgramIds as string[]) : [];
+        const merged = Array.from(new Set([...legacyIds, ...subscriptionIds]));
+        // Strip the nested relation before sending — not part of the org contract
+        const { programSubscriptions: _omit, ...rest } = org;
+        return { ...rest, assignedProgramIds: merged };
+      });
+      res.json(enriched);
       return;
     }
   } catch {
@@ -447,9 +462,18 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
     return;
   }
 
-  const hasAccess = await ensureOrgAdminAccess(requestUser, orgId);
-  if (!hasAccess) {
-    res.status(403).json({ error: "Only org admins can view organization users" });
+  // Platform admins and org admins see all members.
+  // Regular org members can only see their own record (needed for program access resolution).
+  const isAdmin = await ensureOrgAdminAccess(requestUser, orgId);
+  const isMember =
+    isAdmin ||
+    (requestUser
+      ? await prisma.membership
+          .findFirst({ where: { userId: requestUser.userId, organizationId: orgId } })
+          .then(Boolean)
+      : false);
+  if (!isMember) {
+    res.status(403).json({ error: "You do not have access to this organization" });
     return;
   }
 
@@ -487,6 +511,7 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
             if (!user) return null;
             return {
               id: user.id,
+              authUserId: user.id,
               email: user.email,
               firstName: user.firstName,
               lastName: user.lastName,
@@ -535,6 +560,7 @@ router.get("/:orgId/users", requireAuth, async (req, res) => {
     res.json(
       users.map((user) => ({
         ...user,
+        authUserId: user.id,
         name: [user.firstName, user.lastName].filter(Boolean).join(" ") || user.email,
         role: mapMembershipRoleToHubRole(user.role),
         temporaryPasswordIssuedAt: user.mustChangePassword ? user.passwordSetAt : null,
