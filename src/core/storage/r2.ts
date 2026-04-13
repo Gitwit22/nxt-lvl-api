@@ -1,4 +1,9 @@
-import { S3Client, PutObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import {
   STORAGE_BACKEND,
@@ -7,17 +12,101 @@ import {
   R2_SECRET_ACCESS_KEY,
   R2_BUCKET_NAME,
   R2_PUBLIC_URL,
+  R2_DEFAULT_PREFIX,
 } from "../config/env.js";
+
+export interface R2ConnectionConfig {
+  accountId: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  bucketName: string;
+  publicUrl?: string;
+}
+
+export interface R2EnvMetadata {
+  available: boolean;
+  configuredForActiveBackend: boolean;
+  bucketName: string;
+  accountId: string;
+  endpoint: string;
+  publicUrl: string;
+  defaultPrefix: string;
+}
+
+export interface R2ProbeResult {
+  success: boolean;
+  message: string;
+  key?: string;
+  step?: "write" | "read" | "verify" | "delete";
+  error?: string;
+}
+
+function normalizePrefix(prefix: string): string {
+  return prefix
+    .trim()
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "");
+}
+
+function normalizeProbePrefix(prefix?: string): string {
+  const resolved = normalizePrefix(prefix || R2_DEFAULT_PREFIX || "");
+  return resolved ? `${resolved}/` : "";
+}
+
+function streamToBuffer(body: AsyncIterable<Uint8Array>): Promise<Buffer> {
+  return (async () => {
+    const chunks: Uint8Array[] = [];
+    for await (const chunk of body) {
+      chunks.push(chunk);
+    }
+    return Buffer.concat(chunks);
+  })();
+}
+
+function createClient(config: R2ConnectionConfig): S3Client {
+  return new S3Client({
+    region: "auto",
+    endpoint: `https://${config.accountId}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: config.accessKeyId,
+      secretAccessKey: config.secretAccessKey,
+    },
+  });
+}
+
+function getEnvConnectionConfig(): R2ConnectionConfig {
+  return {
+    accountId: R2_ACCOUNT_ID,
+    accessKeyId: R2_ACCESS_KEY_ID,
+    secretAccessKey: R2_SECRET_ACCESS_KEY,
+    bucketName: R2_BUCKET_NAME,
+    publicUrl: R2_PUBLIC_URL,
+  };
+}
+
+export function isR2EnvAvailable(): boolean {
+  return !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME);
+}
+
+export function getR2EnvMetadata(): R2EnvMetadata {
+  const available = isR2EnvAvailable();
+  return {
+    available,
+    configuredForActiveBackend: STORAGE_BACKEND === "r2" && available,
+    bucketName: R2_BUCKET_NAME,
+    accountId: R2_ACCOUNT_ID,
+    endpoint: R2_ACCOUNT_ID ? `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com` : "",
+    publicUrl: R2_PUBLIC_URL,
+    defaultPrefix: normalizePrefix(R2_DEFAULT_PREFIX),
+  };
+}
 
 /**
  * Returns true only when STORAGE_BACKEND=r2 AND all required credentials are present.
  * This is the single source of truth for which storage path to use.
  */
 export function isR2Configured(): boolean {
-  return (
-    STORAGE_BACKEND === "r2" &&
-    !!(R2_ACCOUNT_ID && R2_ACCESS_KEY_ID && R2_SECRET_ACCESS_KEY && R2_BUCKET_NAME)
-  );
+  return STORAGE_BACKEND === "r2" && isR2EnvAvailable();
 }
 
 /**
@@ -32,16 +121,102 @@ let _client: S3Client | null = null;
 
 function getClient(): S3Client {
   if (!_client) {
-    _client = new S3Client({
-      region: "auto",
-      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-      credentials: {
-        accessKeyId: R2_ACCESS_KEY_ID,
-        secretAccessKey: R2_SECRET_ACCESS_KEY,
-      },
-    });
+    _client = createClient(getEnvConnectionConfig());
   }
   return _client;
+}
+
+export async function probeR2Connection(options?: {
+  prefix?: string;
+  config?: R2ConnectionConfig;
+}): Promise<R2ProbeResult> {
+  const config = options?.config || getEnvConnectionConfig();
+  if (!config.accountId || !config.accessKeyId || !config.secretAccessKey || !config.bucketName) {
+    return {
+      success: false,
+      step: "write",
+      message: "R2 credentials are incomplete.",
+      error: "missing_r2_configuration",
+    };
+  }
+
+  const client = options?.config ? createClient(config) : getClient();
+  const prefix = normalizeProbePrefix(options?.prefix);
+  const key = `${prefix}.connection-probe-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.txt`;
+  const payload = Buffer.from(`community-chronicle-r2-probe:${Date.now()}`, "utf8");
+  let writeSucceeded = false;
+
+  try {
+    await client.send(
+      new PutObjectCommand({
+        Bucket: config.bucketName,
+        Key: key,
+        Body: payload,
+        ContentType: "text/plain",
+      }),
+    );
+    writeSucceeded = true;
+  } catch (error) {
+    return {
+      success: false,
+      key,
+      step: "write",
+      message: "Failed to write probe object to R2.",
+      error: error instanceof Error ? error.message : "unknown_write_error",
+    };
+  }
+
+  try {
+    const response = await client.send(
+      new GetObjectCommand({
+        Bucket: config.bucketName,
+        Key: key,
+      }),
+    );
+    const body = await streamToBuffer(response.Body as AsyncIterable<Uint8Array>);
+    if (!body.equals(payload)) {
+      return {
+        success: false,
+        key,
+        step: "verify",
+        message: "Probe object verification failed after read.",
+        error: "probe_content_mismatch",
+      };
+    }
+  } catch (error) {
+    return {
+      success: false,
+      key,
+      step: "read",
+      message: "Failed to read probe object from R2.",
+      error: error instanceof Error ? error.message : "unknown_read_error",
+    };
+  }
+
+  if (writeSucceeded) {
+    try {
+      await client.send(
+        new DeleteObjectCommand({
+          Bucket: config.bucketName,
+          Key: key,
+        }),
+      );
+    } catch (error) {
+      return {
+        success: false,
+        key,
+        step: "delete",
+        message: "Probe object was written and read, but cleanup failed.",
+        error: error instanceof Error ? error.message : "unknown_delete_error",
+      };
+    }
+  }
+
+  return {
+    success: true,
+    key,
+    message: "R2 connection test succeeded with write/read/delete probe.",
+  };
 }
 
 /**
@@ -77,11 +252,7 @@ export async function downloadFromR2(key: string): Promise<Buffer> {
   const response = await getClient().send(
     new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }),
   );
-  const chunks: Uint8Array[] = [];
-  for await (const chunk of response.Body as AsyncIterable<Uint8Array>) {
-    chunks.push(chunk);
-  }
-  return Buffer.concat(chunks);
+  return streamToBuffer(response.Body as AsyncIterable<Uint8Array>);
 }
 
 /**

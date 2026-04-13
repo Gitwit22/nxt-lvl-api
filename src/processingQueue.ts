@@ -15,6 +15,11 @@ import {
   MAX_FILE_SIZE_BYTES,
 } from "./core/config/env.js";
 import { isR2Configured, isR2Key, downloadFromR2 } from "./core/storage/r2.js";
+import {
+  canUseSharedParser,
+  getActiveParseProvider,
+  parseDocumentWithSharedService,
+} from "./core/services/parse/documentParseService.js";
 import type { TenantScope } from "./tenant.js";
 
 let workerRunning = false;
@@ -27,10 +32,15 @@ let workerTimer: NodeJS.Timeout | null = null;
 interface ExtractionResult {
   text: string;
   confidence: number;
-  method: "text" | "pdf" | "pdf_scanned" | "ocr" | "unsupported";
+  method: "text" | "pdf" | "pdf_scanned" | "ocr" | "llama_cloud" | "unsupported";
   pageCount?: number;
   warnings?: string[];
 }
+
+type ExtractionContext = {
+  documentId?: string;
+  jobId?: string;
+};
 
 type EntityExtraction = {
   people: string[];
@@ -777,6 +787,7 @@ async function extractImage(filePath: string): Promise<ExtractionResult> {
 async function runExtraction(
   filePath: string | null,
   mimeType: string | null,
+  context?: ExtractionContext,
 ): Promise<ExtractionResult> {
   if (!filePath) {
     return { text: "", confidence: 0.1, method: "unsupported", warnings: ["No file path"] };
@@ -803,6 +814,60 @@ async function runExtraction(
         `File size ${stat.size} bytes exceeds processing limit of ${MAX_FILE_SIZE_BYTES} bytes. Manual review required.`,
       ],
     };
+  }
+
+  const sharedParserSupportedMimeTypes = new Set([
+    "application/pdf",
+    "application/json",
+    "text/csv",
+  ]);
+
+  const canUseLlamaCloudParser =
+    canUseSharedParser() &&
+    (Boolean(mimeType && (mimeType.startsWith("image/") || mimeType.startsWith("text/"))) ||
+      sharedParserSupportedMimeTypes.has(mimeType ?? ""));
+
+  if (canUseLlamaCloudParser) {
+    try {
+      logger.info("Shared parser invocation started", {
+        provider: getActiveParseProvider(),
+        documentId: context?.documentId,
+        jobId: context?.jobId,
+        mimeType,
+        filePath,
+      });
+
+      const parsed = await parseDocumentWithSharedService(filePath, {
+        documentId: context?.documentId,
+        jobId: context?.jobId,
+        mimeType,
+      });
+
+      const parsedText = parsed.text?.trim() || parsed.markdown?.trim() || "";
+      if (parsedText.length > 0) {
+        return {
+          text: parsedText.slice(0, 200_000),
+          confidence: 0.93,
+          method: "llama_cloud",
+          warnings: [],
+        };
+      }
+
+      logger.warn("Shared parser returned empty text; falling back to legacy extraction", {
+        provider: getActiveParseProvider(),
+        documentId: context?.documentId,
+        jobId: context?.jobId,
+        mimeType,
+      });
+    } catch (error) {
+      logger.warn("Shared parser failed; falling back to legacy extraction", {
+        provider: getActiveParseProvider(),
+        documentId: context?.documentId,
+        jobId: context?.jobId,
+        mimeType,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
   if (mimeType === "application/pdf") return extractPdf(filePath);
@@ -1025,7 +1090,10 @@ async function processSingleJob(): Promise<void> {
 
   try {
     const extraction = await withTimeout(
-      runExtraction(extractionFilePath, job.document.mimeType),
+      runExtraction(extractionFilePath, job.document.mimeType, {
+        documentId: job.documentId,
+        jobId: job.id,
+      }),
       JOB_TIMEOUT_MS,
       job.document.mimeType ?? "unknown",
     );
