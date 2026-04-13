@@ -41,6 +41,8 @@ app.use(`${API_PREFIX}`, programRouter);
 app.use(`${API_PREFIX}/orgs`, organizationRouter);
 app.use(`${API_PREFIX}/admin`, adminRouter);
 app.use(`${API_PREFIX}`, shellRouter);
+// LEGACY COMPAT SHIM: keep /api/portal/* aliases temporarily for older clients.
+// TODO(compat-removal): remove this mount after all clients use /api/orgs/* endpoints.
 app.use(`${API_PREFIX}/portal`, portalRouter);
 
 app.use("/api/community-chronicle", communityChronicleRouter);

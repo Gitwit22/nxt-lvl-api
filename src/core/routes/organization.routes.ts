@@ -877,6 +877,8 @@ router.post("/:orgId/provision", requireAuth, async (req, res) => {
 //
 // NOTE: This used to live at /api/portal/bootstrap. The /api/portal/bootstrap
 //       path is preserved as a 301 redirect alias in app.ts for backwards compat.
+// LEGACY NAME NOTE: "portal/bootstrap" is not a core architecture concept anymore;
+//                   /api/orgs/bootstrap is the canonical route name.
 
 type SubscriptionRow = { programId: string; status: string };
 
