@@ -1,7 +1,7 @@
 import express from "express";
 import { prisma } from "../db/prisma.js";
 import { DEFAULT_ORGANIZATION_ID } from "../config/env.js";
-import { requireAuth } from "../middleware/auth.middleware.js";
+import { requireAuth, tryAttachAuthUser } from "../middleware/auth.middleware.js";
 import { hashPassword, getRequestUser, generateTempPassword } from "../auth/auth.service.js";
 import { provisionOrgSubscriptions, provisionOrgFromAssignedIds } from "../services/orgProvisioning.js";
 import { logger } from "../../logger.js";
@@ -859,6 +859,179 @@ router.post("/:orgId/provision", requireAuth, async (req, res) => {
     logger.error("[orgs/provision] error", { organizationId: orgId, error: message });
     res.status(500).json({ error: message });
   }
+});
+
+// ─── Org workspace bootstrap ─────────────────────────────────────────────────
+//
+// GET /api/orgs/bootstrap
+//   Returns full org context for an authenticated Suite workspace session —
+//   organization record, branding, active programs (from subscriptions), and
+//   optionally the current user's membership.
+//
+//   Org is resolved from (in priority order):
+//     1. ?slug= query param
+//     2. ?subdomain= query param
+//
+//   Authentication is optional — unauthenticated requests still get org/branding
+//   data, but `membership` will be null.
+//
+// NOTE: This used to live at /api/portal/bootstrap. The /api/portal/bootstrap
+//       path is preserved as a 301 redirect alias in app.ts for backwards compat.
+
+type SubscriptionRow = { programId: string; status: string };
+
+const prismaWithSubs = prisma as typeof prisma & {
+  organizationProgramSubscription: {
+    findMany: (args: Record<string, unknown>) => Promise<SubscriptionRow[]>;
+  };
+};
+
+router.get("/bootstrap", async (req, res) => {
+  // Optional auth — attach user if valid token present but don't 401 without one
+  tryAttachAuthUser(req);
+  const requestUser = getRequestUser(req);
+
+  const querySlug = typeof req.query.slug === "string" ? req.query.slug.trim() : "";
+  const querySubdomain = typeof req.query.subdomain === "string" ? req.query.subdomain.trim() : "";
+
+  let org: Awaited<ReturnType<typeof prisma.organization.findFirst>> | null = null;
+
+  if (querySlug) {
+    org = await prisma.organization.findFirst({ where: { slug: querySlug } });
+  } else if (querySubdomain) {
+    org = await prisma.organization.findFirst({ where: { subdomain: querySubdomain } });
+    if (!org) {
+      org = await prisma.organization.findFirst({ where: { slug: querySubdomain } });
+    }
+  }
+
+  if (!org) {
+    res.status(404).json({ error: "Organization not found", code: "org_not_found" });
+    return;
+  }
+
+  // ── Active subscriptions ──────────────────────────────────────────────────
+  const subscriptions = await prismaWithSubs.organizationProgramSubscription.findMany({
+    where: {
+      organizationId: org.id,
+      status: { in: ["active", "trialing"] },
+    } as Record<string, unknown>,
+  });
+
+  let activeProgramIds = subscriptions.map((s) => s.programId);
+
+  // First-run: auto-provision from assignedProgramIds if no subscriptions exist
+  if (activeProgramIds.length === 0) {
+    const rawIds = Array.isArray(org.assignedProgramIds) ? (org.assignedProgramIds as string[]) : [];
+    if (rawIds.length > 0) {
+      logger.info("[orgs/bootstrap] no subscriptions — auto-provisioning", {
+        organizationId: org.id,
+        programCount: rawIds.length,
+      });
+      try {
+        await provisionOrgFromAssignedIds(org.id);
+        const freshSubs = await prismaWithSubs.organizationProgramSubscription.findMany({
+          where: {
+            organizationId: org.id,
+            status: { in: ["active", "trialing"] },
+          } as Record<string, unknown>,
+        });
+        activeProgramIds = freshSubs.map((s) => s.programId);
+      } catch (err) {
+        logger.error("[orgs/bootstrap] auto-provisioning failed", {
+          organizationId: org.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        activeProgramIds = rawIds;
+      }
+    }
+  }
+
+  // ── Enabled programs ──────────────────────────────────────────────────────
+  let enabledPrograms: Awaited<ReturnType<typeof prisma.program.findMany>> = [];
+  if (activeProgramIds.length > 0) {
+    enabledPrograms = await prisma.program.findMany({
+      where: {
+        id: { in: activeProgramIds },
+        deletedAt: null,
+      } as Record<string, unknown>,
+      orderBy: { displayOrder: "asc" },
+    });
+  }
+
+  // ── Membership for authenticated user ─────────────────────────────────────
+  let membership: {
+    orgId: string;
+    userId: string;
+    role: string;
+    active: boolean;
+    email: string;
+    name: string;
+  } | null = null;
+
+  if (requestUser?.userId) {
+    const membershipRow = await prisma.membership.findFirst({
+      where: { userId: requestUser.userId, organizationId: org.id },
+    });
+
+    if (membershipRow) {
+      const userRow = await prisma.user.findUnique({
+        where: { id: membershipRow.userId },
+        select: { id: true, email: true, displayName: true, firstName: true, lastName: true },
+      });
+
+      if (userRow) {
+        const displayName = userRow.displayName || `${userRow.firstName} ${userRow.lastName}`.trim() || userRow.email;
+        membership = {
+          orgId: org.id,
+          userId: membershipRow.userId,
+          role: membershipRow.role,
+          active: true,
+          email: userRow.email,
+          name: displayName,
+        };
+      }
+    }
+  }
+
+  // ── Branding ──────────────────────────────────────────────────────────────
+  const branding = {
+    primaryColor: org.primaryColor || "217 80% 56%",
+    secondaryColor: "220 70% 40%",
+    accentColor: org.accentColor || "191 85% 47%",
+    backgroundColor: "#0f172a",
+    backgroundStartColor: "#0f172a",
+    backgroundEndColor: "#1d4ed8",
+    bannerStartColor: "#1e293b",
+    bannerEndColor: "#0ea5e9",
+    gradientAngle: 135,
+    fontFamily: "inter",
+  };
+
+  logger.info("[orgs/bootstrap] served", {
+    organizationId: org.id,
+    slug: org.slug,
+    programCount: enabledPrograms.length,
+    authenticated: Boolean(requestUser),
+    hasMembership: Boolean(membership),
+  });
+
+  res.json({
+    organization: {
+      ...org,
+      assignedProgramIds: activeProgramIds,
+    },
+    branding,
+    membership,
+    enabledModules: [],
+    enabledPrograms,
+    orgStatus: {
+      status: org.status,
+      isPending: org.status === "pending",
+      isActive: org.isActive && org.status === "active",
+      isSuspended: org.status === "suspended",
+    },
+  });
 });
 
 export { router as organizationRouter };

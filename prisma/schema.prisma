@@ -45,7 +45,10 @@ model User {
 model Organization {
   id                String    @id @default(cuid())
   name              String
+  // slug: canonical org identifier used in Suite URLs (/orgs/:slug)
   slug              String    @unique
+  // subdomain: kept for legacy read compatibility; no longer used for routing
+  // as all org access is via /orgs/:slug within the Suite shell.
   subdomain         String?
   contactEmail      String?
   ownerEmail        String?
@@ -55,12 +58,16 @@ model Organization {
   notes             String?
   logoUrl           String?
   bannerUrl         String?
+  // primaryColor / accentColor: org branding displayed in the workspace header.
+  // These are decorative inside the Suite — no longer used to skin a separate shell.
   primaryColor      String?
   accentColor       String?
-  // @deprecated — replaced by OrganizationProgramSubscription; kept for read compatibility
+  // @deprecated — replaced by OrganizationProgramSubscription rows.
+  // Kept nullable/readable for backfill reference; do not write new values.
   assignedBundleIds Json      @default("[]")
   assignedProgramIds Json     @default("[]")
   planType          String    @default("starter")
+  // status: "active" | "pending" | "suspended" — enforced by OrgAccessGuard in the Suite
   status            String    @default("active")
   seatLimit         Int       @default(25)
   trialEndsAt       DateTime?
