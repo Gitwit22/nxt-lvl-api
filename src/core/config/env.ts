@@ -90,6 +90,28 @@ export const PLATFORM_LAUNCH_TOKEN_SECRET =
 
 export const MAX_FILE_SIZE_BYTES = Number(process.env.MAX_FILE_SIZE_BYTES || 50 * 1024 * 1024);
 
+// ---------------------------------------------------------------------------
+// Storage backend
+// Set STORAGE_BACKEND=r2  to use Cloudflare R2 (production).
+// Set STORAGE_BACKEND=local to write files to the local UPLOAD_DIR (dev only).
+// Defaults to "local" so local dev works without any extra config.
+// ---------------------------------------------------------------------------
+export type StorageBackend = "local" | "r2";
+
+const rawBackend = (process.env.STORAGE_BACKEND || "local").toLowerCase();
+export const STORAGE_BACKEND: StorageBackend =
+  rawBackend === "r2" ? "r2" : "local";
+
+// Cloudflare R2 credentials — required when STORAGE_BACKEND=r2.
+export const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || "";
+export const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || "";
+export const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || "";
+export const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || "";
+// Optional: public bucket domain (e.g. https://pub-xxx.r2.dev or a custom domain).
+// When set, fileUrl stored in DB will be a permanent public link.
+// When unset, downloads are served via signed URL through the API.
+export const R2_PUBLIC_URL = process.env.R2_PUBLIC_URL || "";
+
 export const ALLOWED_MIME_TYPES = new Set([
   "application/pdf",
   "image/jpeg",

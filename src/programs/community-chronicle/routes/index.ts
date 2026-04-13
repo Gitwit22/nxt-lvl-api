@@ -1,7 +1,8 @@
 import fs from "fs";
+import fsPromises from "fs/promises";
 import path from "path";
 import express from "express";
-import { BACKEND_URL } from "../../../core/config/env.js";
+import { BACKEND_URL, UPLOAD_DIR } from "../../../core/config/env.js";
 import { prisma } from "../../../core/db/prisma.js";
 import { toApiDocument } from "../../../documentMapper.js";
 import { createDocumentPayload } from "../../../documentFactory.js";
@@ -12,6 +13,7 @@ import { getRequestTenantScope, type TenantScope } from "../../../tenant.js";
 import { upload } from "../../../validators.js";
 import { logger } from "../../../logger.js";
 import { jobRouter } from "../../../jobRoutes.js";
+import { isR2Configured, isR2Key, uploadToR2, getR2SignedDownloadUrl } from "../../../core/storage/r2.js";
 
 const router = express.Router();
 
@@ -145,11 +147,21 @@ router.get("/documents/:id/download", requireAuth, async (req, res) => {
     return;
   }
 
+  // R2 storage: redirect to a short-lived signed URL
+  if (isR2Configured() && isR2Key(doc.filePath)) {
+    const signedUrl = await getR2SignedDownloadUrl(
+      doc.filePath,
+      doc.originalFileName ?? undefined,
+    );
+    res.redirect(302, signedUrl);
+    return;
+  }
+
+  // Local disk fallback
   if (!fs.existsSync(doc.filePath)) {
     res.status(404).json({ error: "Stored file is missing" });
     return;
   }
-
   res.download(doc.filePath, doc.originalFileName ?? path.basename(doc.filePath));
 });
 
@@ -219,13 +231,37 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
     intakeSource: typeof body.intakeSource === "string" ? body.intakeSource : "file_upload",
     sourceReference: typeof body.sourceReference === "string" ? body.sourceReference : undefined,
     department: typeof body.department === "string" ? body.department : undefined,
-    fileMeta: {
-      originalFileName: req.file.originalname,
-      mimeType: req.file.mimetype,
-      fileSize: req.file.size,
-      fileUrl: buildFileUrl(`/uploads/${path.basename(req.file.path)}`),
-      filePath: req.file.path,
-    },
+    fileMeta: await (async () => {
+      const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const safe = req.file!.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+
+      if (isR2Configured()) {
+        const orgId = tenantScope.organizationId;
+        const userId = user?.userId ?? "unknown";
+        const key = `${orgId}/${userId}/${stamp}-${safe}`;
+        const { key: r2Key, fileUrl } = await uploadToR2(key, req.file!.buffer, req.file!.mimetype);
+        return {
+          originalFileName: req.file!.originalname,
+          mimeType: req.file!.mimetype,
+          fileSize: req.file!.size,
+          fileUrl,
+          filePath: r2Key,
+        };
+      }
+
+      // Local disk fallback (dev only — ephemeral on Render free tier)
+      const filename = `${stamp}-${safe}`;
+      const localPath = path.join(UPLOAD_DIR, filename);
+      await fsPromises.mkdir(UPLOAD_DIR, { recursive: true });
+      await fsPromises.writeFile(localPath, req.file!.buffer);
+      return {
+        originalFileName: req.file!.originalname,
+        mimeType: req.file!.mimetype,
+        fileSize: req.file!.size,
+        fileUrl: buildFileUrl(`/uploads/${filename}`),
+        filePath: localPath,
+      };
+    })(),
   });
 
   const created = await prisma.document.create({
@@ -260,14 +296,36 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
 
   const created = [];
   for (const file of files) {
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+
+    let filePath: string;
+    let fileUrl: string;
+
+    if (isR2Configured()) {
+      const orgId = tenantScope.organizationId;
+      const userId = user?.userId ?? "unknown";
+      const key = `${orgId}/${userId}/${stamp}-${safe}`;
+      const result = await uploadToR2(key, file.buffer, file.mimetype);
+      filePath = result.key;
+      fileUrl = result.fileUrl;
+    } else {
+      const filename = `${stamp}-${safe}`;
+      const localPath = path.join(UPLOAD_DIR, filename);
+      await fsPromises.mkdir(UPLOAD_DIR, { recursive: true });
+      await fsPromises.writeFile(localPath, file.buffer);
+      filePath = localPath;
+      fileUrl = buildFileUrl(`/uploads/${filename}`);
+    }
+
     const payload = createDocumentPayload({
       intakeSource,
       fileMeta: {
         originalFileName: file.originalname,
         mimeType: file.mimetype,
         fileSize: file.size,
-        fileUrl: buildFileUrl(`/uploads/${path.basename(file.path)}`),
-        filePath: file.path,
+        fileUrl,
+        filePath,
       },
     });
 
@@ -389,6 +447,60 @@ router.post("/documents/:id/retry", requireAuth, requireRole("admin"), async (re
     return;
   }
   res.json(toApiDocument(refreshed));
+});
+
+// POST /documents/reprocess
+// Re-queues documents for OCR/extraction. Admin only.
+// Body: { ids?: string[] }  — specific docs to reprocess.
+// If ids is omitted, reprocesses every document in the tenant scope that
+// has a file attached and is not already queued or actively processing.
+router.post("/documents/reprocess", requireAuth, requireRole("admin"), async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const body = req.body as Record<string, unknown>;
+  const ids = Array.isArray(body.ids) ? (body.ids as unknown[]).map(String) : null;
+
+  const scope = getDocumentScope(tenantScope);
+
+  // Find the target documents — must have a filePath (can't OCR manual entries with no file)
+  const docs = await prisma.document.findMany({
+    where: {
+      ...scope,
+      ...(ids ? { id: { in: ids } } : {}),
+      filePath: { not: null },
+      // Skip anything already in flight
+      processingStatus: { notIn: ["queued", "processing"] },
+    },
+    select: { id: true },
+  });
+
+  if (docs.length === 0) {
+    res.json({ queued: 0, message: "No eligible documents found." });
+    return;
+  }
+
+  const now = new Date();
+  await prisma.document.updateMany({
+    where: { id: { in: docs.map((d) => d.id) } },
+    data: {
+      processingStatus: "queued",
+      status: "queued",
+      statusUpdatedAt: now,
+      needsReview: false,
+    },
+  });
+
+  for (const doc of docs) {
+    await enqueueProcessing(doc.id, tenantScope);
+  }
+
+  logger.info("Bulk reprocess queued", {
+    count: docs.length,
+    organizationId: tenantScope.organizationId,
+    programDomain: tenantScope.programDomain,
+    requestedIds: ids ?? "all",
+  });
+
+  res.json({ queued: docs.length, documentIds: docs.map((d) => d.id) });
 });
 
 router.get("/review-queue", requireAuth, requireRole("reviewer"), async (req, res) => {

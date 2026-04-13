@@ -1,4 +1,6 @@
 import fs from "fs/promises";
+import os from "os";
+import path from "path";
 import crypto from "crypto";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "./core/db/prisma.js";
@@ -12,6 +14,7 @@ import {
   OCR_CONFIDENCE_REVIEW_THRESHOLD,
   MAX_FILE_SIZE_BYTES,
 } from "./core/config/env.js";
+import { isR2Configured, isR2Key, downloadFromR2 } from "./core/storage/r2.js";
 import type { TenantScope } from "./tenant.js";
 
 let workerRunning = false;
@@ -779,9 +782,19 @@ async function runExtraction(
     return { text: "", confidence: 0.1, method: "unsupported", warnings: ["No file path"] };
   }
 
-  // File size guard
+  // File existence + size guard
   const stat = await fs.stat(filePath).catch(() => null);
-  if (stat && stat.size > MAX_FILE_SIZE_BYTES) {
+  if (!stat) {
+    return {
+      text: "",
+      confidence: 0,
+      method: "unsupported",
+      warnings: [
+        `File not found at path: ${filePath}. The file may have been lost due to ephemeral storage (server restart or deploy). Re-upload the document to reprocess.`,
+      ],
+    };
+  }
+  if (stat.size > MAX_FILE_SIZE_BYTES) {
     return {
       text: "",
       confidence: 0.1,
@@ -992,9 +1005,27 @@ async function processSingleJob(): Promise<void> {
     mimeType: job.document.mimeType,
   });
 
+  // If the file is stored in R2, download it to a temp path for extraction.
+  // The temp file is cleaned up in the finally block regardless of outcome.
+  let extractionFilePath = job.document.filePath;
+  let tempFilePath: string | null = null;
+
+  if (extractionFilePath && isR2Configured() && isR2Key(extractionFilePath)) {
+    const ext = path.extname(extractionFilePath) || "";
+    tempFilePath = path.join(os.tmpdir(), `processing-${job.id}${ext}`);
+    logger.info("Downloading file from R2 for processing", {
+      jobId: job.id,
+      key: extractionFilePath,
+      tempPath: tempFilePath,
+    });
+    const buffer = await downloadFromR2(extractionFilePath);
+    await fs.writeFile(tempFilePath, buffer);
+    extractionFilePath = tempFilePath;
+  }
+
   try {
     const extraction = await withTimeout(
-      runExtraction(job.document.filePath, job.document.mimeType),
+      runExtraction(extractionFilePath, job.document.mimeType),
       JOB_TIMEOUT_MS,
       job.document.mimeType ?? "unknown",
     );
@@ -1196,6 +1227,11 @@ async function processSingleJob(): Promise<void> {
       },
       err,
     );
+  } finally {
+    // Always remove the R2 temp file, success or failure
+    if (tempFilePath) {
+      await fs.unlink(tempFilePath).catch(() => {});
+    }
   }
 }
 

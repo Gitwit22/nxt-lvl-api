@@ -9,8 +9,6 @@ import express, { type NextFunction, type Request, type Response } from "express
 import jwt from "jsonwebtoken";
 import { prisma } from "../../../core/db/prisma.js";
 import { JWT_SECRET } from "../../../core/config/env.js";
-import { signToken } from "../../../core/auth/auth.service.js";
-import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
 import { logger } from "../../../logger.js";
 
 const router = express.Router();
@@ -75,111 +73,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-// ─── Platform Auth / Consume ──────────────────────────────────────────────────
-
-/**
- * POST /api/timeflow/platform-auth/consume
- * Accepts a suite launch token and returns a Timeflow-scoped JWT.
- */
-router.post("/platform-auth/consume", async (req, res) => {
-  const body = isRecord(req.body) ? req.body : {};
-  const launchToken =
-    typeof body.launchToken === "string" ? body.launchToken :
-    typeof body.token === "string" ? body.token : undefined;
-
-  if (!launchToken) {
-    res.status(400).json({ error: "launchToken is required" });
-    return;
-  }
-
-  let claims: { userId: string; email: string; role: string; organizationId: string } | undefined;
-
-  try {
-    const payload = jwt.verify(launchToken, JWT_SECRET) as Record<string, unknown>;
-    const userId = typeof payload.userId === "string" ? payload.userId : undefined;
-    const email = typeof payload.email === "string" ? payload.email : undefined;
-    const organizationId = typeof payload.organizationId === "string" ? payload.organizationId : undefined;
-    const role = typeof payload.role === "string" ? payload.role : "contractor";
-
-    if (userId && email && organizationId) {
-      claims = { userId, email, role, organizationId };
-    }
-  } catch {
-    // invalid token
-  }
-
-  if (!claims) {
-    res.status(401).json({ error: "Invalid or expired launch token", code: "invalid_launch_token" });
-    return;
-  }
-
-  // Map suite role → Timeflow role
-  const timeflowRole = ["org_admin", "admin", "owner", "contractor"].includes(claims.role)
-    ? "contractor"
-    : "client_viewer";
-
-  // Ensure settings row exists for this user (creates on first launch)
-  const tfStore = prisma as unknown as {
-    timeflowSettings: {
-      findUnique: (args: { where: Record<string, unknown> }) => Promise<Record<string, unknown> | null>;
-      create: (args: { data: Record<string, unknown> }) => Promise<Record<string, unknown>>;
-    };
-  };
-
-  const existingSettings = await tfStore.timeflowSettings.findUnique({
-    where: { organizationId_userId: { organizationId: claims.organizationId, userId: claims.userId } },
-  }).catch(() => null);
-
-  if (!existingSettings) {
-    await tfStore.timeflowSettings.create({
-      data: {
-        organizationId: claims.organizationId,
-        userId: claims.userId,
-        businessName: claims.email.split("@")[0] ?? "",
-      },
-    }).catch(() => undefined);
-  }
-
-  const timeflowToken = signToken({
-    userId: claims.userId,
-    email: claims.email,
-    role: timeflowRole,
-    organizationId: claims.organizationId,
-    programDomain: TIMEFLOW_PROGRAM_DOMAIN,
-  });
-
-  const secureCookie = process.env.NODE_ENV === "production";
-  res.cookie("timeflowToken", timeflowToken, {
-    httpOnly: true,
-    secure: secureCookie,
-    sameSite: secureCookie ? "none" : "lax",
-    maxAge: 8 * 60 * 60 * 1000,
-    path: "/",
-  });
-
-  res.json({
-    token: timeflowToken,
-    user: {
-      id: claims.userId,
-      email: claims.email,
-      role: timeflowRole,
-      organizationId: claims.organizationId,
-      programDomain: TIMEFLOW_PROGRAM_DOMAIN,
-    },
-  });
-
-  logger.info("[timeflow] platform-auth/consume success", {
-    userId: claims.userId,
-    organizationId: claims.organizationId,
-  });
-});
-
-// ─── Subscription gate ────────────────────────────────────────────────────────
-// All routes below this point require both a valid Timeflow JWT AND an active
-// OrganizationProgramSubscription for "timeflow". The requireTimeflowAuth call
-// that runs here is redundant with per-route checks but ensures the user is
-// attached before the subscription check inspects it.
-router.use(requireTimeflowAuth, requireProgramSubscription("timeflow"));
+// All routes below require a valid Timeflow JWT.
+router.use(requireTimeflowAuth);
 
 // ─── Settings ────────────────────────────────────────────────────────────────
 

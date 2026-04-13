@@ -2,6 +2,7 @@ import "dotenv/config";
 import { app } from "./app.js";
 import { prisma } from "./db.js";
 import { PORT, NODE_ENV, UPLOAD_DIR, CORS_ORIGIN, BACKEND_URL, PLATFORM_DISPLAY_NAME } from "./config.js";
+import { STORAGE_BACKEND } from "./core/config/env.js";
 import { startProcessingWorker, stopProcessingWorker } from "./processingQueue.js";
 import { logger } from "./logger.js";
 
@@ -31,7 +32,8 @@ async function bootstrap() {
     logger.info(`${PLATFORM_DISPLAY_NAME} started`, {
       port: PORT,
       env: NODE_ENV,
-      uploadDir: UPLOAD_DIR,
+      storage: STORAGE_BACKEND,
+      uploadDir: STORAGE_BACKEND === "local" ? UPLOAD_DIR : undefined,
       backendUrl: BACKEND_URL,
       corsOrigin: CORS_ORIGIN,
     });

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/index.js",
+    "start": "npx prisma db push --accept-data-loss && node dist/index.js",
     "postinstall": "prisma generate",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -17,6 +17,8 @@
     "db:backfill:tenant": "node --import tsx src/backfillTenantContext.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1029.0",
+    "@aws-sdk/s3-request-presigner": "^3.1029.0",
     "@prisma/client": "6.19.3",
     "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.19",
