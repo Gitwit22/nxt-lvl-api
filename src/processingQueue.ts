@@ -12,7 +12,11 @@ import {
   SCANNED_PDF_WORDS_PER_PAGE_THRESHOLD,
   OCR_CONFIDENCE_REVIEW_THRESHOLD,
   MAX_FILE_SIZE_BYTES,
+  LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD,
+  LLAMA_CLASSIFY_REVIEW_THRESHOLD,
 } from "./core/config/env.js";
+import { classifyDocumentWithLlamaCloud } from "./core/services/classify/llamaClassifyService.js";
+import type { ChronicleClassificationResult } from "./core/services/classify/llamaClassifyService.js";
 import { isR2Configured, isR2Key, downloadFromR2 } from "./core/storage/r2.js";
 import {
   canUseSharedParser,
@@ -1176,6 +1180,27 @@ async function processSingleJob(): Promise<void> {
       extraction.text ||
       `${job.document.title}\n\n${typeof docRecord.description === "string" ? docRecord.description : ""}`;
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Llama Cloud AI Classification — runs after extraction, before rule-based
+    // Only attempted when file is accessible and extraction was not unsupported
+    // ─────────────────────────────────────────────────────────────────────
+    let llamaClassResult: ChronicleClassificationResult | null = null;
+    if (extraction.method !== "unsupported" && extractionFilePath) {
+      try {
+        llamaClassResult = await classifyDocumentWithLlamaCloud(
+          extractionFilePath,
+          job.document.mimeType ?? null,
+          { documentId: job.documentId, jobId: job.id },
+        );
+      } catch (classifyErr) {
+        logger.warn("Llama classify — unexpected error (non-fatal)", {
+          jobId: job.id,
+          documentId: job.documentId,
+          error: classifyErr instanceof Error ? classifyErr.message : String(classifyErr),
+        });
+      }
+    }
+
     const autoLabels = classifyDocumentTypeAndTopics(job.document.title, baseText);
     const fingerprint = await computeFingerprint(baseText, job.document.title, job.document.filePath);
     const similarity = await compareAgainstExistingDocuments(
@@ -1252,21 +1277,41 @@ async function processSingleJob(): Promise<void> {
     const autoApprovalThreshold = 0.8;
     const classificationThreshold = 0.8;
 
+    // Determine the best document type: prefer Llama classify when it is confident
+    const llamaDocumentType =
+      llamaClassResult?.status === "complete" && llamaClassResult.decision === "auto_accepted"
+        ? llamaClassResult.documentType
+        : null;
+    const finalDocumentType = llamaDocumentType ?? autoLabels.documentType;
+
+    // Llama classify forces review when it returned needs_review or failed on a supported format
+    const llamaForcesReview =
+      llamaClassResult !== null &&
+      (llamaClassResult.status === "failed" ||
+        llamaClassResult.decision === "needs_review" ||
+        llamaClassResult.decision === "low_confidence");
+
     const needsReview =
       extraction.method === "unsupported" || // Rule 1: unsupported formats always need review
       isNoContentExtraction || // Rule 2: no content = always review
       isTitleOnlyExtraction || // Rule 3: title-only always needs review
+      llamaForcesReview || // Rule 5: Llama classify low-confidence or failed
       extraction.confidence < OCR_CONFIDENCE_REVIEW_THRESHOLD ||
       autoLabels.documentTypeConfidence < classificationThreshold ||
       autoLabels.topicLabels.length === 0 ||
       autoLabels.timeLabel.confidence < 0.6;
 
     // Rule 4: Never auto-approve if extraction quality is questionable
-    // Only auto-approve if BOTH extraction AND classification are highly confident
+    // Only auto-approve if BOTH extraction AND Llama classification are highly confident
+    const llamaAutoAccepted =
+      llamaClassResult?.status === "complete" &&
+      llamaClassResult.decision === "auto_accepted" &&
+      (llamaClassResult.confidence ?? 0) >= LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD;
+
     const canAutoApprove =
       extractionQuality === "full_extraction" &&
       extraction.confidence >= autoApprovalThreshold &&
-      autoLabels.documentTypeConfidence >= classificationThreshold &&
+      (llamaAutoAccepted || autoLabels.documentTypeConfidence >= classificationThreshold) &&
       extractedWordCount >= 500;
 
     const reviewReasons: string[] = [];
@@ -1317,6 +1362,20 @@ async function processSingleJob(): Promise<void> {
       reviewReasons.push("Date/year unclear — manual verification needed");
     }
     
+    if (llamaForcesReview && llamaClassResult) {
+      if (llamaClassResult.status === "failed") {
+        reviewReasons.push("AI classification step failed — manual type verification required");
+      } else if (llamaClassResult.decision === "needs_review") {
+        reviewReasons.push(
+          `AI classification uncertain: ${llamaClassResult.documentType} (${Math.round((llamaClassResult.confidence ?? 0) * 100)}% confidence)`,
+        );
+      } else if (llamaClassResult.decision === "low_confidence") {
+        reviewReasons.push(
+          `AI classification low confidence (${Math.round((llamaClassResult.confidence ?? 0) * 100)}%) — document type unclear`,
+        );
+      }
+    }
+
     if (similarity.similarTo.length > 0) {
       reviewReasons.push("⚠️ Similar documents found — verify relationships and deduplication");
     }
@@ -1360,7 +1419,7 @@ async function processSingleJob(): Promise<void> {
         extractedText: baseText,
         year: finalYear,
         month: finalMonth,
-        type: autoLabels.documentType,
+        type: finalDocumentType,
         tags: mergedTags,
         keywords: (searchHelpers.normalizedKeywords as string[]).slice(0, 80),
         processingStatus: "processed",
@@ -1399,8 +1458,10 @@ async function processSingleJob(): Promise<void> {
           timeLabel: autoLabels.timeLabel,
         },
         classificationResult: {
-          method: "rule_based",
-          confidence: Number(autoLabels.documentTypeConfidence.toFixed(3)),
+          method: llamaDocumentType ? "ai_assisted" : "rule_based",
+          confidence: llamaDocumentType
+            ? Number((llamaClassResult?.confidence ?? autoLabels.documentTypeConfidence).toFixed(3))
+            : Number(autoLabels.documentTypeConfidence.toFixed(3)),
           category: autoLabels.canonicalType,
           suggestedTags: topicTags,
           autoLabels,
@@ -1409,6 +1470,7 @@ async function processSingleJob(): Promise<void> {
             confidence: taxonomy.confidence,
             learned: taxonomy.confidence >= 0.7,
           },
+          llamaCloud: llamaClassResult ?? undefined,
         },
         duplicateCheck: {
           hash: fingerprint.fileHash,
@@ -1441,7 +1503,11 @@ async function processSingleJob(): Promise<void> {
           details:
             extraction.method === "unsupported"
               ? `Processing failed: '${extraction.method}' file format not supported`
-              : `Processed via '${extraction.method}' extraction (extracted ${extractedWordCount} words, confidence ${Math.round(extraction.confidence * 100)}%). Auto-labeled as '${autoLabels.documentType}' (${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence).`,
+              : `Processed via '${extraction.method}' extraction (extracted ${extractedWordCount} words, confidence ${Math.round(extraction.confidence * 100)}%). ` +
+                (llamaDocumentType
+                  ? `AI classified as '${llamaDocumentType}' (${Math.round((llamaClassResult?.confidence ?? 0) * 100)}% confidence via Llama Cloud).`
+                  : `Auto-labeled as '${autoLabels.documentType}' (${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence via rule-based).`),
+          llamaClassification: llamaClassResult ?? undefined,
         }),
       },
     });
@@ -1461,6 +1527,9 @@ async function processSingleJob(): Promise<void> {
       contentLength: extractedWordCount,
       needsReview,
       reviewPriority,
+      llamaClassifyStatus: llamaClassResult?.status ?? "not_run",
+      llamaDocumentType: llamaClassResult?.documentType ?? null,
+      llamaConfidence: llamaClassResult?.confidence ?? null,
     });
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));

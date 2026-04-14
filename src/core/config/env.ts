@@ -18,6 +18,21 @@ export const PLATFORM_VALIDATE_LAUNCH_URL = process.env.PLATFORM_VALIDATE_LAUNCH
 export const PLATFORM_AUTH_TIMEOUT_MS = Number(process.env.PLATFORM_AUTH_TIMEOUT_MS || 8_000);
 export const LLAMA_CLOUD_API_KEY = process.env.LLAMA_CLOUD_API_KEY || "";
 
+// Llama Cloud — document classification
+export const ENABLE_LLAMA_CLASSIFY = process.env.ENABLE_LLAMA_CLASSIFY !== "false";
+export const LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD = Number(
+  process.env.LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD || 0.85,
+);
+export const LLAMA_CLASSIFY_REVIEW_THRESHOLD = Number(
+  process.env.LLAMA_CLASSIFY_REVIEW_THRESHOLD || 0.6,
+);
+export const LLAMA_CLASSIFY_POLL_INTERVAL_MS = Number(
+  process.env.LLAMA_CLASSIFY_POLL_INTERVAL_MS || 1500,
+);
+export const LLAMA_CLASSIFY_MAX_POLL_ATTEMPTS = Number(
+  process.env.LLAMA_CLASSIFY_MAX_POLL_ATTEMPTS || 40,
+);
+
 const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:5173",
   "http://localhost:8080",
