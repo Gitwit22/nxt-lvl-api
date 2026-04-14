@@ -1,7 +1,7 @@
 import express from "express";
 import { prisma } from "../db/prisma.js";
 import { CURRENT_PROGRAM_DOMAIN } from "../config/env.js";
-import { requireAuth } from "../middleware/auth.middleware.js";
+import { requireAuth, tryAttachAuthUser } from "../middleware/auth.middleware.js";
 import { getRequestProgram } from "../middleware/partition.middleware.js";
 import { programs } from "../config/programs.js";
 
@@ -120,7 +120,8 @@ function mapProgram(program: {
   };
 }
 
-router.get("/programs", requireAuth, async (req, res) => {
+// Public endpoint — no auth required for browsing the program catalog.
+router.get("/programs", tryAttachAuthUser, async (req, res) => {
   const programDomain = getProgramDomain(req);
 
   try {

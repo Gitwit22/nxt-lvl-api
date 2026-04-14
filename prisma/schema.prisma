@@ -79,9 +79,24 @@ model Organization {
   programAccess         OrganizationProgramAccess[]        @relation("OrgProgramAccess")
   programSubscriptions  OrganizationProgramSubscription[]  @relation("OrgProgramSubscriptions")
   invitations           OrgInvitation[]                    @relation("OrgInvitations")
+  storageSettings       ProgramStorageSettings[]
 
   @@index([isActive])
   @@index([status])
+}
+
+model ProgramStorageSettings {
+  id             String   @id @default(cuid())
+  organizationId String
+  programDomain  String   @default("community-chronicle")
+  settings       Json     @default("{}")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, programDomain])
+  @@index([organizationId, programDomain])
 }
 
 model Membership {
