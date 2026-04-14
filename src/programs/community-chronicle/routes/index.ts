@@ -360,7 +360,68 @@ async function findScopedDocument(id: string, scope: TenantScope) {
       id,
       ...getDocumentScope(scope),
     },
+    include: {
+      uploadedBy: {
+        select: {
+          displayName: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+        },
+      },
+    },
   });
+}
+
+function formatUploaderName(
+  user?: { displayName: string; firstName: string; lastName: string; email: string } | null,
+): string | null {
+  if (!user) return null;
+
+  const display = user.displayName?.trim();
+  if (display) return display;
+
+  const full = `${user.firstName ?? ""} ${user.lastName ?? ""}`.trim();
+  if (full) return full;
+
+  const email = user.email?.trim();
+  return email || null;
+}
+
+async function resolveRequestUploaderName(user: ReturnType<typeof getRequestUser>): Promise<string | undefined> {
+  if (!user) return undefined;
+
+  const profile = await prisma.user.findUnique({
+    where: { id: user.userId },
+    select: {
+      displayName: true,
+      firstName: true,
+      lastName: true,
+      email: true,
+    },
+  });
+
+  return formatUploaderName(profile ?? { displayName: "", firstName: "", lastName: "", email: user.email }) ?? undefined;
+}
+
+function toApiDocumentWithUploaderFallback(doc: {
+  uploadedBy?: { displayName: string; firstName: string; lastName: string; email: string } | null;
+  [key: string]: unknown;
+}) {
+  const mapped = toApiDocument(doc as never);
+  if (mapped.author && mapped.author !== "Unknown") {
+    return mapped;
+  }
+
+  const uploaderName = formatUploaderName(doc.uploadedBy);
+  if (uploaderName) {
+    return {
+      ...mapped,
+      author: uploaderName,
+    };
+  }
+
+  return mapped;
 }
 
 function parseFilters(query: Record<string, unknown>) {
@@ -482,6 +543,16 @@ router.get("/documents", requireAuth, async (req, res) => {
       intakeSource: filters.intakeSource,
     },
     orderBy: { createdAt: "desc" },
+    include: {
+      uploadedBy: {
+        select: {
+          displayName: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+        },
+      },
+    },
   });
 
   const filtered = docs.filter((doc: (typeof docs)[number]) => {
@@ -498,7 +569,7 @@ router.get("/documents", requireAuth, async (req, res) => {
     return true;
   });
 
-  res.json(filtered.map(toApiDocument));
+  res.json(filtered.map(toApiDocumentWithUploaderFallback));
 });
 
 router.get("/documents/:id", requireAuth, async (req, res) => {
@@ -514,7 +585,7 @@ router.get("/documents/:id", requireAuth, async (req, res) => {
     res.status(404).json({ error: "Document not found" });
     return;
   }
-  res.json(toApiDocument(doc));
+  res.json(toApiDocumentWithUploaderFallback(doc));
 });
 
 router.get("/documents/:id/download", requireAuth, async (req, res) => {
@@ -553,11 +624,13 @@ router.post("/documents/manual", requireAuth, requireRole("uploader"), async (re
   const body = req.body as Record<string, unknown>;
   const user = getRequestUser(req);
   const tenantScope = getRequestTenantScope(req);
+  const uploaderName = await resolveRequestUploaderName(user);
 
   const payload = createDocumentPayload({
     title: typeof body.title === "string" ? body.title : undefined,
     description: typeof body.description === "string" ? body.description : undefined,
     author: typeof body.author === "string" ? body.author : undefined,
+    uploaderName,
     year: parseNumber(body.year),
     month: parseNumber(body.month),
     category: typeof body.category === "string" ? body.category : undefined,
@@ -587,7 +660,7 @@ router.post("/documents/manual", requireAuth, requireRole("uploader"), async (re
     organizationId: tenantScope.organizationId,
     programDomain: tenantScope.programDomain,
   });
-  res.status(201).json(toApiDocument(created));
+  res.status(201).json(toApiDocumentWithUploaderFallback(created));
 });
 
 router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.single("file"), async (req, res) => {
@@ -599,10 +672,12 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
   const body = req.body as Record<string, unknown>;
   const user = getRequestUser(req);
   const tenantScope = getRequestTenantScope(req);
+  const uploaderName = await resolveRequestUploaderName(user);
   const payload = createDocumentPayload({
     title: typeof body.title === "string" ? body.title : undefined,
     description: typeof body.description === "string" ? body.description : undefined,
     author: typeof body.author === "string" ? body.author : undefined,
+    uploaderName,
     year: parseNumber(body.year),
     month: parseNumber(body.month),
     category: typeof body.category === "string" ? body.category : undefined,
@@ -664,7 +739,7 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
     organizationId: tenantScope.organizationId,
     programDomain: tenantScope.programDomain,
   });
-  res.status(201).json(toApiDocument(created));
+  res.status(201).json(toApiDocumentWithUploaderFallback(created));
 });
 
 router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upload.array("files", 50), async (req, res) => {
@@ -677,6 +752,7 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
   const intakeSource = typeof req.body.intakeSource === "string" ? req.body.intakeSource : "multi_upload";
   const user = getRequestUser(req);
   const tenantScope = getRequestTenantScope(req);
+  const uploaderName = await resolveRequestUploaderName(user);
 
   const created = [];
   for (const file of files) {
@@ -704,6 +780,7 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
 
     const payload = createDocumentPayload({
       intakeSource,
+      uploaderName,
       fileMeta: {
         originalFileName: file.originalname,
         mimeType: file.mimetype,
@@ -725,7 +802,7 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
     created.push(doc);
   }
 
-  res.status(201).json(created.map(toApiDocument));
+  res.status(201).json(created.map(toApiDocumentWithUploaderFallback));
 });
 
 router.patch("/documents/:id", requireAuth, requireRole("reviewer"), async (req, res) => {
@@ -743,7 +820,7 @@ router.patch("/documents/:id", requireAuth, requireRole("reviewer"), async (req,
   }
 
   const body = req.body as Record<string, unknown>;
-  const updated = await prisma.document.update({
+  await prisma.document.update({
     where: { id },
     data: {
       title: typeof body.title === "string" ? body.title : undefined,
@@ -766,7 +843,13 @@ router.patch("/documents/:id", requireAuth, requireRole("reviewer"), async (req,
     },
   });
 
-  res.json(toApiDocument(updated));
+  const refreshed = await findScopedDocument(id, tenantScope);
+  if (!refreshed) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  res.json(toApiDocumentWithUploaderFallback(refreshed));
 });
 
 router.delete("/documents/:id", requireAuth, requireRole("admin"), async (req, res) => {
@@ -837,7 +920,7 @@ router.post("/documents/:id/retry", requireAuth, requireRole("reviewer"), async 
     res.status(404).json({ error: "Document not found" });
     return;
   }
-  res.json(toApiDocument(refreshed));
+  res.json(toApiDocumentWithUploaderFallback(refreshed));
 });
 
 // POST /documents/reprocess
@@ -899,8 +982,18 @@ router.get("/review-queue", requireAuth, requireRole("reviewer"), async (req, re
   const docs = await prisma.document.findMany({
     where: { needsReview: true, ...getDocumentScope(tenantScope) },
     orderBy: { updatedAt: "desc" },
+    include: {
+      uploadedBy: {
+        select: {
+          displayName: true,
+          firstName: true,
+          lastName: true,
+          email: true,
+        },
+      },
+    },
   });
-  res.json(docs.map(toApiDocument));
+  res.json(docs.map(toApiDocumentWithUploaderFallback));
 });
 
 router.post("/review-queue/:id/resolve", requireAuth, requireRole("reviewer"), async (req, res) => {
@@ -921,7 +1014,7 @@ router.post("/review-queue/:id/resolve", requireAuth, requireRole("reviewer"), a
   const resolution = typeof body.resolution === "string" ? body.resolution : "approved";
   const notes = typeof body.notes === "string" ? body.notes : undefined;
 
-  const updated = await prisma.document.update({
+  await prisma.document.update({
     where: { id },
     data: {
       needsReview: false,
@@ -937,7 +1030,13 @@ router.post("/review-queue/:id/resolve", requireAuth, requireRole("reviewer"), a
     } as never,
   });
 
-  res.json(toApiDocument(updated));
+  const refreshed = await findScopedDocument(id, tenantScope);
+  if (!refreshed) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  res.json(toApiDocumentWithUploaderFallback(refreshed));
 });
 
 router.post("/review-queue/:id/mark", requireAuth, requireRole("reviewer"), async (req, res) => {
@@ -958,7 +1057,7 @@ router.post("/review-queue/:id/mark", requireAuth, requireRole("reviewer"), asyn
   const reasons = parseStringArray(body.reasons);
   const priority = typeof body.priority === "string" ? body.priority : "medium";
 
-  const updated = await prisma.document.update({
+  await prisma.document.update({
     where: { id },
     data: {
       needsReview: true,
@@ -972,7 +1071,13 @@ router.post("/review-queue/:id/mark", requireAuth, requireRole("reviewer"), asyn
     },
   });
 
-  res.json(toApiDocument(updated));
+  const refreshed = await findScopedDocument(id, tenantScope);
+  if (!refreshed) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  res.json(toApiDocumentWithUploaderFallback(refreshed));
 });
 
 export { router as communityChronicleRouter };

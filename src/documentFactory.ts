@@ -4,6 +4,7 @@ interface CreateDocumentInput {
   title?: string;
   description?: string;
   author?: string;
+  uploaderName?: string;
   year?: number;
   month?: number;
   category?: string;
@@ -58,11 +59,16 @@ export function createDocumentPayload(input: CreateDocumentInput) {
     input.title ||
     (input.fileMeta?.originalFileName ? titleFromFilename(input.fileMeta.originalFileName) : "Untitled Document");
 
+  const resolvedAuthor =
+    input.author?.trim() ||
+    input.uploaderName?.trim() ||
+    "Unknown";
+
   return {
     id,
     title,
     description: input.description || "",
-    author: input.author || "Unknown",
+    author: resolvedAuthor,
     year: input.year || now.getFullYear(),
     month: input.month ?? null,
     category: input.category || "Uncategorized",

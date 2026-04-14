@@ -99,13 +99,28 @@ type FamilyResult = {
 };
 
 const DOCUMENT_TYPE_RULES: Array<{ type: string; keywords: string[] }> = [
+  {
+    type: "tax notice",
+    keywords: [
+      "internal revenue service",
+      "irs",
+      "department of the treasury",
+      "employer identification number",
+      "tax notice",
+      "notice date",
+    ],
+  },
+  {
+    type: "irs correspondence",
+    keywords: ["internal revenue service", "irs", "correspondence", "notice", "treasury"],
+  },
   { type: "meeting minutes", keywords: ["meeting minutes", "agenda", "quorum", "motion", "adjourned"] },
   { type: "flyer", keywords: ["flyer", "join us", "registration", "save the date", "event"] },
   { type: "invoice", keywords: ["invoice", "amount due", "bill to", "remit"] },
   { type: "budget", keywords: ["budget", "projected", "fiscal", "line item", "appropriation"] },
   { type: "grant letter", keywords: ["grant", "award", "funded", "letter of award"] },
   { type: "application", keywords: ["application", "applicant", "submission", "eligibility"] },
-  { type: "newsletter", keywords: ["newsletter", "issue", "highlights", "updates"] },
+  { type: "newsletter", keywords: ["newsletter", "highlights", "updates", "edition"] },
   { type: "legal doc", keywords: ["agreement", "statute", "compliance", "legal", "whereas"] },
   { type: "memo", keywords: ["memo", "memorandum", "to:", "from:"] },
   { type: "report", keywords: ["report", "analysis", "summary", "findings"] },
@@ -114,6 +129,25 @@ const DOCUMENT_TYPE_RULES: Array<{ type: string; keywords: string[] }> = [
 ];
 
 const TOPIC_RULES: Array<{ label: string; keywords: string[] }> = [
+  {
+    label: "tax",
+    keywords: [
+      "irs",
+      "internal revenue service",
+      "tax",
+      "ein",
+      "employer identification number",
+      "department of the treasury",
+    ],
+  },
+  {
+    label: "government notice",
+    keywords: ["notice", "notice date", "official notice", "department of the treasury", "irs"],
+  },
+  {
+    label: "compliance",
+    keywords: ["compliance", "filing", "tax filing", "requirements", "correspondence"],
+  },
   { label: "housing", keywords: ["housing", "tenant", "homeownership", "residential", "rent"] },
   { label: "education", keywords: ["education", "school", "student", "curriculum", "enrollment"] },
   { label: "funding", keywords: ["funding", "grant", "budget", "donation", "reimbursement"] },
@@ -621,8 +655,23 @@ function buildSearchHelpers(
   autoLabels: AutoLabelingResult,
   fingerprint: Fingerprint,
 ): Record<string, unknown> {
+  const corpus = `${title}\n${text}`.toLowerCase();
   const tokens = tokenizeForSimilarity(`${title} ${text}`);
-  const normalizedKeywords = [...new Set([...tokens, ...tags.map((tag) => tag.toLowerCase())])].slice(0, 120);
+  const domainKeywords = [
+    { keyword: "irs", test: /\birs\b|internal revenue service/i },
+    { keyword: "internal revenue service", test: /internal revenue service/i },
+    { keyword: "treasury", test: /department of the treasury|\btreasury\b/i },
+    { keyword: "tax notice", test: /tax notice|notice date|date of notice/i },
+    { keyword: "ein", test: /\bein\b|employer identification number/i },
+    { keyword: "employer identification number", test: /employer identification number/i },
+    { keyword: "tax filing", test: /tax filing|file your .*tax/i },
+    { keyword: "irs correspondence", test: /irs.*(letter|notice|correspondence)|correspondence.*irs/i },
+    { keyword: "notice date", test: /notice date|date of notice/i },
+  ]
+    .filter((entry) => entry.test.test(corpus))
+    .map((entry) => entry.keyword);
+
+  const normalizedKeywords = [...new Set([...tokens, ...tags.map((tag) => tag.toLowerCase()), ...domainKeywords])].slice(0, 120);
   const stemmedTerms = [...new Set(normalizedKeywords.map(simpleStem))].slice(0, 120);
 
   const aliases = [
@@ -879,11 +928,33 @@ async function runExtraction(
     return extractPlainText(filePath);
   }
 
+  // Provide helpful messages for common unsupported formats
+  const unsupportedFormatWarnings: string[] = [];
+  if (mimeType === "application/vnd.openxmlformats-officedocument.wordprocessingml.document") {
+    unsupportedFormatWarnings.push(
+      "DOCX extraction not yet supported. Workaround: Convert to PDF or export as text and re-upload."
+    );
+  } else if (mimeType?.includes("microsoft")) {
+    unsupportedFormatWarnings.push(
+      `Microsoft Office format (.${mimeType.split("/")[1]}) not yet supported. Please convert to PDF and re-upload.`
+    );
+  } else if (mimeType?.includes("spreadsheet") || mimeType?.includes("excel")) {
+    unsupportedFormatWarnings.push(
+      "Spreadsheet format not supported. Please export as CSV or PDF and re-upload."
+    );
+  } else if (mimeType?.includes("presentation")) {
+    unsupportedFormatWarnings.push(
+      "Presentation format not supported. Please export as PDF and re-upload."
+    );
+  } else {
+    unsupportedFormatWarnings.push(`No extractor available for MIME type: ${mimeType || "unknown"}`);
+  }
+
   return {
     text: "",
     confidence: 0.1,
-    method: "unsupported",
-    warnings: [`No extractor available for MIME type '${mimeType}'.`],
+    method: "unsupported" as const,
+    warnings: unsupportedFormatWarnings,
   };
 }
 
@@ -946,6 +1017,7 @@ async function handleJobFailure(
       where: { id: job.documentId },
       data: {
         processingStatus: "failed",
+        ocrStatus: "failed",
         status: "failed",
         statusUpdatedAt: new Date(),
         needsReview: true,
@@ -996,6 +1068,7 @@ async function handleJobFailure(
       where: { id: job.documentId },
       data: {
         processingStatus: "queued",
+        ocrStatus: "pending",
         status: "queued",
         statusUpdatedAt: new Date(),
         processingHistory: appendHistory(job.document.processingHistory, {
@@ -1049,6 +1122,7 @@ async function processSingleJob(): Promise<void> {
     where: { id: job.documentId },
     data: {
       processingStatus: "processing",
+      ocrStatus: "in_progress",
       status: "extracting",
       statusUpdatedAt: new Date(),
       processingHistory: appendHistory(job.document.processingHistory, {
@@ -1127,53 +1201,124 @@ async function processSingleJob(): Promise<void> {
 
     const existingTags = asStringArray(job.document.tags);
     const topicTags = autoLabels.topicLabels.map((topic) => topic.label);
+    const taxSpecificTags = [
+      { tag: "irs", test: /\birs\b|internal revenue service/i },
+      { tag: "internal revenue service", test: /internal revenue service/i },
+      { tag: "treasury", test: /department of the treasury|\btreasury\b/i },
+      { tag: "ein", test: /\bein\b|employer identification number/i },
+      { tag: "employer identification number", test: /employer identification number/i },
+      { tag: "tax notice", test: /tax notice|notice date|date of notice/i },
+      { tag: "irs correspondence", test: /correspondence.*irs|irs.*correspondence|irs.*notice/i },
+    ]
+      .filter((entry) => entry.test.test(baseText))
+      .map((entry) => entry.tag);
     const entityTags = [
       ...autoLabels.entities.organizations,
       ...autoLabels.entities.locations,
     ].map((value) => value.toLowerCase());
-    const mergedTags = [...new Set([...existingTags, ...topicTags, ...entityTags])].slice(0, 60);
+    const mergedTags = [...new Set([...existingTags, ...topicTags, ...taxSpecificTags, ...entityTags])].slice(0, 60);
 
     const suggestedYear = autoLabels.timeLabel.approximateYear;
     const finalYear = suggestedYear ?? job.document.year;
     const finalMonth = job.document.month;
 
-    const confidenceSignals = [
-      extraction.confidence,
-      autoLabels.documentTypeConfidence,
-      autoLabels.timeLabel.confidence,
-      family.confidence,
-    ];
-    const aggregateConfidence = confidenceSignals.reduce((sum, value) => sum + value, 0) / confidenceSignals.length;
+    // ─────────────────────────────────────────────────────────────────────
+    // Extraction Quality Assessment — separate extraction from classification
+    // ─────────────────────────────────────────────────────────────────────
+    const extractedWordCount = baseText ? baseText.split(/\s+/).filter(Boolean).length : 0;
+    const isTitleOnlyExtraction = extractedWordCount < 20 && extraction.method !== "unsupported";
+    const isNoContentExtraction = extractedWordCount === 0;
+
+    // Determine extraction quality status
+    let extractionQuality: "full_extraction" | "partial_extraction" | "minimal_extraction" | "unsupported_format" | "no_extraction" = "full_extraction";
+    if (extraction.method === "unsupported") {
+      extractionQuality = "unsupported_format";
+    } else if (isNoContentExtraction) {
+      extractionQuality = "no_extraction";
+    } else if (isTitleOnlyExtraction) {
+      extractionQuality = "minimal_extraction";
+    } else if (extractedWordCount < 100) {
+      extractionQuality = "partial_extraction";
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Review Necessity Logic — STRICT rules for unsupported/low-confidence
+    // ─────────────────────────────────────────────────────────────────────
+    // Rule 1: ALWAYS review unsupported file formats
+    // Rule 2: ALWAYS review when no real extraction happened
+    // Rule 3: ALWAYS review when minimal/partial extraction with low confidence
+    // Rule 4: Never auto-approve low confidence + weak classification
+    
+    const autoApprovalThreshold = 0.8;
+    const classificationThreshold = 0.8;
 
     const needsReview =
+      extraction.method === "unsupported" || // Rule 1: unsupported formats always need review
+      isNoContentExtraction || // Rule 2: no content = always review
+      isTitleOnlyExtraction || // Rule 3: title-only always needs review
       extraction.confidence < OCR_CONFIDENCE_REVIEW_THRESHOLD ||
-      autoLabels.documentTypeConfidence < 0.7 ||
+      autoLabels.documentTypeConfidence < classificationThreshold ||
       autoLabels.topicLabels.length === 0 ||
-      autoLabels.timeLabel.confidence < 0.6 ||
-      aggregateConfidence < 0.62;
+      autoLabels.timeLabel.confidence < 0.6;
+
+    // Rule 4: Never auto-approve if extraction quality is questionable
+    // Only auto-approve if BOTH extraction AND classification are highly confident
+    const canAutoApprove =
+      extractionQuality === "full_extraction" &&
+      extraction.confidence >= autoApprovalThreshold &&
+      autoLabels.documentTypeConfidence >= classificationThreshold &&
+      extractedWordCount >= 500;
 
     const reviewReasons: string[] = [];
-    if (extraction.method === "pdf_scanned") {
-      reviewReasons.push("Scanned PDF — manual OCR review required");
+    
+    // Add format/extraction-specific reasons first
+    if (extraction.method === "unsupported") {
+      const fileExt = job.document.originalFileName ? job.document.originalFileName.split(".").pop()?.toUpperCase() : "unknown";
+      reviewReasons.push(`⚠️ Unsupported file format (.${fileExt})`);
+      if (fileExt === "DOCX") {
+        reviewReasons.push("💡 DOCX extraction is not yet supported. Please re-upload as PDF or extract text manually.");
+      } else {
+        reviewReasons.push(`💡 No extractor available for .${fileExt} files.`);
+      }
+      reviewReasons.push("Status: Extraction failed — no content parsed");
     }
-    if (extraction.confidence < OCR_CONFIDENCE_REVIEW_THRESHOLD) {
+    
+    if (extraction.method === "pdf_scanned") {
+      reviewReasons.push("Scanned PDF detected — manual OCR review required");
+    }
+    
+    if (isNoContentExtraction) {
+      reviewReasons.push("No content extracted. Only filename/metadata available.");
+    }
+    
+    if (isTitleOnlyExtraction) {
+      reviewReasons.push(`Minimal extraction: ${extractedWordCount} words detected (usually title only)`);
+    }
+    
+    if (extraction.confidence < OCR_CONFIDENCE_REVIEW_THRESHOLD && extraction.method !== "unsupported") {
       reviewReasons.push(`Low extraction confidence (${Math.round(extraction.confidence * 100)}%)`);
     }
-    if (autoLabels.documentTypeConfidence < 0.7) {
+    
+    if (autoLabels.documentTypeConfidence < classificationThreshold) {
       reviewReasons.push(
-        `likely ${autoLabels.documentType}, ${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence`,
+        `Weak classification: likely ${autoLabels.documentType} (${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence)`,
       );
     }
-    if (autoLabels.topicLabels[0] && autoLabels.topicLabels[0].confidence < 0.7) {
+    
+    if (autoLabels.topicLabels.length === 0) {
+      reviewReasons.push("No topic labels detected — document category unclear");
+    } else if (autoLabels.topicLabels[0] && autoLabels.topicLabels[0].confidence < classificationThreshold) {
       reviewReasons.push(
-        `maybe ${autoLabels.topicLabels[0].label}-related, ${Math.round(autoLabels.topicLabels[0].confidence * 100)}% confidence`,
+        `Weak topic confidence: maybe ${autoLabels.topicLabels[0].label} (${Math.round(autoLabels.topicLabels[0].confidence * 100)}%)`,
       );
     }
+    
     if (autoLabels.timeLabel.confidence < 0.6) {
-      reviewReasons.push("year unclear");
+      reviewReasons.push("Date/year unclear — manual verification needed");
     }
+    
     if (similarity.similarTo.length > 0) {
-      reviewReasons.push("similar to known docs; verify relationships");
+      reviewReasons.push("⚠️ Similar documents found — verify relationships and deduplication");
     }
 
     const searchHelpers = buildSearchHelpers(
@@ -1185,6 +1330,30 @@ async function processSingleJob(): Promise<void> {
       fingerprint,
     );
 
+    // Determine review priority based on extraction/classification quality
+    let reviewPriority: "critical" | "high" | "medium" | "low" = "medium";
+    if (extraction.method === "unsupported" || isNoContentExtraction) {
+      reviewPriority = "critical";
+    } else if (isTitleOnlyExtraction || extraction.confidence < 0.5) {
+      reviewPriority = "high";
+    } else if (extraction.confidence < OCR_CONFIDENCE_REVIEW_THRESHOLD) {
+      reviewPriority = "medium";
+    } else {
+      reviewPriority = "low";
+    }
+
+    // Determine OCR/extraction status based on quality assessment
+    let ocrStatus: string;
+    if (extraction.method === "unsupported") {
+      ocrStatus = "unsupported";
+    } else if (isNoContentExtraction) {
+      ocrStatus = "failed";
+    } else if (extractionQuality === "partial_extraction" || extractionQuality === "minimal_extraction") {
+      ocrStatus = "partial";
+    } else {
+      ocrStatus = "completed";
+    }
+
     await prisma.document.update({
       where: { id: job.documentId },
       data: {
@@ -1195,29 +1364,32 @@ async function processSingleJob(): Promise<void> {
         tags: mergedTags,
         keywords: (searchHelpers.normalizedKeywords as string[]).slice(0, 80),
         processingStatus: "processed",
-        status: needsReview ? "review_required" : "archived",
+        ocrStatus,
+        status: needsReview ? "review_required" : (canAutoApprove ? "archived" : "review_required"),
         statusUpdatedAt: new Date(),
         needsReview,
         review: needsReview
           ? {
               required: true,
+              extractionQuality,
               reason: [...reviewReasons, ...(extraction.warnings ?? [])],
-              priority: extraction.confidence < 0.5 ? "high" : "medium",
+              priority: reviewPriority,
               suggestions: autoLabels.confidenceNarrative,
+              canAutoApprove: false,
             }
-          : { required: false },
+          : { required: false, canAutoApprove },
         extraction: {
           status: "complete",
           method: extraction.method,
           confidence: extraction.confidence,
+          extractionQuality, // New field: tracks extraction quality separate from confidence
           extractedAt: nowIso,
           pageCount: extraction.pageCount ?? null,
           warningMessages: extraction.warnings ?? [],
+          contentLength: extractedWordCount,
         },
         extractedMetadata: {
-          wordCount: baseText
-            ? baseText.split(/\s+/).filter(Boolean).length
-            : 0,
+          wordCount: extractedWordCount,
           detectedTitle: job.document.title,
           detectedAuthor: job.document.author,
           detectedDate: autoLabels.timeLabel.exactDate,
@@ -1228,7 +1400,7 @@ async function processSingleJob(): Promise<void> {
         },
         classificationResult: {
           method: "rule_based",
-          confidence: Number(aggregateConfidence.toFixed(3)),
+          confidence: Number(autoLabels.documentTypeConfidence.toFixed(3)),
           category: autoLabels.canonicalType,
           suggestedTags: topicTags,
           autoLabels,
@@ -1263,7 +1435,13 @@ async function processSingleJob(): Promise<void> {
           timestamp: nowIso,
           action: "processing_complete",
           status: "processed",
-          details: `Processed via '${extraction.method}' (confidence ${Math.round(extraction.confidence * 100)}%). Auto-labeled as ${autoLabels.documentType}.`,
+          extractionQuality,
+          ocrStatus,
+          requiresReview: needsReview,
+          details:
+            extraction.method === "unsupported"
+              ? `Processing failed: '${extraction.method}' file format not supported`
+              : `Processed via '${extraction.method}' extraction (extracted ${extractedWordCount} words, confidence ${Math.round(extraction.confidence * 100)}%). Auto-labeled as '${autoLabels.documentType}' (${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence).`,
         }),
       },
     });
@@ -1278,7 +1456,11 @@ async function processSingleJob(): Promise<void> {
       documentId: job.documentId,
       method: extraction.method,
       confidence: extraction.confidence,
+      extractionQuality,
+      ocrStatus,
+      contentLength: extractedWordCount,
       needsReview,
+      reviewPriority,
     });
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));
