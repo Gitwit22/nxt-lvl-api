@@ -2,7 +2,6 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import crypto from "crypto";
-import type { Prisma } from "@prisma/client";
 import { prisma } from "./core/db/prisma.js";
 import { logger } from "./logger.js";
 import {
@@ -824,13 +823,21 @@ async function runExtraction(
 }
 
 // ---------------------------------------------------------------------------
+// JSON helper – strips class prototypes so Prisma accepts the value as plain JSON
+// ---------------------------------------------------------------------------
+
+function toPrismaJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value)) as T;
+}
+
+// ---------------------------------------------------------------------------
 // History helper
 // ---------------------------------------------------------------------------
 
-function appendHistory(existing: unknown, event: Record<string, unknown>): Prisma.InputJsonValue {
+function appendHistory(existing: unknown, event: Record<string, unknown>) {
   const history = Array.isArray(existing) ? [...existing] : [];
   history.push(event);
-  return history as Prisma.InputJsonValue;
+  return toPrismaJson(history);
 }
 
 // ---------------------------------------------------------------------------
@@ -1148,7 +1155,7 @@ async function processSingleJob(): Promise<void> {
           pageCount: extraction.pageCount ?? null,
           warningMessages: extraction.warnings ?? [],
         },
-        extractedMetadata: {
+        extractedMetadata: toPrismaJson({
           wordCount: baseText
             ? baseText.split(/\s+/).filter(Boolean).length
             : 0,
@@ -1159,8 +1166,8 @@ async function processSingleJob(): Promise<void> {
           autoTopics: autoLabels.topicLabels,
           entities: autoLabels.entities,
           timeLabel: autoLabels.timeLabel,
-        },
-        classificationResult: {
+        }),
+        classificationResult: toPrismaJson({
           method: "rule_based",
           confidence: Number(aggregateConfidence.toFixed(3)),
           category: autoLabels.canonicalType,
@@ -1171,16 +1178,16 @@ async function processSingleJob(): Promise<void> {
             confidence: taxonomy.confidence,
             learned: taxonomy.confidence >= 0.7,
           },
-        },
-        duplicateCheck: {
+        }),
+        duplicateCheck: toPrismaJson({
           hash: fingerprint.fileHash,
           duplicateStatus: similarity.duplicateOf ? "possible_duplicate" : "unique",
           checkedAt: nowIso,
           possibleDuplicateIds: similarity.similarTo.map((item) => item.id),
           duplicateOf: similarity.duplicateOf,
           fingerprint,
-        },
-        searchIndex: {
+        }),
+        searchIndex: toPrismaJson({
           ...searchHelpers,
           relationships: {
             duplicateOf: similarity.duplicateOf,
@@ -1192,7 +1199,7 @@ async function processSingleJob(): Promise<void> {
             familyConfidence: family.confidence,
             familyRationale: family.rationale,
           },
-        },
+        }),
         processingHistory: appendHistory(job.document.processingHistory, {
           timestamp: nowIso,
           action: "processing_complete",
