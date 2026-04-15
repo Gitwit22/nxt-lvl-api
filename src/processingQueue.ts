@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import os from "os";
 import path from "path";
 import crypto from "crypto";
+import type { Prisma } from "@prisma/client";
 import { prisma } from "./core/db/prisma.js";
 import { logger } from "./logger.js";
 import {
@@ -965,8 +966,8 @@ async function runExtraction(
 // JSON helper – strips class prototypes so Prisma accepts the value as plain JSON
 // ---------------------------------------------------------------------------
 
-function toPrismaJson<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+function toPrismaJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
 }
 
 // ---------------------------------------------------------------------------
