@@ -232,12 +232,16 @@ model TimeflowSettings {
   userId                String
   businessName          String   @default("")
   defaultClientId       String?
+  invoiceFrequency      String   @default("monthly")
   invoiceNotes          String   @default("")
   paymentInstructions   String   @default("")
   invoiceLogoDataUrl    String?  @db.Text
   invoiceBannerDataUrl  String?  @db.Text
   companyViewerAccess   Boolean  @default(false)
   emailTemplate         String   @default("") @db.Text
+  periodWeekStartsOn    Int      @default(1)
+  periodTargetHours     Float    @default(0)
+  periodTargetEarnings  Float    @default(0)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 

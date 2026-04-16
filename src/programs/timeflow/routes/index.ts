@@ -650,7 +650,15 @@ router.get("/settings", requireTimeflowAuth, async (req, res) => {
   if (!settings) {
     const created = await store.timeflowSettings.upsert({
       where: { organizationId_userId: { organizationId, userId } },
-      create: { organizationId, userId, businessName: "" },
+      create: {
+        organizationId,
+        userId,
+        businessName: "",
+        invoiceFrequency: "monthly",
+        periodWeekStartsOn: 1,
+        periodTargetHours: 0,
+        periodTargetEarnings: 0,
+      },
       update: {},
     });
     res.json(created);
@@ -672,12 +680,16 @@ router.put("/settings", requireTimeflowAuth, async (req, res) => {
   const data: Record<string, unknown> = {};
   if (typeof body.businessName === "string") data.businessName = body.businessName;
   if ("defaultClientId" in body) data.defaultClientId = typeof body.defaultClientId === "string" ? body.defaultClientId : null;
+  if (typeof body.invoiceFrequency === "string") data.invoiceFrequency = body.invoiceFrequency;
   if (typeof body.invoiceNotes === "string") data.invoiceNotes = body.invoiceNotes;
   if (typeof body.paymentInstructions === "string") data.paymentInstructions = body.paymentInstructions;
   if ("invoiceLogoDataUrl" in body) data.invoiceLogoDataUrl = typeof body.invoiceLogoDataUrl === "string" ? body.invoiceLogoDataUrl : null;
   if ("invoiceBannerDataUrl" in body) data.invoiceBannerDataUrl = typeof body.invoiceBannerDataUrl === "string" ? body.invoiceBannerDataUrl : null;
   if (typeof body.companyViewerAccess === "boolean") data.companyViewerAccess = body.companyViewerAccess;
   if (typeof body.emailTemplate === "string") data.emailTemplate = body.emailTemplate;
+  if (typeof body.periodWeekStartsOn === "number") data.periodWeekStartsOn = body.periodWeekStartsOn;
+  if (typeof body.periodTargetHours === "number") data.periodTargetHours = body.periodTargetHours;
+  if (typeof body.periodTargetEarnings === "number") data.periodTargetEarnings = body.periodTargetEarnings;
 
   const settings = await store.timeflowSettings.upsert({
     where: { organizationId_userId: { organizationId, userId } },
