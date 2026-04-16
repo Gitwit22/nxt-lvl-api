@@ -717,6 +717,7 @@ router.post("/clients", requireTimeflowAuth, async (req, res) => {
 
   const client = await store.timeflowClient.create({
     data: {
+      ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
       organizationId,
       userId,
       name: (body.name as string).trim(),
@@ -825,6 +826,7 @@ router.post("/projects", requireTimeflowAuth, async (req, res) => {
 
   const project = await store.timeflowProject.create({
     data: {
+      ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
       organizationId,
       userId,
       clientId: body.clientId as string,
@@ -939,6 +941,7 @@ router.post("/time-entries", requireTimeflowAuth, async (req, res) => {
 
   const entry = await store.timeflowTimeEntry.create({
     data: {
+      ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
       organizationId,
       userId,
       clientId: body.clientId as string,
@@ -1091,6 +1094,7 @@ router.post("/invoices", requireTimeflowAuth, async (req, res) => {
 
   const invoice = await store.timeflowInvoice.create({
     data: {
+      ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
       organizationId,
       userId,
       clientId: body.clientId as string,
