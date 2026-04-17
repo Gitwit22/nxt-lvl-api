@@ -17,6 +17,7 @@ import {
   isR2Configured,
   isR2Key,
   uploadToR2,
+  deleteFromR2,
   getR2SignedDownloadUrl,
   getR2EnvMetadata,
   probeR2Connection,
@@ -602,11 +603,16 @@ router.get("/documents/:id/download", requireAuth, async (req, res) => {
     return;
   }
 
+  const disposition = req.query.disposition === "inline" ? "inline" : "attachment";
+
   // R2 storage: redirect to a short-lived signed URL
   if (isR2Configured() && isR2Key(doc.filePath)) {
     const signedUrl = await getR2SignedDownloadUrl(
       doc.filePath,
-      doc.originalFileName ?? undefined,
+      {
+        filename: doc.originalFileName ?? undefined,
+        disposition,
+      },
     );
     res.redirect(302, signedUrl);
     return;
@@ -617,7 +623,47 @@ router.get("/documents/:id/download", requireAuth, async (req, res) => {
     res.status(404).json({ error: "Stored file is missing" });
     return;
   }
+
+  if (disposition === "inline") {
+    const filename = doc.originalFileName ?? path.basename(doc.filePath);
+    res.setHeader("Content-Disposition", `inline; filename="${filename.replace(/"/g, "")}"`);
+    res.sendFile(path.resolve(doc.filePath));
+    return;
+  }
+
   res.download(doc.filePath, doc.originalFileName ?? path.basename(doc.filePath));
+});
+
+router.get("/documents/:id/resolve", requireAuth, async (req, res) => {
+  const id = parseRouteId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Invalid document id" });
+    return;
+  }
+
+  const tenantScope = getRequestTenantScope(req);
+  const doc = await findScopedDocument(id, tenantScope);
+  if (!doc?.filePath) {
+    res.status(404).json({ error: "File not found" });
+    return;
+  }
+
+  if (!(isR2Configured() && isR2Key(doc.filePath))) {
+    res.status(409).json({ error: "resolve endpoint is only available for R2-backed files" });
+    return;
+  }
+
+  const disposition = req.query.disposition === "inline" ? "inline" : "attachment";
+  const signedUrl = await getR2SignedDownloadUrl(doc.filePath, {
+    filename: doc.originalFileName ?? undefined,
+    disposition,
+  });
+
+  res.json({
+    url: signedUrl,
+    filename: doc.originalFileName ?? null,
+    disposition,
+  });
 });
 
 router.post("/documents/manual", requireAuth, requireRole("uploader"), async (req, res) => {
@@ -875,11 +921,32 @@ router.delete("/documents/:id", requireAuth, requireRole("admin"), async (req, r
   });
   await prisma.document.delete({ where: { id } });
 
-  if (current.filePath && fs.existsSync(current.filePath)) {
-    fs.unlinkSync(current.filePath);
+  let storageDeleted: boolean | undefined;
+  if (current.filePath) {
+    try {
+      const looksLikeUrl = current.filePath.startsWith("http://") || current.filePath.startsWith("https://");
+
+      if (isR2Configured() && (isR2Key(current.filePath) || looksLikeUrl)) {
+        storageDeleted = await deleteFromR2(current.filePath);
+      } else if (fs.existsSync(current.filePath)) {
+        fs.unlinkSync(current.filePath);
+        storageDeleted = true;
+      } else {
+        storageDeleted = false;
+      }
+    } catch (error) {
+      storageDeleted = false;
+      logger.error("Failed to delete stored file", {
+        documentId: id,
+        filePath: current.filePath,
+        organizationId: tenantScope.organizationId,
+        programDomain: tenantScope.programDomain,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
   }
 
-  res.status(204).send();
+  res.status(200).json({ deleted: true, storageDeleted });
 });
 
 router.post("/documents/:id/retry", requireAuth, requireRole("reviewer"), async (req, res) => {

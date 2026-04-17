@@ -15,6 +15,7 @@ import { communityChronicleRouter } from "./programs/community-chronicle/routes/
 import { nxtLvlSuiteRouter } from "./programs/nxt-lvl-suite/routes/index.js";
 import { timeflowRouter } from "./programs/timeflow/routes/index.js";
 import { missionHubRouter } from "./programs/mission-hub/routes/index.js";
+import { metricsRouter } from "./core/routes/metrics.routes.js";
 
 const app = express();
 
@@ -33,6 +34,7 @@ app.use(express.json({ limit: "10mb" }));
 // Routers
 app.use(`${API_PREFIX}/auth`, authRouter);
 app.use(`${API_PREFIX}`, healthRouter);
+app.use(`${API_PREFIX}/metrics`, metricsRouter);
 
 // Partition middleware is global for program modules, but auth remains platform-wide.
 app.use(partitionMiddleware);
@@ -77,3 +79,7 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 });
 
 export { app };
+
+
+
+

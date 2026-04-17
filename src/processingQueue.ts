@@ -15,8 +15,10 @@ import {
   LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD,
   LLAMA_CLASSIFY_REVIEW_THRESHOLD,
 } from "./core/config/env.js";
-import { classifyDocumentWithLlamaCloud } from "./core/services/classify/llamaClassifyService.js";
-import type { ChronicleClassificationResult } from "./core/services/classify/llamaClassifyService.js";
+import {
+  classifyDocumentWithCoreApi,
+  type ChronicleClassificationResult,
+} from "./core/services/documentIntelligence/coreApiClient.js";
 import { isR2Configured, isR2Key, downloadFromR2 } from "./core/storage/r2.js";
 import {
   canUseSharedParser,
@@ -35,7 +37,7 @@ let workerTimer: NodeJS.Timeout | null = null;
 interface ExtractionResult {
   text: string;
   confidence: number;
-  method: "text" | "pdf" | "pdf_scanned" | "ocr" | "llama_cloud" | "unsupported";
+  method: "text" | "pdf" | "pdf_scanned" | "ocr" | "llama_cloud" | "core_api" | "unsupported";
   pageCount?: number;
   warnings?: string[];
 }
@@ -874,12 +876,12 @@ async function runExtraction(
     "text/csv",
   ]);
 
-  const canUseLlamaCloudParser =
+  const canUseSharedParserProvider =
     canUseSharedParser() &&
     (Boolean(mimeType && (mimeType.startsWith("image/") || mimeType.startsWith("text/"))) ||
       sharedParserSupportedMimeTypes.has(mimeType ?? ""));
 
-  if (canUseLlamaCloudParser) {
+  if (canUseSharedParserProvider) {
     try {
       logger.info("Shared parser invocation started", {
         provider: getActiveParseProvider(),
@@ -900,7 +902,7 @@ async function runExtraction(
         return {
           text: parsedText.slice(0, 200_000),
           confidence: 0.93,
-          method: "llama_cloud",
+          method: "core_api",
           warnings: [],
         };
       }
@@ -1192,16 +1194,16 @@ async function processSingleJob(): Promise<void> {
     // Llama Cloud AI Classification — runs after extraction, before rule-based
     // Only attempted when file is accessible and extraction was not unsupported
     // ─────────────────────────────────────────────────────────────────────
-    let llamaClassResult: ChronicleClassificationResult | null = null;
+    let aiClassResult: ChronicleClassificationResult | null = null;
     if (extraction.method !== "unsupported" && extractionFilePath) {
       try {
-        llamaClassResult = await classifyDocumentWithLlamaCloud(
+        aiClassResult = await classifyDocumentWithCoreApi(
           extractionFilePath,
           job.document.mimeType ?? null,
           { documentId: job.documentId, jobId: job.id },
         );
       } catch (classifyErr) {
-        logger.warn("Llama classify — unexpected error (non-fatal)", {
+        logger.warn("Core API classify — unexpected error (non-fatal)", {
           jobId: job.id,
           documentId: job.documentId,
           error: classifyErr instanceof Error ? classifyErr.message : String(classifyErr),
@@ -1286,24 +1288,24 @@ async function processSingleJob(): Promise<void> {
     const classificationThreshold = 0.8;
 
     // Determine the best document type: prefer Llama classify when it is confident
-    const llamaDocumentType =
-      llamaClassResult?.status === "complete" && llamaClassResult.decision === "auto_accepted"
-        ? llamaClassResult.documentType
+    const aiDocumentType =
+      aiClassResult?.status === "complete" && aiClassResult.decision === "auto_accepted"
+        ? aiClassResult.documentType
         : null;
-    const finalDocumentType = llamaDocumentType ?? autoLabels.documentType;
+    const finalDocumentType = aiDocumentType ?? autoLabels.documentType;
 
     // Llama classify forces review when it returned needs_review or failed on a supported format
-    const llamaForcesReview =
-      llamaClassResult !== null &&
-      (llamaClassResult.status === "failed" ||
-        llamaClassResult.decision === "needs_review" ||
-        llamaClassResult.decision === "low_confidence");
+    const aiForcesReview =
+      aiClassResult !== null &&
+      (aiClassResult.status === "failed" ||
+        aiClassResult.decision === "needs_review" ||
+        aiClassResult.decision === "low_confidence");
 
     const needsReview =
       extraction.method === "unsupported" || // Rule 1: unsupported formats always need review
       isNoContentExtraction || // Rule 2: no content = always review
       isTitleOnlyExtraction || // Rule 3: title-only always needs review
-      llamaForcesReview || // Rule 5: Llama classify low-confidence or failed
+      aiForcesReview || // Rule 5: AI classify low-confidence or failed
       extraction.confidence < OCR_CONFIDENCE_REVIEW_THRESHOLD ||
       autoLabels.documentTypeConfidence < classificationThreshold ||
       autoLabels.topicLabels.length === 0 ||
@@ -1311,15 +1313,15 @@ async function processSingleJob(): Promise<void> {
 
     // Rule 4: Never auto-approve if extraction quality is questionable
     // Only auto-approve if BOTH extraction AND Llama classification are highly confident
-    const llamaAutoAccepted =
-      llamaClassResult?.status === "complete" &&
-      llamaClassResult.decision === "auto_accepted" &&
-      (llamaClassResult.confidence ?? 0) >= LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD;
+    const aiAutoAccepted =
+      aiClassResult?.status === "complete" &&
+      aiClassResult.decision === "auto_accepted" &&
+      (aiClassResult.confidence ?? 0) >= LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD;
 
     const canAutoApprove =
       extractionQuality === "full_extraction" &&
       extraction.confidence >= autoApprovalThreshold &&
-      (llamaAutoAccepted || autoLabels.documentTypeConfidence >= classificationThreshold) &&
+      (aiAutoAccepted || autoLabels.documentTypeConfidence >= classificationThreshold) &&
       extractedWordCount >= 500;
 
     const reviewReasons: string[] = [];
@@ -1370,16 +1372,16 @@ async function processSingleJob(): Promise<void> {
       reviewReasons.push("Date/year unclear — manual verification needed");
     }
     
-    if (llamaForcesReview && llamaClassResult) {
-      if (llamaClassResult.status === "failed") {
+    if (aiForcesReview && aiClassResult) {
+      if (aiClassResult.status === "failed") {
         reviewReasons.push("AI classification step failed — manual type verification required");
-      } else if (llamaClassResult.decision === "needs_review") {
+      } else if (aiClassResult.decision === "needs_review") {
         reviewReasons.push(
-          `AI classification uncertain: ${llamaClassResult.documentType} (${Math.round((llamaClassResult.confidence ?? 0) * 100)}% confidence)`,
+          `AI classification uncertain: ${aiClassResult.documentType} (${Math.round((aiClassResult.confidence ?? 0) * 100)}% confidence)`,
         );
-      } else if (llamaClassResult.decision === "low_confidence") {
+      } else if (aiClassResult.decision === "low_confidence") {
         reviewReasons.push(
-          `AI classification low confidence (${Math.round((llamaClassResult.confidence ?? 0) * 100)}%) — document type unclear`,
+          `AI classification low confidence (${Math.round((aiClassResult.confidence ?? 0) * 100)}%) — document type unclear`,
         );
       }
     }
@@ -1466,11 +1468,15 @@ async function processSingleJob(): Promise<void> {
           timeLabel: autoLabels.timeLabel,
         }),
         classificationResult: toPrismaJson({
-          method: llamaDocumentType ? "ai_assisted" : "rule_based",
-          confidence: llamaDocumentType
-            ? Number((llamaClassResult?.confidence ?? autoLabels.documentTypeConfidence).toFixed(3))
+          method: aiDocumentType ? "ai_assisted" : "rule_based",
+          confidence: aiDocumentType
+            ? Number((aiClassResult?.confidence ?? autoLabels.documentTypeConfidence).toFixed(3))
             : Number(autoLabels.documentTypeConfidence.toFixed(3)),
           category: autoLabels.canonicalType,
+          provider: aiClassResult?.provider ?? "rule-based",
+          decision: aiClassResult?.decision ?? null,
+          documentType: aiDocumentType ?? autoLabels.documentType,
+          reasoning: aiClassResult?.reasoning ?? null,
           suggestedTags: topicTags,
           autoLabels,
           taxonomy: {
@@ -1478,7 +1484,8 @@ async function processSingleJob(): Promise<void> {
             confidence: taxonomy.confidence,
             learned: taxonomy.confidence >= 0.7,
           },
-          llamaCloud: llamaClassResult ?? undefined,
+          coreApi: aiClassResult ?? undefined,
+          llamaCloud: undefined,
         }),
         duplicateCheck: toPrismaJson({
           hash: fingerprint.fileHash,
@@ -1512,10 +1519,10 @@ async function processSingleJob(): Promise<void> {
             extraction.method === "unsupported"
               ? `Processing failed: '${extraction.method}' file format not supported`
               : `Processed via '${extraction.method}' extraction (extracted ${extractedWordCount} words, confidence ${Math.round(extraction.confidence * 100)}%). ` +
-                (llamaDocumentType
-                  ? `AI classified as '${llamaDocumentType}' (${Math.round((llamaClassResult?.confidence ?? 0) * 100)}% confidence via Llama Cloud).`
+                (aiDocumentType
+                  ? `AI classified as '${aiDocumentType}' (${Math.round((aiClassResult?.confidence ?? 0) * 100)}% confidence via Core API).`
                   : `Auto-labeled as '${autoLabels.documentType}' (${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence via rule-based).`),
-          llamaClassification: llamaClassResult ?? undefined,
+          aiClassification: aiClassResult ?? undefined,
         }),
       },
     });
@@ -1535,9 +1542,9 @@ async function processSingleJob(): Promise<void> {
       contentLength: extractedWordCount,
       needsReview,
       reviewPriority,
-      llamaClassifyStatus: llamaClassResult?.status ?? "not_run",
-      llamaDocumentType: llamaClassResult?.documentType ?? null,
-      llamaConfidence: llamaClassResult?.confidence ?? null,
+      aiClassifyStatus: aiClassResult?.status ?? "not_run",
+      aiDocumentType: aiClassResult?.documentType ?? null,
+      aiConfidence: aiClassResult?.confidence ?? null,
     });
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));

@@ -117,6 +117,46 @@ export function isR2Key(filePath: string): boolean {
   return !filePath.startsWith("/");
 }
 
+function resolveR2ObjectKey(locator: string): string {
+  const value = locator.trim();
+  if (!value) return "";
+
+  if (value.startsWith("http://") || value.startsWith("https://")) {
+    try {
+      const parsed = new URL(value);
+
+      if (R2_PUBLIC_URL) {
+        const publicBase = new URL(R2_PUBLIC_URL);
+        if (parsed.host !== publicBase.host) {
+          return "";
+        }
+
+        const publicPrefix = publicBase.pathname.replace(/\/+$/, "").replace(/^\/+/, "");
+        const rawPath = parsed.pathname.replace(/^\/+/, "");
+        if (!publicPrefix) {
+          return rawPath;
+        }
+
+        if (rawPath === publicPrefix) {
+          return "";
+        }
+
+        if (rawPath.startsWith(`${publicPrefix}/`)) {
+          return rawPath.slice(publicPrefix.length + 1);
+        }
+
+        return "";
+      }
+
+      return parsed.pathname.replace(/^\/+/, "");
+    } catch {
+      return "";
+    }
+  }
+
+  return value.replace(/^\/+/, "");
+}
+
 let _client: S3Client | null = null;
 
 function getClient(): S3Client {
@@ -256,19 +296,46 @@ export async function downloadFromR2(key: string): Promise<Buffer> {
 }
 
 /**
+ * Delete an R2 object by key or URL-like locator.
+ * Returns false when the locator cannot be resolved to this configured bucket.
+ */
+export async function deleteFromR2(locator: string): Promise<boolean> {
+  const key = resolveR2ObjectKey(locator);
+  if (!key) {
+    return false;
+  }
+
+  await getClient().send(
+    new DeleteObjectCommand({
+      Bucket: R2_BUCKET_NAME,
+      Key: key,
+    }),
+  );
+
+  return true;
+}
+
+/**
  * Generate a time-limited signed download URL for an R2 object.
  * Defaults to 1 hour. Pass a filename to set Content-Disposition.
  */
 export async function getR2SignedDownloadUrl(
   key: string,
-  filename?: string,
-  expiresIn = 3600,
+  options?: {
+    filename?: string;
+    expiresIn?: number;
+    disposition?: "attachment" | "inline";
+  },
 ): Promise<string> {
+  const filename = options?.filename;
+  const expiresIn = options?.expiresIn ?? 3600;
+  const disposition = options?.disposition ?? "attachment";
+
   const command = new GetObjectCommand({
     Bucket: R2_BUCKET_NAME,
     Key: key,
     ...(filename
-      ? { ResponseContentDisposition: `attachment; filename="${filename.replace(/"/g, "")}"` }
+      ? { ResponseContentDisposition: `${disposition}; filename="${filename.replace(/"/g, "")}"` }
       : {}),
   });
   return getSignedUrl(getClient(), command, { expiresIn });

@@ -18,6 +18,12 @@ export const PLATFORM_VALIDATE_LAUNCH_URL = process.env.PLATFORM_VALIDATE_LAUNCH
 export const PLATFORM_AUTH_TIMEOUT_MS = Number(process.env.PLATFORM_AUTH_TIMEOUT_MS || 8_000);
 export const LLAMA_CLOUD_API_KEY = process.env.LLAMA_CLOUD_API_KEY || "";
 
+// Core Document Intelligence API (deployed separately from nxt-lvl-api)
+export const DOC_INTEL_API_BASE_URL = process.env.DOC_INTEL_API_BASE_URL || "";
+export const DOC_INTEL_API_TOKEN = process.env.DOC_INTEL_API_TOKEN || "";
+export const DOC_INTEL_TIMEOUT_MS = Number(process.env.DOC_INTEL_TIMEOUT_MS || 60_000);
+export const ENABLE_DOC_INTEL_CLASSIFY = process.env.ENABLE_DOC_INTEL_CLASSIFY !== "false";
+
 // Llama Cloud — document classification
 export const ENABLE_LLAMA_CLASSIFY = process.env.ENABLE_LLAMA_CLASSIFY !== "false";
 export const LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD = Number(

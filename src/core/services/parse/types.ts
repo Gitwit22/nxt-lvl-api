@@ -1,4 +1,4 @@
-export type ParseProvider = "llama-cloud";
+export type ParseProvider = "llama-cloud" | "core-api";
 
 export interface NormalizedParseResult {
   provider: ParseProvider;
