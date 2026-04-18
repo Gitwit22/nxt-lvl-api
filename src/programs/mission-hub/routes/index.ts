@@ -9,7 +9,7 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import jwt from "jsonwebtoken";
 import { prisma } from "../../../core/db/prisma.js";
-import { JWT_SECRET } from "../../../core/config/env.js";
+import { JWT_SECRET, PLATFORM_LAUNCH_TOKEN_SECRET } from "../../../core/config/env.js";
 import { signToken } from "../../../core/auth/auth.service.js";
 import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
 import { logger } from "../../../logger.js";
@@ -90,18 +90,27 @@ router.post("/platform-auth/consume", async (req, res) => {
   }
 
   let claims: { userId: string; email: string; role: string; organizationId: string } | undefined;
+  let launchTokenErrorCode: string | undefined;
 
   try {
-    const payload = jwt.verify(launchToken, JWT_SECRET) as Record<string, unknown>;
+    const payload = jwt.verify(launchToken, PLATFORM_LAUNCH_TOKEN_SECRET) as Record<string, unknown>;
     const userId = typeof payload.userId === "string" ? payload.userId : undefined;
     const email = typeof payload.email === "string" ? payload.email : undefined;
     const organizationId = typeof payload.organizationId === "string" ? payload.organizationId : undefined;
     const role = typeof payload.role === "string" ? payload.role : "member";
     if (userId && email && organizationId) claims = { userId, email, role, organizationId };
-  } catch { /* invalid */ }
+  } catch (error) {
+    if (error instanceof jwt.TokenExpiredError) {
+      launchTokenErrorCode = "launch_token_expired";
+    } else if (error instanceof jwt.JsonWebTokenError) {
+      launchTokenErrorCode = "launch_token_signature_mismatch";
+    } else {
+      launchTokenErrorCode = "invalid_launch_token";
+    }
+  }
 
   if (!claims) {
-    res.status(401).json({ error: "Invalid or expired launch token", code: "invalid_launch_token" });
+    res.status(401).json({ error: "Invalid or expired launch token", code: launchTokenErrorCode || "invalid_launch_token" });
     return;
   }
 
