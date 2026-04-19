@@ -4,8 +4,11 @@ import { CURRENT_PROGRAM_DOMAIN } from "../config/env.js";
 import { requireAuth, tryAttachAuthUser } from "../middleware/auth.middleware.js";
 import { getRequestProgram } from "../middleware/partition.middleware.js";
 import { programs } from "../config/programs.js";
+import { SUITE_PROGRAM_DOMAIN, suiteProgramCatalog } from "../data/suite-program-catalog.js";
+import { logger } from "../../logger.js";
 
 const router = express.Router();
+const PROGRAM_CATALOG_QUERY_TIMEOUT_MS = Number(process.env.PROGRAM_CATALOG_QUERY_TIMEOUT_MS || 1500);
 
 type ProgramInput = {
   id?: string;
@@ -58,6 +61,25 @@ function asStringArray(value: unknown): string[] {
     return [];
   }
   return value.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean);
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
+
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => {
+          reject(new Error(message));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeoutHandle) {
+      clearTimeout(timeoutHandle);
+    }
+  }
 }
 
 function mapProgram(program: {
@@ -120,33 +142,19 @@ function mapProgram(program: {
   };
 }
 
-// Public endpoint — no auth required for browsing the program catalog.
-router.get("/programs", tryAttachAuthUser, async (req, res) => {
-  const programDomain = getProgramDomain(req);
+function buildFallbackProgramCatalog() {
+  const timestamp = new Date().toISOString();
 
-  try {
-    const rows = await prisma.program.findMany({
-      where: {
-        programDomain,
-        deletedAt: null,
-      },
-      orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
-    });
-
-    if (rows.length > 0) {
-      res.json(rows.map(mapProgram));
-      return;
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to fetch programs";
-    if (!message.toLowerCase().includes("program")) {
-      res.status(500).json({ error: message });
-      return;
-    }
+  if (CURRENT_PROGRAM_DOMAIN === SUITE_PROGRAM_DOMAIN) {
+    return suiteProgramCatalog.map((program) => ({
+      ...program,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      deletedAt: null,
+    }));
   }
 
-  // Fallback when program table is not provisioned yet.
-  const list = Object.entries(programs).map(([key, program], index) => ({
+  return Object.entries(programs).map(([key, program], index) => ({
     id: key,
     slug: key,
     organizationId: null,
@@ -171,13 +179,59 @@ router.get("/programs", tryAttachAuthUser, async (req, res) => {
     launchLabel: "Launch",
     displayOrder: index + 1,
     notes: "",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: timestamp,
+    updatedAt: timestamp,
     deletedAt: null,
     key,
     routePrefix: program.routePrefix,
   }));
-  res.json(list);
+}
+
+// Public endpoint — no auth required for browsing the program catalog.
+router.get("/programs", async (req, res) => {
+  tryAttachAuthUser(req);
+  const programDomain = getProgramDomain(req);
+
+  try {
+    const rows = await withTimeout(
+      prisma.program.findMany({
+        where: {
+          programDomain,
+          deletedAt: null,
+        },
+        orderBy: [{ displayOrder: "asc" }, { name: "asc" }],
+      }),
+      PROGRAM_CATALOG_QUERY_TIMEOUT_MS,
+      `Program catalog query timed out after ${PROGRAM_CATALOG_QUERY_TIMEOUT_MS}ms`,
+    );
+
+    if (rows.length > 0) {
+      res.json(rows.map(mapProgram));
+      return;
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to fetch programs";
+    logger.warn("[programs] Falling back to static catalog", {
+      programDomain,
+      error: message,
+    });
+  }
+
+  // Fallback when program table is not provisioned yet.
+  if (programDomain === SUITE_PROGRAM_DOMAIN) {
+    const timestamp = new Date().toISOString();
+    res.json(
+      suiteProgramCatalog.map((program) => ({
+        ...program,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        deletedAt: null,
+      })),
+    );
+    return;
+  }
+
+  res.json(buildFallbackProgramCatalog());
 });
 
 router.post("/programs", requireAuth, async (req, res) => {

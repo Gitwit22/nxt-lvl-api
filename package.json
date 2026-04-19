@@ -14,7 +14,8 @@
     "lint": "eslint .",
     "prisma:generate": "prisma generate",
     "prisma:push": "prisma db push",
-    "db:backfill:tenant": "node --import tsx src/backfillTenantContext.ts"
+    "db:backfill:tenant": "node --import tsx src/backfillTenantContext.ts",
+    "db:seed:suite-programs": "node --import tsx src/scripts/seedSuitePrograms.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1029.0",
