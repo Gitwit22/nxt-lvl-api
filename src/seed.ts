@@ -25,6 +25,8 @@ export async function seedLegacyData(): Promise<void> {
       data: {
         ...payload,
         id: doc.id,
+        organizationId: "default-org",
+        programDomain: "community-chronicle",
         fileUrl: doc.fileUrl,
         processingStatus: "processed",
         ocrStatus: "not_needed",

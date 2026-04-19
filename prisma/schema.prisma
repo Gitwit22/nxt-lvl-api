@@ -88,7 +88,7 @@ model Organization {
 model ProgramStorageSettings {
   id             String   @id @default(cuid())
   organizationId String
-  programDomain  String   @default("community-chronicle")
+  programDomain  String
   settings       Json     @default("{}")
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -137,7 +137,7 @@ model UserProgramAccess {
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
-  user User @relation("UserProgramAccess", fields: [userId], references: [id], onDelete: Cascade)
+  user    User    @relation("UserProgramAccess", fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, organizationId, programId])
   @@index([userId, organizationId])
@@ -189,7 +189,7 @@ model OrganizationProgramSubscription {
 
 model Program {
   id               String   @id @default(cuid())
-  programDomain    String   @default("community-chronicle")
+  programDomain    String
   organizationId   String?
   slug             String
   name             String
@@ -561,8 +561,8 @@ model MissionHubSavedReport {
 
 model Document {
   id                    String    @id
-  organizationId        String    @default("default-org")
-  programDomain         String    @default("community-chronicle")
+  organizationId        String
+  programDomain         String
   title                 String
   description           String    @default("")
   author                String    @default("Unknown")
@@ -615,9 +615,9 @@ model Document {
 }
 
 model ProcessingJob {
-  id          String    @id @default(cuid())
-  organizationId String @default("default-org")
-  programDomain  String @default("community-chronicle")
+  id             String    @id @default(cuid())
+  organizationId String
+  programDomain  String
   documentId  String
   status      String    @default("queued")
   attempts    Int       @default(0)
