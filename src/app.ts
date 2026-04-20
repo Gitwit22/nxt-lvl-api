@@ -3,6 +3,7 @@ import express from "express";
 import cors from "cors";
 import { API_PREFIX, UPLOAD_DIR, getCorsOrigins } from "./config.js";
 import { partitionMiddleware } from "./core/middleware/partition.middleware.js";
+import { requireProgramSubscription } from "./core/middleware/subscriptionGate.middleware.js";
 import { logger } from "./logger.js";
 import { authRouter } from "./core/routes/auth.routes.js";
 import { healthRouter } from "./core/routes/health.routes.js";
@@ -50,7 +51,7 @@ app.use(`${API_PREFIX}/portal`, portalRouter);
 app.use("/api/community-chronicle", communityChronicleRouter);
 app.use("/api/nxt-lvl-suite", nxtLvlSuiteRouter);
 app.use("/api/timeflow", timeflowRouter);
-app.use("/api/mission-hub", missionHubRouter);
+app.use("/api/mission-hub", requireProgramSubscription, missionHubRouter);
 
 // Compatibility mount to preserve existing Community Chronicle endpoints.
 app.use(`${API_PREFIX}`, communityChronicleRouter);
