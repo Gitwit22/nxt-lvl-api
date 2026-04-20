@@ -129,6 +129,8 @@ export const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID || "";
 export const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || "";
 export const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY || "";
 export const R2_BUCKET_NAME = process.env.R2_BUCKET_NAME || "";
+export const MISSION_OPS_R2_BUCKET_NAME = process.env.MISSION_OPS_R2_BUCKET_NAME || "";
+export const MISSION_OPS_R2_BUCKET_MAP = process.env.MISSION_OPS_R2_BUCKET_MAP || "";
 // Optional: public bucket domain (e.g. https://pub-xxx.r2.dev or a custom domain).
 // When set, fileUrl stored in DB will be a permanent public link.
 // When unset, downloads are served via signed URL through the API.

@@ -11,6 +11,7 @@ import { CURRENT_PROGRAM_DOMAIN, PLATFORM_SETUP_TOKEN } from "./core/config/env.
 import { logger } from "./logger.js";
 import { getDefaultTenantScope, getTenantScopeForUser } from "./tenant.js";
 import { resolveProgramKey } from "./core/middleware/partition.middleware.js";
+import { provisionUserProgramAccessFromOrgSubscriptions } from "./core/services/orgProvisioning.js";
 
 const router = express.Router();
 
@@ -482,6 +483,24 @@ router.post(
         identitySource: "local",
       },
     });
+
+    try {
+      const accessResult = await provisionUserProgramAccessFromOrgSubscriptions(
+        tenantScope.organizationId,
+        user.id,
+      );
+      logger.info("[auth/register] user program access provisioned", {
+        userId: user.id,
+        organizationId: tenantScope.organizationId,
+        granted: accessResult.granted,
+      });
+    } catch (error) {
+      logger.warn("[auth/register] user program access provisioning failed", {
+        userId: user.id,
+        organizationId: tenantScope.organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
 
     logger.info("User registered", {
       userId: user.id,

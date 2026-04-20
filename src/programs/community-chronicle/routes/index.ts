@@ -2,7 +2,13 @@ import fs from "fs";
 import fsPromises from "fs/promises";
 import path from "path";
 import express from "express";
-import { BACKEND_URL, UPLOAD_DIR } from "../../../core/config/env.js";
+import {
+  BACKEND_URL,
+  UPLOAD_DIR,
+  R2_BUCKET_NAME,
+  MISSION_OPS_R2_BUCKET_NAME,
+  MISSION_OPS_R2_BUCKET_MAP,
+} from "../../../core/config/env.js";
 import { prisma } from "../../../core/db/prisma.js";
 import { toApiDocument } from "../../../documentMapper.js";
 import { createDocumentPayload } from "../../../documentFactory.js";
@@ -108,7 +114,44 @@ type StorageSettingsPayload = {
   };
 };
 
-const STORAGE_SETTINGS_PROGRAM_DOMAIN = "community-chronicle";
+const MISSION_OPS_PROGRAM_DOMAIN = "mission-hub";
+const MISSION_OPS_DEFAULT_BUCKET = "nonprofithub";
+
+function normalizeBucketName(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9.-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function parseMissionOpsBucketMap(raw: string): Record<string, string> {
+  if (!raw.trim()) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+
+    const output: Record<string, string> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      const orgId = String(key || "").trim();
+      const bucket = normalizeBucketName(String(value || ""));
+      if (orgId && bucket) {
+        output[orgId] = bucket;
+      }
+    }
+
+    return output;
+  } catch {
+    return {};
+  }
+}
+
+const MISSION_OPS_BUCKET_MAP_BY_ORG = parseMissionOpsBucketMap(MISSION_OPS_R2_BUCKET_MAP);
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -312,7 +355,7 @@ async function getStorageSettings(scope: TenantScope): Promise<StorageSettingsPa
     where: {
       organizationId_programDomain: {
         organizationId: scope.organizationId,
-        programDomain: STORAGE_SETTINGS_PROGRAM_DOMAIN,
+        programDomain: scope.programDomain,
       },
     },
     select: {
@@ -331,12 +374,12 @@ async function saveStorageSettings(scope: TenantScope, payload: unknown): Promis
     where: {
       organizationId_programDomain: {
         organizationId: scope.organizationId,
-        programDomain: STORAGE_SETTINGS_PROGRAM_DOMAIN,
+        programDomain: scope.programDomain,
       },
     },
     create: {
       organizationId: scope.organizationId,
-      programDomain: STORAGE_SETTINGS_PROGRAM_DOMAIN,
+      programDomain: scope.programDomain,
       settings: sanitized as unknown as never,
     },
     update: {
@@ -348,6 +391,70 @@ async function saveStorageSettings(scope: TenantScope, payload: unknown): Promis
   });
 
   return sanitizeStorageSettings(record.settings, r2Env);
+}
+
+function getDefaultBucketForProgram(scope: TenantScope): string {
+  const programDomain = scope.programDomain;
+  if (programDomain === MISSION_OPS_PROGRAM_DOMAIN) {
+    const mappedBucket = MISSION_OPS_BUCKET_MAP_BY_ORG[scope.organizationId];
+    if (mappedBucket) {
+      return mappedBucket;
+    }
+
+    const configuredBucket = normalizeBucketName(MISSION_OPS_R2_BUCKET_NAME);
+    if (configuredBucket) {
+      return configuredBucket;
+    }
+
+    const orgDerivedBucket = normalizeBucketName(scope.organizationId);
+    if (orgDerivedBucket) {
+      return orgDerivedBucket;
+    }
+
+    return MISSION_OPS_DEFAULT_BUCKET;
+  }
+  return R2_BUCKET_NAME;
+}
+
+async function resolveR2StorageTarget(scope: TenantScope): Promise<{ bucketName: string; prefix: string }> {
+  const settings = await getStorageSettings(scope);
+  const configuredProvider = settings.finalArchive.provider;
+  const settingsBucket = (settings.finalArchive.r2BucketName || "").trim();
+  const settingsPrefix = (settings.finalArchive.r2Prefix || "").trim();
+  const basePathPrefix = (settings.pathStrategy.basePathPrefix || "").trim();
+
+  const bucketName =
+    (configuredProvider === "r2_env" || configuredProvider === "r2_manual") && settingsBucket
+      ? settingsBucket
+      : getDefaultBucketForProgram(scope);
+
+  const prefixParts = [
+    settingsPrefix.replace(/^\/+|\/+$/g, ""),
+    basePathPrefix.replace(/^\/+|\/+$/g, ""),
+  ].filter(Boolean);
+
+  return {
+    bucketName,
+    prefix: prefixParts.join("/"),
+  };
+}
+
+function buildPartitionedR2Key(args: {
+  prefix: string;
+  programDomain: string;
+  organizationId: string;
+  userId: string;
+  stamp: string;
+  safeFileName: string;
+}): string {
+  const keyParts = [
+    args.prefix.replace(/^\/+|\/+$/g, ""),
+    args.programDomain,
+    args.organizationId,
+    args.userId,
+  ].filter(Boolean);
+
+  return `${keyParts.join("/")}/${args.stamp}-${args.safeFileName}`;
 }
 
 function parseR2AccountIdFromEndpoint(endpoint: string): string {
@@ -607,11 +714,13 @@ router.get("/documents/:id/download", requireAuth, async (req, res) => {
 
   // R2 storage: redirect to a short-lived signed URL
   if (isR2Configured() && isR2Key(doc.filePath)) {
+    const target = await resolveR2StorageTarget(tenantScope);
     const signedUrl = await getR2SignedDownloadUrl(
       doc.filePath,
       {
         filename: doc.originalFileName ?? undefined,
         disposition,
+        bucketName: target.bucketName,
       },
     );
     res.redirect(302, signedUrl);
@@ -654,9 +763,11 @@ router.get("/documents/:id/resolve", requireAuth, async (req, res) => {
   }
 
   const disposition = req.query.disposition === "inline" ? "inline" : "attachment";
+  const target = await resolveR2StorageTarget(tenantScope);
   const signedUrl = await getR2SignedDownloadUrl(doc.filePath, {
     filename: doc.originalFileName ?? undefined,
     disposition,
+    bucketName: target.bucketName,
   });
 
   res.json({
@@ -741,10 +852,20 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
       const safe = req.file!.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
 
       if (isR2Configured()) {
+        const target = await resolveR2StorageTarget(tenantScope);
         const orgId = tenantScope.organizationId;
         const userId = user?.userId ?? "unknown";
-        const key = `${orgId}/${userId}/${stamp}-${safe}`;
-        const { key: r2Key, fileUrl } = await uploadToR2(key, req.file!.buffer, req.file!.mimetype);
+        const key = buildPartitionedR2Key({
+          prefix: target.prefix,
+          programDomain: tenantScope.programDomain,
+          organizationId: orgId,
+          userId,
+          stamp,
+          safeFileName: safe,
+        });
+        const { key: r2Key, fileUrl } = await uploadToR2(key, req.file!.buffer, req.file!.mimetype, {
+          bucketName: target.bucketName,
+        });
         return {
           originalFileName: req.file!.originalname,
           mimeType: req.file!.mimetype,
@@ -809,10 +930,20 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
     let fileUrl: string;
 
     if (isR2Configured()) {
+      const target = await resolveR2StorageTarget(tenantScope);
       const orgId = tenantScope.organizationId;
       const userId = user?.userId ?? "unknown";
-      const key = `${orgId}/${userId}/${stamp}-${safe}`;
-      const result = await uploadToR2(key, file.buffer, file.mimetype);
+      const key = buildPartitionedR2Key({
+        prefix: target.prefix,
+        programDomain: tenantScope.programDomain,
+        organizationId: orgId,
+        userId,
+        stamp,
+        safeFileName: safe,
+      });
+      const result = await uploadToR2(key, file.buffer, file.mimetype, {
+        bucketName: target.bucketName,
+      });
       filePath = result.key;
       fileUrl = result.fileUrl;
     } else {
@@ -927,7 +1058,10 @@ router.delete("/documents/:id", requireAuth, requireRole("admin"), async (req, r
       const looksLikeUrl = current.filePath.startsWith("http://") || current.filePath.startsWith("https://");
 
       if (isR2Configured() && (isR2Key(current.filePath) || looksLikeUrl)) {
-        storageDeleted = await deleteFromR2(current.filePath);
+        const target = await resolveR2StorageTarget(tenantScope);
+        storageDeleted = await deleteFromR2(current.filePath, {
+          bucketName: target.bucketName,
+        });
       } else if (fs.existsSync(current.filePath)) {
         fs.unlinkSync(current.filePath);
         storageDeleted = true;
