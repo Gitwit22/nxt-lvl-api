@@ -7,11 +7,26 @@
  */
 import express, { type NextFunction, type Request, type Response } from "express";
 import jwt from "jsonwebtoken";
+import fs from "fs";
+import fsPromises from "fs/promises";
+import path from "path";
 import { prisma } from "../../../core/db/prisma.js";
-import { DEFAULT_ORGANIZATION_ID, JWT_EXPIRES_IN, JWT_SECRET } from "../../../core/config/env.js";
+import {
+  DEFAULT_ORGANIZATION_ID,
+  JWT_EXPIRES_IN,
+  JWT_SECRET,
+  UPLOAD_DIR,
+} from "../../../core/config/env.js";
 import { hashPassword, verifyPassword } from "../../../core/auth/auth.service.js";
 import { createDocumentPayload } from "../../../documentFactory.js";
 import { logger } from "../../../logger.js";
+import { upload } from "../../../validators.js";
+import {
+  getR2SignedDownloadUrl,
+  isR2Configured,
+  isR2Key,
+  uploadToR2,
+} from "../../../core/storage/r2.js";
 
 const router = express.Router();
 
@@ -299,6 +314,28 @@ function asString(value: unknown): string {
 
 function asNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function makeSafeFilename(name: string): string {
+  return name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128) || "document";
+}
+
+function buildTimeflowR2Key(input: {
+  organizationId: string;
+  userId: string;
+  safeFilename: string;
+  stamp: string;
+}): string {
+  return [
+    "timeflow",
+    "documents",
+    input.organizationId,
+    input.userId,
+    `${input.stamp}-${input.safeFilename}`,
+  ]
+    .map((segment) => segment.trim().replace(/^\/+|\/+$/g, ""))
+    .filter(Boolean)
+    .join("/");
 }
 
 async function assertTimeflowEntityAccess(
@@ -630,6 +667,137 @@ router.patch("/documents/:id", async (req, res) => {
   });
 
   res.json({ document: toTimeflowDocumentRecord(updated) });
+});
+
+router.post("/documents/upload", upload.single("file"), async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  if (!req.file) {
+    res.status(400).json({ error: "File is required" });
+    return;
+  }
+
+  const safeFilename = makeSafeFilename(req.file.originalname);
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+  if (isR2Configured()) {
+    const key = buildTimeflowR2Key({
+      organizationId,
+      userId,
+      safeFilename,
+      stamp,
+    });
+    const result = await uploadToR2(key, req.file.buffer, req.file.mimetype || "application/octet-stream");
+
+    res.status(201).json({
+      key: result.key,
+      originalFilename: req.file.originalname,
+      mimeType: req.file.mimetype,
+      sizeBytes: req.file.size,
+      storage: "r2",
+    });
+    return;
+  }
+
+  // Local fallback for development environments without R2.
+  const localDir = path.join(UPLOAD_DIR, "timeflow", "documents", organizationId, userId);
+  await fsPromises.mkdir(localDir, { recursive: true });
+  const localPath = path.join(localDir, `${stamp}-${safeFilename}`);
+  await fsPromises.writeFile(localPath, req.file.buffer);
+
+  res.status(201).json({
+    key: localPath,
+    originalFilename: req.file.originalname,
+    mimeType: req.file.mimetype,
+    sizeBytes: req.file.size,
+    storage: "local",
+  });
+});
+
+router.get("/documents/:id/download", async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+
+  const store = prisma as unknown as {
+    document: {
+      findFirst: (args: Record<string, unknown>) => Promise<{
+        id: string;
+        title: string;
+        originalFileName: string | null;
+        author: string;
+        createdAt: Date;
+        updatedAt: Date;
+        status: string | null;
+        mimeType: string | null;
+        fileSize: number | null;
+        filePath: string | null;
+        sourceReference: string | null;
+        extractedMetadata: unknown;
+      } | null>;
+    };
+  };
+
+  const doc = await store.document.findFirst({
+    where: {
+      id,
+      organizationId,
+      programDomain: TIMEFLOW_PROGRAM_DOMAIN,
+      intakeSource: "timeflow_attachment",
+    },
+  });
+
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const entity = parseEntitySourceReference(doc.sourceReference);
+  if (!entity) {
+    res.status(400).json({ error: "Document source reference is invalid" });
+    return;
+  }
+
+  const allowed = await assertTimeflowEntityAccess(entity.entityType, entity.entityId, {
+    organizationId,
+    userId,
+  });
+  if (!allowed) {
+    res.status(404).json({ error: `${entity.entityType} not found` });
+    return;
+  }
+
+  const metadata = isRecord(doc.extractedMetadata) ? doc.extractedMetadata : {};
+  const timeflowMeta = isRecord(metadata.timeflow) ? metadata.timeflow : {};
+  const storageKey = asString(timeflowMeta.storageKey) || doc.filePath || "";
+
+  if (!storageKey) {
+    res.status(404).json({ error: "Document storage key is missing" });
+    return;
+  }
+
+  if (isR2Configured() && isR2Key(storageKey)) {
+    const signedUrl = await getR2SignedDownloadUrl(storageKey, {
+      expiresIn: 900,
+      disposition: "inline",
+    });
+    if (!signedUrl) {
+      res.status(404).json({ error: "Document file was not found in storage" });
+      return;
+    }
+    res.redirect(signedUrl);
+    return;
+  }
+
+  if (!path.isAbsolute(storageKey)) {
+    res.status(404).json({ error: "Document file is unavailable in this environment" });
+    return;
+  }
+
+  if (!fs.existsSync(storageKey)) {
+    res.status(404).json({ error: "Document file not found on disk" });
+    return;
+  }
+
+  res.download(storageKey, doc.originalFileName || "document");
 });
 
 // ─── Settings ────────────────────────────────────────────────────────────────
