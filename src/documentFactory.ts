@@ -118,13 +118,11 @@ export function createDocumentPayload(input: CreateDocumentInput) {
           extractedAt: now.toISOString(),
         },
     review: input.fileMeta
-      ? (ocrStatus === "pending"
-          ? { required: true, reason: ["OCR pending"], priority: "high" }
-          : { required: false })
+      ? { required: false }
       : input.extractedText
       ? { required: false }
       : { required: true, reason: ["Missing extracted text"], priority: "medium" },
-    needsReview: input.fileMeta ? ocrStatus === "pending" : !input.extractedText,
+    needsReview: input.fileMeta ? false : !input.extractedText,
     aiSummary: "",
   };
 }
