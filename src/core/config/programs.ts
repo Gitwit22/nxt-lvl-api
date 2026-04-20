@@ -8,7 +8,10 @@ export const programs: Record<string, ProgramDefinition> = {
   "mission-hub": {
     displayName: "Mission Hub",
     routePrefix: "/api/mission-hub",
-    allowedOrigins: ["https://mission-hub.onrender.com"],
+    allowedOrigins: [
+      "https://nonprofitops.nltops.com",
+      "https://mission-hub.pages.dev",
+    ],
   },
   "community-chronicle": {
     displayName: "Community Chronicle",
