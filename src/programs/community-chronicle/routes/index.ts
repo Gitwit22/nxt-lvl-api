@@ -916,7 +916,17 @@ router.patch("/documents/:id", requireAuth, requireRole("reviewer"), async (req,
       review: body.review && typeof body.review === "object" ? body.review : undefined,
       needsReview: typeof body.needsReview === "boolean" ? body.needsReview : undefined,
       aiSummary: typeof body.aiSummary === "string" ? body.aiSummary : undefined,
-    },
+      // Extraction payload fields — written by the frontend after schema-routed
+      // doc-intel classification (persistRoutedExtractionResults in useDocuments.ts).
+      extractedText: typeof body.extractedText === "string" ? body.extractedText : undefined,
+      extraction: body.extraction && typeof body.extraction === "object" ? body.extraction : undefined,
+      classificationResult:
+        body.classificationResult && typeof body.classificationResult === "object"
+          ? body.classificationResult
+          : undefined,
+      searchIndex:
+        body.searchIndex && typeof body.searchIndex === "object" ? body.searchIndex : undefined,
+    } as never,
   });
 
   const refreshed = await findScopedDocument(id, tenantScope);
@@ -1176,5 +1186,131 @@ router.post("/review-queue/:id/mark", requireAuth, requireRole("reviewer"), asyn
 
   res.json(toApiDocumentWithUploaderFallback(refreshed));
 });
+
+/**
+ * POST /documents/:id/attach-file
+ *
+ * Attach or replace the stored file on an existing document (e.g. a manual-entry
+ * record that was created without a file, or re-uploading a corrected version).
+ *
+ * Behaviour:
+ *  - Uploads the new file to the configured storage backend (R2 or local).
+ *  - If the document already had a stored file (filePath non-null), attempts to
+ *    delete the old file from storage before writing the new one. Failure to
+ *    delete the old file is logged but does NOT abort the request.
+ *  - Updates filePath, fileUrl, originalFileName, mimeType, fileSize in the DB.
+ *  - Re-queues the document for OCR/extraction so the pipeline sees the new file.
+ *  - Returns the updated document record.
+ */
+router.post(
+  "/documents/:id/attach-file",
+  requireAuth,
+  requireRole("uploader"),
+  upload.single("file"),
+  async (req, res) => {
+    if (!req.file) {
+      res.status(400).json({ error: "File is required" });
+      return;
+    }
+
+    const id = parseRouteId(req.params.id);
+    if (!id) {
+      res.status(400).json({ error: "Invalid document id" });
+      return;
+    }
+
+    const tenantScope = getRequestTenantScope(req);
+    const current = await findScopedDocument(id, tenantScope);
+    if (!current) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+
+    let storage;
+    try {
+      storage = await resolveStorageAdapter(tenantScope);
+    } catch (err) {
+      if (err instanceof StorageConfigError) {
+        res.status(422).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    // Delete old file if present (best-effort; never aborts the request)
+    if (current.filePath) {
+      try {
+        await storage.adapter.delete(current.filePath);
+        logger.info("Old file deleted on attach-file replace", {
+          documentId: id,
+          oldFilePath: current.filePath,
+          storageBackend: storage.adapter.backendId,
+        });
+      } catch (deleteErr) {
+        logger.warn("Could not delete old file during attach-file replace (orphaned blob)", {
+          documentId: id,
+          oldFilePath: current.filePath,
+          error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+        });
+      }
+    }
+
+    // Upload new file
+    const user = getRequestUser(req);
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const safe = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const key = buildPartitionedKey({
+      prefix: storage.prefix,
+      programDomain: tenantScope.programDomain,
+      organizationId: tenantScope.organizationId,
+      userId: user?.userId ?? "unknown",
+      stamp,
+      safeFileName: safe,
+    });
+
+    const { key: storedKey, fileUrl } = await storage.adapter.upload(
+      key,
+      req.file.buffer,
+      req.file.mimetype,
+    );
+
+    await prisma.document.update({
+      where: { id },
+      data: {
+        filePath: storedKey,
+        fileUrl,
+        originalFileName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        fileSize: req.file.size,
+        processingStatus: "queued",
+        ocrStatus: "pending",
+        status: "queued",
+        statusUpdatedAt: new Date(),
+        needsReview: false,
+        review: { required: false },
+      } as never,
+    });
+
+    await enqueueProcessing(id, tenantScope);
+
+    logger.info("File attached to document", {
+      documentId: id,
+      file: req.file.originalname,
+      userId: user?.userId,
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+      storageBackend: storage.adapter.backendId,
+      storageSource: storage.source,
+    });
+
+    const refreshed = await findScopedDocument(id, tenantScope);
+    if (!refreshed) {
+      res.status(404).json({ error: "Document not found after update" });
+      return;
+    }
+
+    res.json(toApiDocumentWithUploaderFallback(refreshed));
+  },
+);
 
 export { router as communityChronicleRouter };
