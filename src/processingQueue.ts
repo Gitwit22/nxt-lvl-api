@@ -1212,7 +1212,11 @@ async function processSingleJob(): Promise<void> {
     }
 
     const autoLabels = classifyDocumentTypeAndTopics(job.document.title, baseText);
-    const fingerprint = await computeFingerprint(baseText, job.document.title, job.document.filePath);
+    // Pass extractionFilePath (the resolved local/temp path) so computeFingerprint
+    // can read the file bytes for the exact file hash. For R2-backed documents,
+    // job.document.filePath is the R2 object key (not a local path), so using it
+    // directly would silently produce fileHash=null for every R2 file.
+    const fingerprint = await computeFingerprint(baseText, job.document.title, extractionFilePath);
     const similarity = await compareAgainstExistingDocuments(
       job.documentId,
       job.document.title,
