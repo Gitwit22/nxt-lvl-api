@@ -601,6 +601,29 @@ model Document {
   needsReview           Boolean   @default(false)
   aiSummary             String    @default("") @db.Text
 
+  // ── Lightweight search-first metadata (Phase 2 refactor) ─────────────────
+  // documentType: canonical type key (invoice | receipt | letter | form |
+  //   sign_in_sheet | business_card | report | notice | other_unclassified | custom)
+  documentType          String?
+  // sourceName: who issued / sent the document (org name, person, agency)
+  sourceName            String?
+  // documentDate: ISO date string extracted from document content
+  documentDate          String?
+  // Structured entity arrays extracted from document text
+  metaPeople            Json?     // string[]
+  metaCompanies         Json?     // string[]
+  metaLocations         Json?     // string[]
+  metaReferenceNumbers  Json?     // string[]
+  metaOther             Json?     // string[] — anything useful that doesn't fit buckets
+  // classificationStatus: known | other_unclassified | reviewed_mapped | promoted_custom_type
+  classificationStatus  String?
+  // classificationMatchedBy: rule | keyword | source | similarity | manual
+  classificationMatchedBy String?
+  // classificationConfidence: 0–1 float
+  classificationConfidence Float?
+  // reviewRequired: true when type is other_unclassified or confidence is low
+  reviewRequired        Boolean   @default(false)
+
   createdByUserId String?
   uploadedById  String?
   reviewedById  String?
@@ -612,6 +635,46 @@ model Document {
 
   @@index([organizationId, programDomain, createdAt])
   @@index([organizationId, programDomain, needsReview, updatedAt])
+  @@index([organizationId, programDomain, documentType])
+  @@index([organizationId, programDomain, classificationStatus])
+  @@index([organizationId, programDomain, reviewRequired, updatedAt])
+}
+
+// ── Community Chronicle: document type registry ───────────────────────────────
+// Stores both system-defined and admin-created document types.
+model ChronicleDocumentType {
+  id            String    @id @default(cuid())
+  organizationId String
+  programDomain  String   @default("community-chronicle")
+  key           String    // e.g. "invoice", "receipt", "my_custom_type"
+  label         String    // Human-readable label
+  description   String    @default("")
+  isSystemType  Boolean   @default(false)  // true = shipped with the system
+  isUserCreated Boolean   @default(false)  // true = admin promoted from other_unclassified
+  active        Boolean   @default(true)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  fingerprint   ChronicleTypeFingerprint?
+
+  @@unique([organizationId, programDomain, key])
+  @@index([organizationId, programDomain, active])
+}
+
+// ── Community Chronicle: type fingerprints for learned classification ─────────
+// Stores phrases, company names, and patterns discovered during admin review
+// of other_unclassified documents.  Used to improve future classifications.
+model ChronicleTypeFingerprint {
+  id             String   @id @default(cuid())
+  documentTypeId String   @unique
+  phrases        Json     @default("[]")   // string[] — distinctive phrases
+  companies      Json     @default("[]")   // string[] — known issuers
+  filenamePatterns Json   @default("[]")   // string[] — filename regex patterns
+  datePatterns   Json     @default("[]")   // string[] — date format hints
+  sampleDocumentIds Json  @default("[]")   // string[] — doc IDs used as examples
+  updatedAt      DateTime @updatedAt
+
+  documentType ChronicleDocumentType @relation(fields: [documentTypeId], references: [id], onDelete: Cascade)
 }
 
 model ProcessingJob {

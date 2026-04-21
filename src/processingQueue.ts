@@ -19,6 +19,10 @@ import {
   classifyDocumentWithCoreApi,
   type ChronicleClassificationResult,
 } from "./core/services/documentIntelligence/coreApiClient.js";
+import {
+  extractLightweightMetadata,
+  classifyDocumentType,
+} from "./core/services/documentIntelligence/lightweightMetadata.js";
 import { isR2Configured, isR2Key, downloadFromR2 } from "./core/storage/r2.js";
 import {
   canUseSharedParser,
@@ -1390,6 +1394,49 @@ async function processSingleJob(): Promise<void> {
       reviewReasons.push("⚠️ Similar documents found — verify relationships and deduplication");
     }
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Lightweight metadata extraction (Phase 2 — search-first model)
+    // Runs on every document regardless of file type or extraction quality.
+    // ─────────────────────────────────────────────────────────────────────
+    const lightMeta = extractLightweightMetadata(
+      baseText,
+      job.document.originalFileName ?? null,
+    );
+
+    // Fetch any learned type fingerprints for this tenant so classification
+    // can benefit from admin-reviewed custom types.
+    let typeFingerprints: Array<{ key: string; phrases: string[]; companies: string[] }> = [];
+    try {
+      const fpRows = await prisma.chronicleTypeFingerprint.findMany({
+        where: {
+          documentType: {
+            organizationId: tenantScope.organizationId,
+            programDomain: tenantScope.programDomain,
+            active: true,
+          },
+        },
+        include: { documentType: { select: { key: true } } },
+      });
+      typeFingerprints = fpRows.map((fp) => ({
+        key: fp.documentType.key,
+        phrases: Array.isArray(fp.phrases) ? (fp.phrases as string[]) : [],
+        companies: Array.isArray(fp.companies) ? (fp.companies as string[]) : [],
+      }));
+    } catch {
+      // Non-fatal: fingerprint table may not exist yet (migration pending)
+    }
+
+    const lightClassification = classifyDocumentType(
+      baseText,
+      job.document.originalFileName ?? null,
+      typeFingerprints,
+    );
+
+    // Determine whether this document needs review based on new classification
+    const lightReviewRequired =
+      lightClassification.classificationStatus === "other_unclassified" ||
+      lightClassification.confidence < 0.4;
+
     const searchHelpers = buildSearchHelpers(
       job.document.title,
       baseText,
@@ -1523,7 +1570,22 @@ async function processSingleJob(): Promise<void> {
                   ? `AI classified as '${aiDocumentType}' (${Math.round((aiClassResult?.confidence ?? 0) * 100)}% confidence via Core API).`
                   : `Auto-labeled as '${autoLabels.documentType}' (${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence via rule-based).`),
           aiClassification: aiClassResult ?? undefined,
+          lightweightDocumentType: lightClassification.documentType,
+          lightweightConfidence: lightClassification.confidence,
         }),
+        // ── Lightweight metadata fields (search-first model) ─────────────
+        documentType: lightClassification.documentType,
+        sourceName: lightMeta.sourceName,
+        documentDate: lightMeta.documentDate,
+        metaPeople: toPrismaJson(lightMeta.people),
+        metaCompanies: toPrismaJson(lightMeta.companies),
+        metaLocations: toPrismaJson(lightMeta.locations),
+        metaReferenceNumbers: toPrismaJson(lightMeta.referenceNumbers),
+        metaOther: toPrismaJson(lightMeta.other),
+        classificationStatus: lightClassification.classificationStatus,
+        classificationMatchedBy: lightClassification.classificationMatchedBy,
+        classificationConfidence: lightClassification.confidence,
+        reviewRequired: lightReviewRequired,
       },
     });
 
