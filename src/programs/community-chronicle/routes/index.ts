@@ -1,9 +1,7 @@
 import fs from "fs";
-import fsPromises from "fs/promises";
 import path from "path";
 import crypto from "crypto";
 import express from "express";
-import { BACKEND_URL, UPLOAD_DIR } from "../../../core/config/env.js";
 import { prisma } from "../../../core/db/prisma.js";
 import { toApiDocument } from "../../../documentMapper.js";
 import { createDocumentPayload } from "../../../documentFactory.js";
@@ -15,11 +13,6 @@ import { upload } from "../../../validators.js";
 import { logger } from "../../../logger.js";
 import { jobRouter } from "../../../jobRoutes.js";
 import {
-  isR2Configured,
-  isR2Key,
-  uploadToR2,
-  deleteFromR2,
-  getR2SignedDownloadUrl,
   getR2EnvMetadata,
   probeR2Connection,
 } from "../../../core/storage/r2.js";
@@ -27,18 +20,15 @@ import {
   SYSTEM_DOCUMENT_TYPES,
   DOCUMENT_TYPE_LABELS,
 } from "../../../core/services/documentIntelligence/lightweightMetadata.js";
+import {
+  resolveStorageAdapter,
+  StorageConfigError,
+} from "../../../core/storage/storageResolver.js";
 
 const router = express.Router();
 
 // All document routes require a valid JWT.
 router.use(requireAuth);
-
-function buildFileUrl(relativePath: string): string {
-  if (BACKEND_URL && !BACKEND_URL.startsWith("http://localhost")) {
-    return `${BACKEND_URL.replace(/\/$/, "")}${relativePath}`;
-  }
-  return relativePath;
-}
 
 function parseStringArray(value: unknown): string[] {
   if (!value) return [];
@@ -113,7 +103,7 @@ type StorageSettingsPayload = {
   };
 };
 
-const STORAGE_SETTINGS_PROGRAM_DOMAIN = "community-chronicle";
+const MISSION_OPS_PROGRAM_DOMAIN = "mission-hub";
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value : "";
@@ -317,7 +307,7 @@ async function getStorageSettings(scope: TenantScope): Promise<StorageSettingsPa
     where: {
       organizationId_programDomain: {
         organizationId: scope.organizationId,
-        programDomain: STORAGE_SETTINGS_PROGRAM_DOMAIN,
+        programDomain: scope.programDomain,
       },
     },
     select: {
@@ -336,12 +326,12 @@ async function saveStorageSettings(scope: TenantScope, payload: unknown): Promis
     where: {
       organizationId_programDomain: {
         organizationId: scope.organizationId,
-        programDomain: STORAGE_SETTINGS_PROGRAM_DOMAIN,
+        programDomain: scope.programDomain,
       },
     },
     create: {
       organizationId: scope.organizationId,
-      programDomain: STORAGE_SETTINGS_PROGRAM_DOMAIN,
+      programDomain: scope.programDomain,
       settings: sanitized as unknown as never,
     },
     update: {
@@ -353,6 +343,24 @@ async function saveStorageSettings(scope: TenantScope, payload: unknown): Promis
   });
 
   return sanitizeStorageSettings(record.settings, r2Env);
+}
+
+function buildPartitionedKey(args: {
+  prefix: string;
+  programDomain: string;
+  organizationId: string;
+  userId: string;
+  stamp: string;
+  safeFileName: string;
+}): string {
+  const keyParts = [
+    args.prefix.replace(/^\/+|\/+$/g, ""),
+    args.programDomain,
+    args.organizationId,
+    args.userId,
+  ].filter(Boolean);
+
+  return `${keyParts.join("/")}/${args.stamp}-${args.safeFileName}`;
 }
 
 function parseR2AccountIdFromEndpoint(endpoint: string): string {
@@ -610,16 +618,14 @@ router.get("/documents/:id/download", requireAuth, async (req, res) => {
 
   const disposition = req.query.disposition === "inline" ? "inline" : "attachment";
 
-  // R2 storage: redirect to a short-lived signed URL
-  if (isR2Configured() && isR2Key(doc.filePath)) {
-    const signedUrl = await getR2SignedDownloadUrl(
-      doc.filePath,
-      {
-        filename: doc.originalFileName ?? undefined,
-        disposition,
-      },
-    );
-    res.redirect(302, signedUrl);
+  // Resolve backend for this tenant and use the adapter to get a download URL.
+  const storage = await resolveStorageAdapter(tenantScope);
+  if (storage.adapter.ownsKey(doc.filePath)) {
+    const downloadUrl = await storage.adapter.getDownloadUrl(doc.filePath, {
+      filename: doc.originalFileName ?? undefined,
+      disposition,
+    });
+    res.redirect(302, downloadUrl);
     return;
   }
 
@@ -653,13 +659,14 @@ router.get("/documents/:id/resolve", requireAuth, async (req, res) => {
     return;
   }
 
-  if (!(isR2Configured() && isR2Key(doc.filePath))) {
+  const storage = await resolveStorageAdapter(tenantScope);
+  if (!storage.adapter.ownsKey(doc.filePath) || storage.adapter.backendId === "local") {
     res.status(409).json({ error: "resolve endpoint is only available for R2-backed files" });
     return;
   }
 
   const disposition = req.query.disposition === "inline" ? "inline" : "attachment";
-  const signedUrl = await getR2SignedDownloadUrl(doc.filePath, {
+  const signedUrl = await storage.adapter.getDownloadUrl(doc.filePath, {
     filename: doc.originalFileName ?? undefined,
     disposition,
   });
@@ -723,7 +730,36 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
   const body = req.body as Record<string, unknown>;
   const user = getRequestUser(req);
   const tenantScope = getRequestTenantScope(req);
+
+  let storage;
+  try {
+    storage = await resolveStorageAdapter(tenantScope);
+  } catch (err) {
+    if (err instanceof StorageConfigError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+
   const uploaderName = await resolveRequestUploaderName(user);
+  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const safe = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+  const key = buildPartitionedKey({
+    prefix: storage.prefix,
+    programDomain: tenantScope.programDomain,
+    organizationId: tenantScope.organizationId,
+    userId: user?.userId ?? "unknown",
+    stamp,
+    safeFileName: safe,
+  });
+
+  const { key: storedKey, fileUrl } = await storage.adapter.upload(
+    key,
+    req.file.buffer,
+    req.file.mimetype,
+  );
+
   const payload = createDocumentPayload({
     title: typeof body.title === "string" ? body.title : undefined,
     description: typeof body.description === "string" ? body.description : undefined,
@@ -741,37 +777,13 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
     intakeSource: typeof body.intakeSource === "string" ? body.intakeSource : "file_upload",
     sourceReference: typeof body.sourceReference === "string" ? body.sourceReference : undefined,
     department: typeof body.department === "string" ? body.department : undefined,
-    fileMeta: await (async () => {
-      const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const safe = req.file!.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
-
-      if (isR2Configured()) {
-        const orgId = tenantScope.organizationId;
-        const userId = user?.userId ?? "unknown";
-        const key = `${orgId}/${userId}/${stamp}-${safe}`;
-        const { key: r2Key, fileUrl } = await uploadToR2(key, req.file!.buffer, req.file!.mimetype);
-        return {
-          originalFileName: req.file!.originalname,
-          mimeType: req.file!.mimetype,
-          fileSize: req.file!.size,
-          fileUrl,
-          filePath: r2Key,
-        };
-      }
-
-      // Local disk fallback (dev only — ephemeral on Render free tier)
-      const filename = `${stamp}-${safe}`;
-      const localPath = path.join(UPLOAD_DIR, filename);
-      await fsPromises.mkdir(UPLOAD_DIR, { recursive: true });
-      await fsPromises.writeFile(localPath, req.file!.buffer);
-      return {
-        originalFileName: req.file!.originalname,
-        mimeType: req.file!.mimetype,
-        fileSize: req.file!.size,
-        fileUrl: buildFileUrl(`/uploads/${filename}`),
-        filePath: localPath,
-      };
-    })(),
+    fileMeta: {
+      originalFileName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      fileSize: req.file.size,
+      fileUrl,
+      filePath: storedKey,
+    },
   });
 
   const created = await prisma.document.create({
@@ -789,6 +801,8 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
     userId: user?.userId,
     organizationId: tenantScope.organizationId,
     programDomain: tenantScope.programDomain,
+    storageBackend: storage.adapter.backendId,
+    storageSource: storage.source,
   });
   res.status(201).json(toApiDocumentWithUploaderFallback(created));
 });
@@ -803,31 +817,38 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
   const intakeSource = typeof req.body.intakeSource === "string" ? req.body.intakeSource : "multi_upload";
   const user = getRequestUser(req);
   const tenantScope = getRequestTenantScope(req);
-  const uploaderName = await resolveRequestUploaderName(user);
 
+  let storage;
+  try {
+    storage = await resolveStorageAdapter(tenantScope);
+  } catch (err) {
+    if (err instanceof StorageConfigError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+
+  const uploaderName = await resolveRequestUploaderName(user);
   const created = [];
+
   for (const file of files) {
     const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const key = buildPartitionedKey({
+      prefix: storage.prefix,
+      programDomain: tenantScope.programDomain,
+      organizationId: tenantScope.organizationId,
+      userId: user?.userId ?? "unknown",
+      stamp,
+      safeFileName: safe,
+    });
 
-    let filePath: string;
-    let fileUrl: string;
-
-    if (isR2Configured()) {
-      const orgId = tenantScope.organizationId;
-      const userId = user?.userId ?? "unknown";
-      const key = `${orgId}/${userId}/${stamp}-${safe}`;
-      const result = await uploadToR2(key, file.buffer, file.mimetype);
-      filePath = result.key;
-      fileUrl = result.fileUrl;
-    } else {
-      const filename = `${stamp}-${safe}`;
-      const localPath = path.join(UPLOAD_DIR, filename);
-      await fsPromises.mkdir(UPLOAD_DIR, { recursive: true });
-      await fsPromises.writeFile(localPath, file.buffer);
-      filePath = localPath;
-      fileUrl = buildFileUrl(`/uploads/${filename}`);
-    }
+    const { key: storedKey, fileUrl } = await storage.adapter.upload(
+      key,
+      file.buffer,
+      file.mimetype,
+    );
 
     const payload = createDocumentPayload({
       intakeSource,
@@ -837,7 +858,7 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
         mimeType: file.mimetype,
         fileSize: file.size,
         fileUrl,
-        filePath,
+        filePath: storedKey,
       },
     });
 
@@ -850,6 +871,15 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
       } as never,
     });
     await enqueueProcessing(doc.id, tenantScope);
+    logger.info("File uploaded (batch)", {
+      docId: doc.id,
+      file: file.originalname,
+      userId: user?.userId,
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+      storageBackend: storage.adapter.backendId,
+      storageSource: storage.source,
+    });
     created.push(doc);
   }
 
@@ -891,7 +921,17 @@ router.patch("/documents/:id", requireAuth, requireRole("reviewer"), async (req,
       review: body.review && typeof body.review === "object" ? body.review : undefined,
       needsReview: typeof body.needsReview === "boolean" ? body.needsReview : undefined,
       aiSummary: typeof body.aiSummary === "string" ? body.aiSummary : undefined,
-    },
+      // Extraction payload fields — written by the frontend after schema-routed
+      // doc-intel classification (persistRoutedExtractionResults in useDocuments.ts).
+      extractedText: typeof body.extractedText === "string" ? body.extractedText : undefined,
+      extraction: body.extraction && typeof body.extraction === "object" ? body.extraction : undefined,
+      classificationResult:
+        body.classificationResult && typeof body.classificationResult === "object"
+          ? body.classificationResult
+          : undefined,
+      searchIndex:
+        body.searchIndex && typeof body.searchIndex === "object" ? body.searchIndex : undefined,
+    } as never,
   });
 
   const refreshed = await findScopedDocument(id, tenantScope);
@@ -929,16 +969,16 @@ router.delete("/documents/:id", requireAuth, requireRole("admin"), async (req, r
   let storageDeleted: boolean | undefined;
   if (current.filePath) {
     try {
-      const looksLikeUrl = current.filePath.startsWith("http://") || current.filePath.startsWith("https://");
-
-      if (isR2Configured() && (isR2Key(current.filePath) || looksLikeUrl)) {
-        storageDeleted = await deleteFromR2(current.filePath);
-      } else if (fs.existsSync(current.filePath)) {
-        fs.unlinkSync(current.filePath);
-        storageDeleted = true;
-      } else {
-        storageDeleted = false;
-      }
+      const storage = await resolveStorageAdapter(tenantScope);
+      storageDeleted = await storage.adapter.delete(current.filePath);
+      logger.info("Stored file deleted", {
+        documentId: id,
+        filePath: current.filePath,
+        storageBackend: storage.adapter.backendId,
+        storageSource: storage.source,
+        organizationId: tenantScope.organizationId,
+        programDomain: tenantScope.programDomain,
+      });
     } catch (error) {
       storageDeleted = false;
       logger.error("Failed to delete stored file", {
@@ -1543,5 +1583,130 @@ router.get("/documents/search-meta", requireAuth, async (req, res) => {
     offset,
   });
 });
+/**
+ * POST /documents/:id/attach-file
+ *
+ * Attach or replace the stored file on an existing document (e.g. a manual-entry
+ * record that was created without a file, or re-uploading a corrected version).
+ *
+ * Behaviour:
+ *  - Uploads the new file to the configured storage backend (R2 or local).
+ *  - If the document already had a stored file (filePath non-null), attempts to
+ *    delete the old file from storage before writing the new one. Failure to
+ *    delete the old file is logged but does NOT abort the request.
+ *  - Updates filePath, fileUrl, originalFileName, mimeType, fileSize in the DB.
+ *  - Re-queues the document for OCR/extraction so the pipeline sees the new file.
+ *  - Returns the updated document record.
+ */
+router.post(
+  "/documents/:id/attach-file",
+  requireAuth,
+  requireRole("uploader"),
+  upload.single("file"),
+  async (req, res) => {
+    if (!req.file) {
+      res.status(400).json({ error: "File is required" });
+      return;
+    }
+
+    const id = parseRouteId(req.params.id);
+    if (!id) {
+      res.status(400).json({ error: "Invalid document id" });
+      return;
+    }
+
+    const tenantScope = getRequestTenantScope(req);
+    const current = await findScopedDocument(id, tenantScope);
+    if (!current) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+
+    let storage;
+    try {
+      storage = await resolveStorageAdapter(tenantScope);
+    } catch (err) {
+      if (err instanceof StorageConfigError) {
+        res.status(422).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    // Delete old file if present (best-effort; never aborts the request)
+    if (current.filePath) {
+      try {
+        await storage.adapter.delete(current.filePath);
+        logger.info("Old file deleted on attach-file replace", {
+          documentId: id,
+          oldFilePath: current.filePath,
+          storageBackend: storage.adapter.backendId,
+        });
+      } catch (deleteErr) {
+        logger.warn("Could not delete old file during attach-file replace (orphaned blob)", {
+          documentId: id,
+          oldFilePath: current.filePath,
+          error: deleteErr instanceof Error ? deleteErr.message : String(deleteErr),
+        });
+      }
+    }
+
+    // Upload new file
+    const user = getRequestUser(req);
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const safe = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const key = buildPartitionedKey({
+      prefix: storage.prefix,
+      programDomain: tenantScope.programDomain,
+      organizationId: tenantScope.organizationId,
+      userId: user?.userId ?? "unknown",
+      stamp,
+      safeFileName: safe,
+    });
+
+    const { key: storedKey, fileUrl } = await storage.adapter.upload(
+      key,
+      req.file.buffer,
+      req.file.mimetype,
+    );
+
+    await prisma.document.update({
+      where: { id },
+      data: {
+        filePath: storedKey,
+        fileUrl,
+        originalFileName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        fileSize: req.file.size,
+        processingStatus: "queued",
+        ocrStatus: "pending",
+        status: "queued",
+        statusUpdatedAt: new Date(),
+        needsReview: false,
+        review: { required: false },
+      } as never,
+    });
+
+    await enqueueProcessing(id, tenantScope);
+
+    logger.info("File attached to document", {
+      documentId: id,
+      file: req.file.originalname,
+      userId: user?.userId,
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+      storageBackend: storage.adapter.backendId,
+      storageSource: storage.source,
+    });
+
+    const refreshed = await findScopedDocument(id, tenantScope);
+    if (!refreshed) {
+      res.status(404).json({ error: "Document not found after update" });
+      return;
+    }
+
+    res.json(toApiDocumentWithUploaderFallback(refreshed));
+  },
+);
 
 export { router as communityChronicleRouter };

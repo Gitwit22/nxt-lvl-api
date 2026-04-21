@@ -557,6 +557,55 @@ model MissionHubSavedReport {
   @@index([organizationId, userId, isFavorite])
 }
 
+model MissionHubTask {
+  id              String   @id @default(cuid())
+  organizationId  String
+  userId          String
+  programDomain   String   @default("mission-hub")
+  title           String
+  description     String   @default("")
+  assignedTo      String   @default("")
+  owner           String   @default("")
+  dueDate         String   @default("")
+  priority        String   @default("Medium") // Low|Medium|High
+  status          String   @default("To Do")   // To Do|In Progress|Done
+  linkedProgramId String?
+  linkedProgram   String?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([organizationId, userId, programDomain])
+  @@index([organizationId, userId, programDomain, status])
+  @@index([organizationId, userId, programDomain, dueDate])
+}
+
+model MissionHubTimeEntry {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  programDomain  String   @default("mission-hub")
+  person         String
+  initials       String   @default("")
+  date           String
+  startTime      String   @default("")
+  endTime        String   @default("")
+  hours          Float    @default(0)
+  projectId      String?
+  projectName    String?
+  linkedGrant    String?
+  linkedSponsor  String?
+  notes          String   @default("")
+  status         String   @default("Draft") // Draft|Submitted|Approved|Rejected
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, userId, programDomain])
+  @@index([organizationId, userId, programDomain, status])
+  @@index([organizationId, userId, programDomain, date])
+}
+
 // ─── End Mission Hub ──────────────────────────────────────────────────────────
 
 model Document {

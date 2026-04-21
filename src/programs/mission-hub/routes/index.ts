@@ -717,6 +717,248 @@ router.delete("/personnel/:id", requireMissionHubAuth, async (req, res) => {
   res.status(204).send();
 });
 
+// ─── Tasks ───────────────────────────────────────────────────────────────────
+
+router.get("/tasks", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { status } = req.query;
+  const store = prisma as unknown as {
+    missionHubTask: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+  };
+  const where: Record<string, unknown> = {
+    organizationId,
+    userId,
+    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    isActive: true,
+  };
+  if (typeof status === "string") where.status = status;
+
+  const tasks = await store.missionHubTask.findMany({ where, orderBy: [{ dueDate: "asc" }, { createdAt: "desc" }] });
+  res.json(tasks);
+});
+
+router.post("/tasks", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    missionHubTask: { create: (args: Record<string, unknown>) => Promise<Record<string, unknown>> };
+  };
+
+  if (typeof body.title !== "string" || !body.title.trim()) {
+    res.status(400).json({ error: "title is required" });
+    return;
+  }
+
+  const task = await store.missionHubTask.create({
+    data: {
+      organizationId,
+      userId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      title: body.title.trim(),
+      description: typeof body.description === "string" ? body.description : "",
+      assignedTo: typeof body.assignedTo === "string" ? body.assignedTo : "",
+      owner: typeof body.owner === "string" ? body.owner : "",
+      dueDate: typeof body.dueDate === "string" ? body.dueDate : "",
+      priority: typeof body.priority === "string" ? body.priority : "Medium",
+      status: typeof body.status === "string" ? body.status : "To Do",
+      linkedProgramId: typeof body.linkedProgramId === "string" ? body.linkedProgramId : null,
+      linkedProgram: typeof body.linkedProgram === "string" ? body.linkedProgram : null,
+    },
+  });
+
+  res.status(201).json(task);
+});
+
+router.put("/tasks/:id", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    missionHubTask: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.missionHubTask.findFirst({
+    where: {
+      id: req.params.id,
+      organizationId,
+      userId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+
+  const data: Record<string, unknown> = {};
+  const strFields = ["title", "description", "assignedTo", "owner", "dueDate", "priority", "status"] as const;
+  for (const f of strFields) {
+    if (typeof body[f] === "string") data[f] = body[f];
+  }
+  if ("linkedProgramId" in body) data.linkedProgramId = typeof body.linkedProgramId === "string" ? body.linkedProgramId : null;
+  if ("linkedProgram" in body) data.linkedProgram = typeof body.linkedProgram === "string" ? body.linkedProgram : null;
+
+  const updated = await store.missionHubTask.update({ where: { id: req.params.id }, data });
+  res.json(updated);
+});
+
+router.delete("/tasks/:id", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const store = prisma as unknown as {
+    missionHubTask: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.missionHubTask.findFirst({
+    where: {
+      id: req.params.id,
+      organizationId,
+      userId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Task not found" });
+    return;
+  }
+
+  await store.missionHubTask.update({ where: { id: req.params.id }, data: { isActive: false } });
+  res.status(204).send();
+});
+
+// ─── Time Entries ────────────────────────────────────────────────────────────
+
+router.get("/time-entries", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { status, dateFrom, dateTo } = req.query;
+  const store = prisma as unknown as {
+    missionHubTimeEntry: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+  };
+
+  const where: Record<string, unknown> = {
+    organizationId,
+    userId,
+    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    isActive: true,
+  };
+  if (typeof status === "string") where.status = status;
+  if (typeof dateFrom === "string" || typeof dateTo === "string") {
+    where.date = {};
+    if (typeof dateFrom === "string") (where.date as Record<string, unknown>).gte = dateFrom;
+    if (typeof dateTo === "string") (where.date as Record<string, unknown>).lte = dateTo;
+  }
+
+  const entries = await store.missionHubTimeEntry.findMany({ where, orderBy: [{ date: "desc" }, { createdAt: "desc" }] });
+  res.json(entries);
+});
+
+router.post("/time-entries", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    missionHubTimeEntry: { create: (args: Record<string, unknown>) => Promise<Record<string, unknown>> };
+  };
+
+  if (typeof body.person !== "string" || !body.person.trim()) {
+    res.status(400).json({ error: "person is required" });
+    return;
+  }
+  if (typeof body.date !== "string" || !body.date.trim()) {
+    res.status(400).json({ error: "date is required" });
+    return;
+  }
+
+  const entry = await store.missionHubTimeEntry.create({
+    data: {
+      organizationId,
+      userId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      person: body.person.trim(),
+      initials: typeof body.initials === "string" ? body.initials : "",
+      date: body.date,
+      startTime: typeof body.startTime === "string" ? body.startTime : "",
+      endTime: typeof body.endTime === "string" ? body.endTime : "",
+      hours: typeof body.hours === "number" ? body.hours : 0,
+      projectId: typeof body.projectId === "string" ? body.projectId : null,
+      projectName: typeof body.projectName === "string" ? body.projectName : null,
+      linkedGrant: typeof body.linkedGrant === "string" ? body.linkedGrant : null,
+      linkedSponsor: typeof body.linkedSponsor === "string" ? body.linkedSponsor : null,
+      notes: typeof body.notes === "string" ? body.notes : "",
+      status: typeof body.status === "string" ? body.status : "Draft",
+    },
+  });
+
+  res.status(201).json(entry);
+});
+
+router.put("/time-entries/:id", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    missionHubTimeEntry: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.missionHubTimeEntry.findFirst({
+    where: {
+      id: req.params.id,
+      organizationId,
+      userId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Time entry not found" });
+    return;
+  }
+
+  const data: Record<string, unknown> = {};
+  const strFields = ["person", "initials", "date", "startTime", "endTime", "notes", "status"] as const;
+  for (const f of strFields) {
+    if (typeof body[f] === "string") data[f] = body[f];
+  }
+  if (typeof body.hours === "number") data.hours = body.hours;
+  const nullableStrFields = ["projectId", "projectName", "linkedGrant", "linkedSponsor"] as const;
+  for (const f of nullableStrFields) {
+    if (f in body) data[f] = typeof body[f] === "string" ? body[f] : null;
+  }
+
+  const updated = await store.missionHubTimeEntry.update({ where: { id: req.params.id }, data });
+  res.json(updated);
+});
+
+router.delete("/time-entries/:id", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const store = prisma as unknown as {
+    missionHubTimeEntry: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.missionHubTimeEntry.findFirst({
+    where: {
+      id: req.params.id,
+      organizationId,
+      userId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+  if (!existing) {
+    res.status(404).json({ error: "Time entry not found" });
+    return;
+  }
+
+  await store.missionHubTimeEntry.update({ where: { id: req.params.id }, data: { isActive: false } });
+  res.status(204).send();
+});
+
 // ─── Calendar Entries ─────────────────────────────────────────────────────────
 
 router.get("/calendar", requireMissionHubAuth, async (req, res) => {

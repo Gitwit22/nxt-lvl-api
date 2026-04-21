@@ -3,7 +3,12 @@ import { prisma } from "../db/prisma.js";
 import { DEFAULT_ORGANIZATION_ID } from "../config/env.js";
 import { requireAuth, tryAttachAuthUser } from "../middleware/auth.middleware.js";
 import { hashPassword, getRequestUser, generateTempPassword } from "../auth/auth.service.js";
-import { provisionOrgSubscriptions, provisionOrgFromAssignedIds } from "../services/orgProvisioning.js";
+import {
+  provisionCommunityChroniclePartition,
+  provisionOrgSubscriptions,
+  provisionOrgFromAssignedIds,
+  provisionUserProgramAccessFromOrgSubscriptions,
+} from "../services/orgProvisioning.js";
 import { logger } from "../../logger.js";
 
 const router = express.Router();
@@ -234,6 +239,9 @@ router.post("/", requireAuth, async (req, res) => {
       logger.info("[orgs/create] subscriptions provisioned", { organizationId: org.id, ...provResult });
     }
 
+    // Ensure default community-chronicle partition for every newly created org.
+    await provisionCommunityChroniclePartition(org.id);
+
     // Optional: provision contact user as org owner
     const contactUser = body.contactUser as { name?: string; email?: string } | undefined;
     if (contactUser && typeof contactUser.email === "string" && contactUser.email.trim()) {
@@ -270,6 +278,13 @@ router.post("/", requireAuth, async (req, res) => {
       } else {
         await prisma.membership.update({ where: { id: existing.id }, data: { role: "owner" } });
       }
+
+      const accessResult = await provisionUserProgramAccessFromOrgSubscriptions(org.id, user.id);
+      logger.info("[orgs/create] user program access provisioned", {
+        organizationId: org.id,
+        userId: user.id,
+        granted: accessResult.granted,
+      });
 
       res.status(201).json({ ...org, contactUserId: user.id, contactUserEmail: email, tempPassword });
       return;

@@ -16,11 +16,36 @@ type PrismaWithSubscription = typeof prisma & {
     findFirst: (args: Record<string, unknown>) => Promise<{ id: string; status: string } | null>;
     create: (args: Record<string, unknown>) => Promise<{ id: string }>;
     update: (args: Record<string, unknown>) => Promise<{ id: string }>;
+    upsert: (args: Record<string, unknown>) => Promise<{ id: string }>;
     findMany: (args: Record<string, unknown>) => Promise<Array<{ id: string; programId: string; status: string }>>;
   };
 };
 
 const prismaExt = prisma as PrismaWithSubscription;
+
+type PrismaWithProgramAccess = typeof prisma & {
+  organizationProgramAccess: {
+    upsert: (args: Record<string, unknown>) => Promise<{ id: string }>;
+  };
+  programStorageSettings: {
+    upsert: (args: Record<string, unknown>) => Promise<{ id: string }>;
+  };
+  userProgramAccess: {
+    upsert: (args: Record<string, unknown>) => Promise<{ id: string }>;
+  };
+  organizationProgramSubscription: {
+    findMany: (args: Record<string, unknown>) => Promise<Array<{ programId: string }>>;
+  };
+};
+
+const prismaProgramAccess = prisma as PrismaWithProgramAccess;
+
+const COMMUNITY_CHRONICLE_PROGRAM_ID = "community-chronicle";
+const COMMUNITY_CHRONICLE_STORAGE_SETTINGS = {
+  provider: "r2",
+  bucket: "community-chronicle",
+  region: "auto",
+};
 
 /**
  * Ensure that the given org has an active subscription for each programId.
@@ -97,4 +122,136 @@ export async function provisionOrgFromAssignedIds(organizationId: string): Promi
 
   const counts = await provisionOrgSubscriptions(organizationId, programIds);
   return { ...counts, programIds };
+}
+
+/**
+ * Provision the default community-chronicle partition for an organization.
+ * This guarantees org-level access, active subscription, and storage settings.
+ * Optionally grants direct user access for a specific user in that org.
+ */
+export async function provisionCommunityChroniclePartition(
+  organizationId: string,
+  userId?: string,
+): Promise<void> {
+  await prismaProgramAccess.organizationProgramAccess.upsert({
+    where: {
+      organizationId_programId: {
+        organizationId,
+        programId: COMMUNITY_CHRONICLE_PROGRAM_ID,
+      },
+    } as Record<string, unknown>,
+    update: { enabled: true } as Record<string, unknown>,
+    create: {
+      organizationId,
+      programId: COMMUNITY_CHRONICLE_PROGRAM_ID,
+      enabled: true,
+    } as Record<string, unknown>,
+  });
+
+  await prismaExt.organizationProgramSubscription.upsert({
+    where: {
+      organizationId_programId: {
+        organizationId,
+        programId: COMMUNITY_CHRONICLE_PROGRAM_ID,
+      },
+    } as Record<string, unknown>,
+    update: {
+      status: "active",
+      subscriptionSource: "manual",
+      startsAt: new Date(),
+      notes: "Auto-provisioned default partition",
+    } as Record<string, unknown>,
+    create: {
+      organizationId,
+      programId: COMMUNITY_CHRONICLE_PROGRAM_ID,
+      status: "active",
+      subscriptionSource: "manual",
+      startsAt: new Date(),
+      notes: "Auto-provisioned default partition",
+    } as Record<string, unknown>,
+  });
+
+  await prismaProgramAccess.programStorageSettings.upsert({
+    where: {
+      organizationId_programDomain: {
+        organizationId,
+        programDomain: COMMUNITY_CHRONICLE_PROGRAM_ID,
+      },
+    } as Record<string, unknown>,
+    update: {
+      settings: COMMUNITY_CHRONICLE_STORAGE_SETTINGS,
+    } as Record<string, unknown>,
+    create: {
+      organizationId,
+      programDomain: COMMUNITY_CHRONICLE_PROGRAM_ID,
+      settings: COMMUNITY_CHRONICLE_STORAGE_SETTINGS,
+    } as Record<string, unknown>,
+  });
+
+  if (userId) {
+    await prismaProgramAccess.userProgramAccess.upsert({
+      where: {
+        userId_organizationId_programId: {
+          userId,
+          organizationId,
+          programId: COMMUNITY_CHRONICLE_PROGRAM_ID,
+        },
+      } as Record<string, unknown>,
+      update: { enabled: true } as Record<string, unknown>,
+      create: {
+        userId,
+        organizationId,
+        programId: COMMUNITY_CHRONICLE_PROGRAM_ID,
+        enabled: true,
+      } as Record<string, unknown>,
+    });
+  }
+
+  logger.info("[provision] community-chronicle partition ensured", {
+    organizationId,
+    userId: userId ?? null,
+  });
+}
+
+/**
+ * Grants user-level access rows for all active/trialing subscriptions
+ * already assigned to an organization.
+ */
+export async function provisionUserProgramAccessFromOrgSubscriptions(
+  organizationId: string,
+  userId: string,
+): Promise<{ granted: number }> {
+  const subscriptions = await prisma.organizationProgramSubscription.findMany({
+    where: {
+      organizationId,
+      status: { in: ["active", "trialing"] },
+    },
+    select: { programId: true },
+  });
+
+  let granted = 0;
+  for (const sub of subscriptions) {
+    const programId = sub.programId.trim();
+    if (!programId) continue;
+
+    await prismaProgramAccess.userProgramAccess.upsert({
+      where: {
+        userId_organizationId_programId: {
+          userId,
+          organizationId,
+          programId,
+        },
+      } as Record<string, unknown>,
+      update: { enabled: true } as Record<string, unknown>,
+      create: {
+        userId,
+        organizationId,
+        programId,
+        enabled: true,
+      } as Record<string, unknown>,
+    });
+    granted++;
+  }
+
+  return { granted };
 }

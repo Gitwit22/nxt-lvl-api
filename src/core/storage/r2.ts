@@ -268,10 +268,14 @@ export async function uploadToR2(
   key: string,
   buffer: Buffer,
   contentType: string,
+  options?: {
+    bucketName?: string;
+  },
 ): Promise<{ key: string; fileUrl: string }> {
+  const bucketName = options?.bucketName || R2_BUCKET_NAME;
   await getClient().send(
     new PutObjectCommand({
-      Bucket: R2_BUCKET_NAME,
+      Bucket: bucketName,
       Key: key,
       Body: buffer,
       ContentType: contentType,
@@ -289,8 +293,9 @@ export async function uploadToR2(
  * Download an R2 object into a Buffer.
  */
 export async function downloadFromR2(key: string): Promise<Buffer> {
+  const bucketName = R2_BUCKET_NAME;
   const response = await getClient().send(
-    new GetObjectCommand({ Bucket: R2_BUCKET_NAME, Key: key }),
+    new GetObjectCommand({ Bucket: bucketName, Key: key }),
   );
   return streamToBuffer(response.Body as AsyncIterable<Uint8Array>);
 }
@@ -299,15 +304,22 @@ export async function downloadFromR2(key: string): Promise<Buffer> {
  * Delete an R2 object by key or URL-like locator.
  * Returns false when the locator cannot be resolved to this configured bucket.
  */
-export async function deleteFromR2(locator: string): Promise<boolean> {
+export async function deleteFromR2(
+  locator: string,
+  options?: {
+    bucketName?: string;
+  },
+): Promise<boolean> {
   const key = resolveR2ObjectKey(locator);
   if (!key) {
     return false;
   }
 
+  const bucketName = options?.bucketName || R2_BUCKET_NAME;
+
   await getClient().send(
     new DeleteObjectCommand({
-      Bucket: R2_BUCKET_NAME,
+      Bucket: bucketName,
       Key: key,
     }),
   );
@@ -325,14 +337,16 @@ export async function getR2SignedDownloadUrl(
     filename?: string;
     expiresIn?: number;
     disposition?: "attachment" | "inline";
+    bucketName?: string;
   },
 ): Promise<string> {
   const filename = options?.filename;
   const expiresIn = options?.expiresIn ?? 3600;
   const disposition = options?.disposition ?? "attachment";
+  const bucketName = options?.bucketName || R2_BUCKET_NAME;
 
   const command = new GetObjectCommand({
-    Bucket: R2_BUCKET_NAME,
+    Bucket: bucketName,
     Key: key,
     ...(filename
       ? { ResponseContentDisposition: `${disposition}; filename="${filename.replace(/"/g, "")}"` }
