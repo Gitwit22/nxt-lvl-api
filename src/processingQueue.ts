@@ -1157,6 +1157,14 @@ async function processSingleJob(): Promise<void> {
     organizationId: updatedJob.organizationId,
     programDomain: updatedJob.programDomain,
   };
+  const existingExtractionMeta =
+    updatedJob.document.extraction && typeof updatedJob.document.extraction === "object"
+      ? (updatedJob.document.extraction as Record<string, unknown>)
+      : {};
+  const forcedDocumentType =
+    typeof existingExtractionMeta.forcedDocumentType === "string" && existingExtractionMeta.forcedDocumentType.trim().length > 0
+      ? existingExtractionMeta.forcedDocumentType.trim()
+      : null;
 
   await prisma.document.update({
     where: { id: job.documentId },
@@ -1322,7 +1330,7 @@ async function processSingleJob(): Promise<void> {
       aiClassResult?.status === "complete" && aiClassResult.decision === "auto_accepted"
         ? aiClassResult.documentType
         : null;
-    const finalDocumentType = aiDocumentType ?? autoLabels.documentType;
+    const finalDocumentType = forcedDocumentType ?? aiDocumentType ?? autoLabels.documentType;
 
     // Llama classify forces review when it returned needs_review or failed on a supported format
     const aiForcesReview =
@@ -1452,16 +1460,24 @@ async function processSingleJob(): Promise<void> {
       // Non-fatal: fingerprint table may not exist yet (migration pending)
     }
 
-    const lightClassification = classifyDocumentType(
+    const lightClassificationRaw = classifyDocumentType(
       baseText,
       job.document.originalFileName ?? null,
       typeFingerprints,
     );
+    const lightClassification = forcedDocumentType
+      ? {
+          documentType: forcedDocumentType,
+          confidence: Math.max(0.9, lightClassificationRaw.confidence),
+          classificationStatus: "known" as const,
+          classificationMatchedBy: "manual" as const,
+        }
+      : lightClassificationRaw;
 
     // Determine whether this document needs review based on new classification
     const lightReviewRequired =
-      lightClassification.classificationStatus === "other_unclassified" ||
-      lightClassification.confidence < 0.4;
+      (!forcedDocumentType && lightClassification.classificationStatus === "other_unclassified") ||
+      (!forcedDocumentType && lightClassification.confidence < 0.4);
 
     const searchHelpers = buildSearchHelpers(
       job.document.title,
@@ -1521,6 +1537,7 @@ async function processSingleJob(): Promise<void> {
             }
           : { required: false, canAutoApprove },
         extraction: {
+          ...existingExtractionMeta,
           status: "complete",
           method: extraction.method,
           confidence: extraction.confidence,
@@ -1529,6 +1546,9 @@ async function processSingleJob(): Promise<void> {
           pageCount: extraction.pageCount ?? null,
           warningMessages: extraction.warnings ?? [],
           contentLength: extractedWordCount,
+          documentType: finalDocumentType,
+          classificationConfidence: lightClassification.confidence,
+          forcedDocumentType: forcedDocumentType ?? undefined,
         },
         extractedMetadata: toPrismaJson({
           wordCount: extractedWordCount,
@@ -1592,9 +1612,11 @@ async function processSingleJob(): Promise<void> {
             extraction.method === "unsupported"
               ? `Processing failed: '${extraction.method}' file format not supported`
               : `Processed via '${extraction.method}' extraction (extracted ${extractedWordCount} words, confidence ${Math.round(extraction.confidence * 100)}%). ` +
-                (aiDocumentType
-                  ? `AI classified as '${aiDocumentType}' (${Math.round((aiClassResult?.confidence ?? 0) * 100)}% confidence via Core API).`
-                  : `Auto-labeled as '${autoLabels.documentType}' (${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence via rule-based).`),
+                (forcedDocumentType
+                  ? `Manual override enforced type '${forcedDocumentType}'.`
+                  : aiDocumentType
+                    ? `AI classified as '${aiDocumentType}' (${Math.round((aiClassResult?.confidence ?? 0) * 100)}% confidence via Core API).`
+                    : `Auto-labeled as '${autoLabels.documentType}' (${Math.round(autoLabels.documentTypeConfidence * 100)}% confidence via rule-based).`),
           aiClassification: aiClassResult ?? undefined,
           lightweightDocumentType: lightClassification.documentType,
           lightweightConfidence: lightClassification.confidence,

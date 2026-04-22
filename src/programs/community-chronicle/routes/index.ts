@@ -1,11 +1,13 @@
 import fs from "fs";
+import fsp from "fs/promises";
 import path from "path";
+import os from "os";
 import crypto from "crypto";
 import express from "express";
 import { prisma } from "../../../core/db/prisma.js";
 import { toApiDocument } from "../../../documentMapper.js";
 import { createDocumentPayload } from "../../../documentFactory.js";
-import { enqueueProcessing } from "../../../processingQueue.js";
+import { enqueueProcessing, runExtraction } from "../../../processingQueue.js";
 import { requireAuth, requireRole } from "../../../core/middleware/auth.middleware.js";
 import { getRequestUser } from "../../../core/auth/auth.service.js";
 import { getRequestTenantScope, type TenantScope } from "../../../tenant.js";
@@ -17,9 +19,12 @@ import {
   probeR2Connection,
 } from "../../../core/storage/r2.js";
 import {
+  classifyDocumentType,
+  extractLightweightMetadata,
   SYSTEM_DOCUMENT_TYPES,
   DOCUMENT_TYPE_LABELS,
 } from "../../../core/services/documentIntelligence/lightweightMetadata.js";
+import { downloadFromR2, isR2Configured, isR2Key } from "../../../core/storage/r2.js";
 import {
   resolveStorageAdapter,
   StorageConfigError,
@@ -447,6 +452,343 @@ function parseFilters(query: Record<string, unknown>) {
       typeof query.processingStatus === "string" ? query.processingStatus : undefined,
     intakeSource: typeof query.intakeSource === "string" ? query.intakeSource : undefined,
   };
+}
+
+type PredictionConfidenceBand = "high" | "medium" | "low";
+
+type PredictionCandidate = {
+  type: string;
+  label: string;
+  confidence: number;
+  reasons: string[];
+};
+
+type DocumentTypePrediction = {
+  predictedType: string;
+  confidence: number;
+  confidenceBand: PredictionConfidenceBand;
+  sourceName: string | null;
+  pageCount: number;
+  firstPageSnippet: string;
+  candidates: PredictionCandidate[];
+  layoutHints: string[];
+};
+
+const PREDICTION_RULES: Array<{
+  type: string;
+  filenameTokens: string[];
+  headerPhrases: string[];
+  sourceHints: string[];
+}> = [
+  {
+    type: "invoice",
+    filenameTokens: ["invoice", "inv_", "bill"],
+    headerPhrases: ["invoice", "invoice number", "amount due", "bill to"],
+    sourceHints: ["adp", "quickbooks"],
+  },
+  {
+    type: "receipt",
+    filenameTokens: ["receipt", "ack", "donation_receipt"],
+    headerPhrases: ["receipt", "payment received", "thank you for your donation"],
+    sourceHints: ["paypal", "frontstream", "square"],
+  },
+  {
+    type: "voucher",
+    filenameTokens: ["voucher"],
+    headerPhrases: ["voucher", "payment voucher", "voucher number"],
+    sourceHints: ["petty cash"],
+  },
+  {
+    type: "reimbursement_request",
+    filenameTokens: ["reimbursement", "expense_report", "expense_claim"],
+    headerPhrases: ["reimbursement", "expense report", "request for reimbursement"],
+    sourceHints: ["employee expense"],
+  },
+  {
+    type: "payroll_record",
+    filenameTokens: ["payroll", "paystub", "pay_stub", "payslip"],
+    headerPhrases: ["pay stub", "earnings statement", "gross pay", "net pay"],
+    sourceHints: ["adp", "gusto", "paychex"],
+  },
+  {
+    type: "email_correspondence",
+    filenameTokens: ["email", "message", "correspondence"],
+    headerPhrases: ["from:", "to:", "subject:", "forwarded message"],
+    sourceHints: ["gmail", "outlook", "yahoo"],
+  },
+  {
+    type: "approval_message",
+    filenameTokens: ["approval", "approved"],
+    headerPhrases: ["approved", "approval", "your request has been approved"],
+    sourceHints: ["board", "executive"],
+  },
+  {
+    type: "grant_award_letter",
+    filenameTokens: ["award_letter", "grant_award", "noa"],
+    headerPhrases: ["grant award", "notice of award", "award amount", "grant number"],
+    sourceHints: ["federal", "foundation", "cfda"],
+  },
+  {
+    type: "deposit_confirmation",
+    filenameTokens: ["deposit_confirmation", "deposit_receipt", "wire_confirm"],
+    headerPhrases: ["deposit confirmation", "funds deposited", "account credited"],
+    sourceHints: ["bank", "ach", "wire transfer"],
+  },
+  {
+    type: "check_image",
+    filenameTokens: ["check_image", "check_scan", "cheque"],
+    headerPhrases: ["pay to the order of", "routing number", "account number"],
+    sourceHints: ["bank"],
+  },
+];
+
+function confidenceBand(confidence: number): PredictionConfidenceBand {
+  if (confidence >= 0.78) return "high";
+  if (confidence >= 0.52) return "medium";
+  return "low";
+}
+
+function appendProcessingHistory(existing: unknown, entry: Record<string, unknown>) {
+  const rows = Array.isArray(existing) ? [...existing] : [];
+  rows.push(entry);
+  return rows;
+}
+
+function collectRepeatedPhrases(text: string): string[] {
+  const words = text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter((w) => w.length >= 4);
+  const freq = new Map<string, number>();
+  for (const w of words) {
+    freq.set(w, (freq.get(w) ?? 0) + 1);
+  }
+  return [...freq.entries()]
+    .filter(([, n]) => n >= 3)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([w]) => w);
+}
+
+function buildTypePrediction(args: {
+  filename?: string | null;
+  mimeType?: string | null;
+  text: string;
+  pageCount: number;
+  sourceName: string | null;
+  preferredType?: string;
+}): DocumentTypePrediction {
+  const fn = (args.filename ?? "").toLowerCase();
+  const corpus = `${fn}\n${args.text}`.toLowerCase();
+  const firstPageSnippet = args.text.slice(0, 2500);
+  const header = firstPageSnippet.slice(0, 800).toLowerCase();
+
+  const layoutHints: string[] = [];
+  if (args.pageCount <= 1) layoutHints.push("single_page");
+  if (args.pageCount >= 5) layoutHints.push("multi_page");
+  if (/\$\s*\d|amount due|balance due|subtotal|total/gi.test(corpus)) layoutHints.push("currency_dense");
+  if (/from:\s|to:\s|subject:\s|cc:\s|bcc:\s/gi.test(corpus)) layoutHints.push("email_header_layout");
+  if (/routing number|account number|pay to the order of|authorized signature/gi.test(corpus)) layoutHints.push("banking_layout");
+  if ((args.mimeType ?? "").startsWith("image/")) layoutHints.push("image_file");
+
+  const candidates: PredictionCandidate[] = [];
+  for (const rule of PREDICTION_RULES) {
+    let score = 0;
+    const reasons: string[] = [];
+
+    const filenameMatches = rule.filenameTokens.filter((token) => fn.includes(token));
+    if (filenameMatches.length > 0) {
+      score += Math.min(0.6, filenameMatches.length * 0.22);
+      reasons.push(`filename clues: ${filenameMatches.join(", ")}`);
+    }
+
+    const headerMatches = rule.headerPhrases.filter((phrase) => header.includes(phrase));
+    if (headerMatches.length > 0) {
+      score += Math.min(0.55, headerMatches.length * 0.16);
+      reasons.push(`header phrases: ${headerMatches.slice(0, 3).join(", ")}`);
+    }
+
+    if (args.sourceName) {
+      const sourceLower = args.sourceName.toLowerCase();
+      const sourceHits = rule.sourceHints.filter((hint) => sourceLower.includes(hint));
+      if (sourceHits.length > 0) {
+        score += Math.min(0.25, sourceHits.length * 0.12);
+        reasons.push(`source/company clue: ${sourceHits.join(", ")}`);
+      }
+    }
+
+    if (rule.type === "email_correspondence" && layoutHints.includes("email_header_layout")) {
+      score += 0.14;
+      reasons.push("layout hint: email headers");
+    }
+    if ((rule.type === "check_image" || rule.type === "deposit_confirmation") && layoutHints.includes("banking_layout")) {
+      score += 0.12;
+      reasons.push("layout hint: banking fields");
+    }
+    if ((rule.type === "invoice" || rule.type === "receipt" || rule.type === "voucher") && layoutHints.includes("currency_dense")) {
+      score += 0.1;
+      reasons.push("layout hint: currency-heavy content");
+    }
+    if ((rule.type === "check_image" || rule.type === "business_card") && layoutHints.includes("image_file")) {
+      score += 0.08;
+      reasons.push("file hint: image upload");
+    }
+
+    if (score > 0) {
+      const bounded = Math.max(0, Math.min(0.95, score));
+      candidates.push({
+        type: rule.type,
+        label: DOCUMENT_TYPE_LABELS[rule.type as keyof typeof DOCUMENT_TYPE_LABELS] ?? rule.type,
+        confidence: Number(bounded.toFixed(3)),
+        reasons,
+      });
+    }
+  }
+
+  const fallback = classifyDocumentType(args.text, args.filename ?? null);
+  candidates.sort((a, b) => b.confidence - a.confidence);
+
+  let top = candidates[0];
+  if (!top || fallback.confidence > top.confidence) {
+    top = {
+      type: fallback.documentType,
+      label: DOCUMENT_TYPE_LABELS[fallback.documentType as keyof typeof DOCUMENT_TYPE_LABELS] ?? fallback.documentType,
+      confidence: Number(fallback.confidence.toFixed(3)),
+      reasons: [
+        fallback.classificationMatchedBy === "rule"
+          ? "rule-based classifier matched strongly"
+          : "keyword/fingerprint fallback classifier",
+      ],
+    };
+  }
+
+  if (args.preferredType) {
+    const preferred = candidates.find((c) => c.type === args.preferredType);
+    if (preferred) {
+      preferred.confidence = Math.min(0.97, preferred.confidence + 0.1);
+      preferred.reasons = [...preferred.reasons, "manual preferred type boost"];
+      candidates.sort((a, b) => b.confidence - a.confidence);
+      top = candidates[0];
+    }
+  }
+
+  const resolvedType = top?.type ?? "other_unclassified";
+  const resolvedConfidence = top?.confidence ?? 0;
+
+  return {
+    predictedType: resolvedType,
+    confidence: resolvedConfidence,
+    confidenceBand: confidenceBand(resolvedConfidence),
+    sourceName: args.sourceName,
+    pageCount: args.pageCount,
+    firstPageSnippet,
+    candidates: candidates.slice(0, 5),
+    layoutHints,
+  };
+}
+
+async function saveManualOverrideTrainingEvidence(args: {
+  tenantScope: TenantScope;
+  documentId: string;
+  chosenType: string;
+  filename?: string | null;
+  sourceName: string | null;
+  snippet: string;
+  layoutHints: string[];
+  repeatedPhrases: string[];
+}): Promise<boolean> {
+  const p = prisma as unknown as Record<string, unknown>;
+  const docTypeClient = p.chronicleDocumentType as {
+    findFirst?: Function;
+    upsert?: Function;
+  } | undefined;
+  const fingerprintClient = p.chronicleTypeFingerprint as {
+    upsert?: Function;
+  } | undefined;
+
+  if (!docTypeClient?.upsert || !docTypeClient.findFirst || !fingerprintClient?.upsert) {
+    return false;
+  }
+
+  const key = args.chosenType.toLowerCase().trim().replace(/\s+/g, "_");
+  const label = DOCUMENT_TYPE_LABELS[key as keyof typeof DOCUMENT_TYPE_LABELS] ?? args.chosenType;
+
+  const typeRecord = await docTypeClient.upsert({
+    where: {
+      organizationId_programDomain_key: {
+        organizationId: args.tenantScope.organizationId,
+        programDomain: args.tenantScope.programDomain,
+        key,
+      },
+    },
+    create: {
+      id: crypto.randomUUID(),
+      organizationId: args.tenantScope.organizationId,
+      programDomain: args.tenantScope.programDomain,
+      key,
+      label,
+      description: "Auto-learned from manual rerun override",
+      isSystemType: SYSTEM_DOCUMENT_TYPES.includes(key as never),
+      isUserCreated: !SYSTEM_DOCUMENT_TYPES.includes(key as never),
+      active: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+    update: {
+      active: true,
+      updatedAt: new Date(),
+    },
+  });
+
+  const existing = await docTypeClient.findFirst({
+    where: {
+      id: typeRecord.id,
+      organizationId: args.tenantScope.organizationId,
+      programDomain: args.tenantScope.programDomain,
+    },
+    include: { fingerprint: true },
+  });
+
+  const existingFp = (existing?.fingerprint ?? {}) as Record<string, unknown>;
+  const existingPhrases = Array.isArray(existingFp.phrases) ? (existingFp.phrases as string[]) : [];
+  const existingCompanies = Array.isArray(existingFp.companies) ? (existingFp.companies as string[]) : [];
+  const existingFilenamePatterns = Array.isArray(existingFp.filenamePatterns) ? (existingFp.filenamePatterns as string[]) : [];
+  const existingDatePatterns = Array.isArray(existingFp.datePatterns) ? (existingFp.datePatterns as string[]) : [];
+  const existingSampleIds = Array.isArray(existingFp.sampleDocumentIds) ? (existingFp.sampleDocumentIds as string[]) : [];
+
+  const mergedPhrases = [...new Set([...existingPhrases, ...args.repeatedPhrases])].slice(0, 30);
+  const mergedCompanies = [...new Set([...existingCompanies, ...(args.sourceName ? [args.sourceName] : [])])].slice(0, 12);
+  const mergedFilenamePatterns = [...new Set([
+    ...existingFilenamePatterns,
+    ...(args.filename ? [args.filename.toLowerCase().replace(/\d+/g, "{n}")] : []),
+  ])].slice(0, 20);
+  const mergedDatePatterns = [...new Set([...existingDatePatterns, ...args.layoutHints])].slice(0, 20);
+  const mergedSampleIds = [...new Set([...existingSampleIds, args.documentId])].slice(0, 40);
+
+  await fingerprintClient.upsert({
+    where: { documentTypeId: typeRecord.id },
+    create: {
+      id: crypto.randomUUID(),
+      documentTypeId: typeRecord.id,
+      phrases: mergedPhrases,
+      companies: mergedCompanies,
+      filenamePatterns: mergedFilenamePatterns,
+      datePatterns: mergedDatePatterns,
+      sampleDocumentIds: mergedSampleIds,
+      updatedAt: new Date(),
+    },
+    update: {
+      phrases: mergedPhrases,
+      companies: mergedCompanies,
+      filenamePatterns: mergedFilenamePatterns,
+      datePatterns: mergedDatePatterns,
+      sampleDocumentIds: mergedSampleIds,
+      updatedAt: new Date(),
+    },
+  });
+
+  return true;
 }
 
 router.use("/jobs", jobRouter);
@@ -1033,6 +1375,184 @@ router.post("/documents/:id/retry", requireAuth, requireRole("reviewer"), async 
     return;
   }
   res.json(toApiDocumentWithUploaderFallback(refreshed));
+});
+
+router.post("/documents/:id/retry-with-type", requireAuth, requireRole("reviewer"), async (req, res) => {
+  const id = parseRouteId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Invalid document id" });
+    return;
+  }
+
+  const tenantScope = getRequestTenantScope(req);
+  const current = await findScopedDocument(id, tenantScope);
+  if (!current) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  if (!current.filePath) {
+    res.status(400).json({
+      error: "Document has no source file path and cannot be reprocessed.",
+      actionable: "Attach a source file first, then run extraction again.",
+    });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const overrideRaw = typeof body.overrideDocumentType === "string" ? body.overrideDocumentType.trim() : "";
+  const overrideDocumentType = overrideRaw.length > 0 ? overrideRaw : undefined;
+  const saveAsTraining = body.saveAsTraining !== false;
+
+  let extractionPath = current.filePath;
+  let tempFilePath: string | null = null;
+
+  try {
+    if (isR2Configured() && isR2Key(extractionPath)) {
+      const ext = path.extname(extractionPath) || "";
+      tempFilePath = path.join(os.tmpdir(), `rerun-predict-${id}${ext}`);
+      const buffer = await downloadFromR2(extractionPath);
+      await fsp.writeFile(tempFilePath, buffer);
+      extractionPath = tempFilePath;
+    }
+
+    const previewExtraction = await runExtraction(extractionPath, current.mimeType ?? null, {
+      documentId: current.id,
+    });
+
+    const previewText = (previewExtraction.text ?? "").slice(0, 12000);
+    const lightMeta = extractLightweightMetadata(previewText, current.originalFileName ?? null);
+    const prediction = buildTypePrediction({
+      filename: current.originalFileName,
+      mimeType: current.mimeType,
+      text: previewText,
+      pageCount: previewExtraction.pageCount ?? 1,
+      sourceName: lightMeta.sourceName,
+      preferredType: overrideDocumentType,
+    });
+
+    const selectedType = overrideDocumentType
+      ?? (prediction.confidenceBand === "low" ? "other_unclassified" : prediction.predictedType);
+
+    if (!overrideDocumentType && prediction.confidenceBand === "medium") {
+      res.status(409).json({
+        error: `Type prediction is medium confidence (${Math.round(prediction.confidence * 100)}%). Please confirm a document type and rerun.`,
+        actionable: "Select a type in the dropdown and click 'Run with Type' again.",
+        code: "TYPE_CONFIRMATION_REQUIRED",
+        prediction,
+      });
+      return;
+    }
+
+    const extractionMeta = (current.extraction && typeof current.extraction === "object")
+      ? (current.extraction as Record<string, unknown>)
+      : {};
+
+    const rerunRequestedBy = getRequestUser(req)?.email ?? "unknown";
+    const repeatedPhrases = collectRepeatedPhrases(prediction.firstPageSnippet);
+    let trainingSaved = false;
+
+    if (overrideDocumentType && saveAsTraining) {
+      try {
+        trainingSaved = await saveManualOverrideTrainingEvidence({
+          tenantScope,
+          documentId: id,
+          chosenType: overrideDocumentType,
+          filename: current.originalFileName,
+          sourceName: prediction.sourceName,
+          snippet: prediction.firstPageSnippet,
+          layoutHints: prediction.layoutHints,
+          repeatedPhrases,
+        });
+      } catch (error) {
+        logger.warn("Manual override training evidence save failed", {
+          documentId: id,
+          chosenType: overrideDocumentType,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    await prisma.document.update({
+      where: { id },
+      data: {
+        processingStatus: "queued",
+        status: "queued",
+        statusUpdatedAt: new Date(),
+        needsReview: false,
+        review: { required: false },
+        extraction: {
+          ...extractionMeta,
+          status: "queued",
+          rerunRequestedAt: new Date().toISOString(),
+          rerunRequestedBy,
+          rerunManualOverride: overrideDocumentType ?? null,
+          forcedDocumentType: selectedType,
+          typePrediction: prediction,
+          trainingEvidence: overrideDocumentType
+            ? {
+                source: "manual_override_rerun",
+                chosenType: overrideDocumentType,
+                filenamePattern: current.originalFileName
+                  ? current.originalFileName.toLowerCase().replace(/\d+/g, "{n}")
+                  : null,
+                sourceCompany: prediction.sourceName,
+                repeatedPhrases,
+                layoutHints: prediction.layoutHints,
+                snippet: prediction.firstPageSnippet,
+                recordedAt: new Date().toISOString(),
+              }
+            : undefined,
+        },
+        processingHistory: appendProcessingHistory(current.processingHistory, {
+          timestamp: new Date().toISOString(),
+          action: "manual_rerun_requested",
+          status: "queued",
+          details: `Rerun queued with type '${selectedType}' (${overrideDocumentType ? "manual override" : `${prediction.confidenceBand} confidence prediction`}).`,
+          predictedType: prediction.predictedType,
+          predictedConfidence: prediction.confidence,
+          confidenceBand: prediction.confidenceBand,
+          overrideDocumentType: overrideDocumentType ?? null,
+          trainingSaved,
+        }),
+      },
+    });
+
+    await enqueueProcessing(id, tenantScope);
+
+    const refreshed = await findScopedDocument(id, tenantScope);
+    if (!refreshed) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+
+    res.json({
+      document: toApiDocumentWithUploaderFallback(refreshed),
+      prediction,
+      selectedType,
+      routeDecision: overrideDocumentType
+        ? "manual_override"
+        : prediction.confidenceBand === "high"
+          ? "auto_high_confidence"
+          : "low_confidence_fallback",
+      trainingSaved,
+    });
+  } catch (error) {
+    logger.error("Manual rerun with type failed", {
+      documentId: id,
+      overrideDocumentType,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    res.status(500).json({
+      error: "Failed to queue extraction rerun.",
+      actionable: "Verify storage connectivity and extraction service health, then retry.",
+      details: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    if (tempFilePath) {
+      await fsp.unlink(tempFilePath).catch(() => undefined);
+    }
+  }
 });
 
 // POST /documents/reprocess
