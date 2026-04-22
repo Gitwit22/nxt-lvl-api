@@ -784,13 +784,35 @@ async function extractPlainText(filePath: string): Promise<ExtractionResult> {
 // ---------------------------------------------------------------------------
 
 async function extractPdf(filePath: string): Promise<ExtractionResult> {
+  const buffer = await fs.readFile(filePath);
   // Dynamic import keeps pdf-parse out of the module graph until needed.
-  const { default: pdfParse } = await import("pdf-parse" as string) as {
-    default: (buf: Buffer) => Promise<{ text: string; numpages: number }>;
+  // Support both legacy v1 default-function API and v2 class-based API.
+  const pdfModule = await import("pdf-parse" as string) as {
+    default?: (buf: Buffer) => Promise<{ text: string; numpages: number }>;
+    PDFParse?: new (options: { data: Buffer }) => {
+      getText: () => Promise<{ text?: string; total?: number }>;
+      destroy?: () => Promise<void>;
+    };
   };
 
-  const buffer = await fs.readFile(filePath);
-  const data = await pdfParse(buffer);
+  let data: { text: string; numpages: number };
+
+  if (typeof pdfModule.default === "function") {
+    data = await pdfModule.default(buffer);
+  } else if (typeof pdfModule.PDFParse === "function") {
+    const parser = new pdfModule.PDFParse({ data: buffer });
+    try {
+      const result = await parser.getText();
+      data = {
+        text: result.text ?? "",
+        numpages: result.total ?? 1,
+      };
+    } finally {
+      await parser.destroy?.();
+    }
+  } else {
+    throw new Error("pdf-parse does not expose a supported parser API");
+  }
 
   const rawText = (data.text || "").trim();
   const wordCount = rawText.split(/\s+/).filter(Boolean).length;

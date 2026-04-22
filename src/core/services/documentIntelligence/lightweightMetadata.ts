@@ -2,25 +2,25 @@
  * Lightweight metadata extractor for the Community Chronicle document intake pipeline.
  *
  * Goal: make every document searchable, categorizable, and reviewable.
- * We extract ONLY high-value searchable fields — no deep schema normalisation.
+ * We extract ONLY high-value searchable fields - no deep schema normalisation.
  *
  * Output fields (mirrors ExtractedMetadata in the frontend types):
- *   documentType         — canonical type key or "other_unclassified"
- *   sourceName           — who issued the document
- *   documentDate         — ISO date string from document text
- *   people[]             — person names
- *   companies[]          — organisation/company names
- *   locations[]          — cities, states, addresses
- *   referenceNumbers[]   — invoice #, grant #, case #, cheque #, etc.
- *   other[]              — anything useful that doesn't fit above
- *   confidence           — 0–1 per field that was extracted
- *   classificationStatus — known | other_unclassified
- *   classificationMatchedBy — rule | keyword | source | fingerprint | manual
+ *   documentType         - canonical type key or "other_unclassified"
+ *   sourceName           - who issued the document
+ *   documentDate         - ISO date string from document text
+ *   people[]             - person names
+ *   companies[]          - organisation/company names
+ *   locations[]          - cities, states, addresses
+ *   referenceNumbers[]   - invoice #, grant #, case #, cheque #, etc.
+ *   other[]              - anything useful that doesn't fit above
+ *   confidence           - 0-1 per field that was extracted
+ *   classificationStatus - known | other_unclassified
+ *   classificationMatchedBy - rule | keyword | source | fingerprint | manual
  */
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Document type definitions
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 export const SYSTEM_DOCUMENT_TYPES = [
   "invoice",
@@ -31,26 +31,44 @@ export const SYSTEM_DOCUMENT_TYPES = [
   "business_card",
   "report",
   "notice",
+  "voucher",
+  "reimbursement_request",
+  "payroll_record",
+  "email_correspondence",
+  "approval_message",
+  "donation_acknowledgment",
+  "grant_award_letter",
+  "deposit_confirmation",
+  "check_image",
   "other_unclassified",
 ] as const;
 
 export type SystemDocumentType = typeof SYSTEM_DOCUMENT_TYPES[number];
 
 export const DOCUMENT_TYPE_LABELS: Record<SystemDocumentType, string> = {
-  invoice:          "Invoice",
-  receipt:          "Receipt / Acknowledgment",
-  letter:           "Letter / Correspondence",
-  form:             "Form / Application",
-  sign_in_sheet:    "Sign-In Sheet / Roster",
-  business_card:    "Business Card",
-  report:           "Report / Study",
-  notice:           "Notice / Government Document",
-  other_unclassified: "Other (Unclassified)",
+  invoice:                 "Invoice",
+  receipt:                 "Receipt / Acknowledgment",
+  letter:                  "Letter / Correspondence",
+  form:                    "Form / Application",
+  sign_in_sheet:           "Sign-In Sheet / Roster",
+  business_card:           "Business Card",
+  report:                  "Report / Study",
+  notice:                  "Notice / Government Document",
+  voucher:                 "Voucher",
+  reimbursement_request:   "Reimbursement Request",
+  payroll_record:          "Payroll Record",
+  email_correspondence:    "Email Correspondence",
+  approval_message:        "Approval Message",
+  donation_acknowledgment: "Donation Acknowledgment",
+  grant_award_letter:      "Grant Award Letter",
+  deposit_confirmation:    "Deposit Confirmation",
+  check_image:             "Check Image",
+  other_unclassified:      "Other (Unclassified)",
 };
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Classification rules — keyword matching per type
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
+// Classification rules - keyword matching per type
+// -----------------------------------------------------------------------------
 
 interface TypeRule {
   type: SystemDocumentType;
@@ -137,15 +155,103 @@ const TYPE_RULES: TypeRule[] = [
     ],
     weight: 1.0,
   },
+  {
+    type: "voucher",
+    keywords: [
+      "voucher", "voucher number", "voucher #", "payment voucher",
+      "expense voucher", "cash voucher", "authorized voucher",
+      "disbursement voucher", "voucher date", "petty cash",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: "reimbursement_request",
+    keywords: [
+      "reimbursement", "reimbursement request", "expense report",
+      "expense claim", "request for reimbursement", "out-of-pocket",
+      "mileage reimbursement", "travel expense", "employee expense",
+      "please reimburse", "total expenses",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: "payroll_record",
+    keywords: [
+      "payroll", "pay stub", "pay slip", "earnings statement",
+      "gross pay", "net pay", "deductions", "fica", "federal withholding",
+      "state withholding", "ytd earnings", "pay period", "direct deposit",
+      "w-2", "1099",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: "email_correspondence",
+    keywords: [
+      "from:", "to:", "cc:", "bcc:", "subject:", "sent:", "received:",
+      "forwarded message", "original message", "reply to",
+      "email address", "@", "gmail", "outlook", "yahoo mail",
+    ],
+    weight: 0.85,
+  },
+  {
+    type: "approval_message",
+    keywords: [
+      "approved", "approval", "this is to confirm approval",
+      "has been approved", "you are approved", "your request has been approved",
+      "authorized", "board approved", "executive approval",
+      "approval number", "approval date",
+    ],
+    weight: 0.9,
+  },
+  {
+    type: "donation_acknowledgment",
+    keywords: [
+      "thank you for your donation", "thank you for your gift",
+      "your generous donation", "donation receipt",
+      "tax-deductible contribution", "no goods or services were provided",
+      "501(c)(3)", "ein:", "tax identification",
+      "your support", "acknowledgment of donation",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: "grant_award_letter",
+    keywords: [
+      "grant award", "award letter", "grant agreement", "award amount",
+      "project period", "grant number", "federal award", "fain",
+      "notice of award", "noa", "grantee", "sub-award",
+      "cfda", "pass-through entity", "grant funds",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: "deposit_confirmation",
+    keywords: [
+      "deposit confirmation", "deposit receipt", "funds deposited",
+      "ach deposit", "direct deposit confirmation", "wire transfer",
+      "wire confirmation", "electronic funds transfer", "eft",
+      "deposit slip", "deposit amount", "account credited",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: "check_image",
+    keywords: [
+      "pay to the order of", "memo:", "authorized signature",
+      "void", "check number", "routing number", "account number",
+      "bank name", "negotiable instrument", "cents",
+    ],
+    weight: 0.9,
+  },
 ];
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Classification result
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 export interface DocumentTypeClassification {
   documentType: string;           // system type key or custom type key
-  confidence: number;             // 0–1
+  confidence: number;             // 0-1
   classificationStatus: "known" | "other_unclassified";
   classificationMatchedBy: "rule" | "keyword" | "source" | "fingerprint" | "manual";
 }
@@ -192,6 +298,33 @@ export function classifyDocumentType(
     if (fn.includes("business_card") || fn.includes("vcard") || fn.includes("bcard")) {
       return { documentType: "business_card", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
     }
+    if (fn.includes("voucher")) {
+      return { documentType: "voucher", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("reimbursement") || fn.includes("expense_report") || fn.includes("expense_claim")) {
+      return { documentType: "reimbursement_request", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("payroll") || fn.includes("pay_stub") || fn.includes("paystub") || fn.includes("payslip")) {
+      return { documentType: "payroll_record", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("email") || fn.includes("correspondence") || fn.includes("message")) {
+      return { documentType: "email_correspondence", confidence: 0.75, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("approval") || fn.includes("approved")) {
+      return { documentType: "approval_message", confidence: 0.75, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("award_letter") || fn.includes("grant_award") || fn.includes("notice_of_award") || fn.includes("noa_")) {
+      return { documentType: "grant_award_letter", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("deposit_confirmation") || fn.includes("deposit_receipt") || fn.includes("wire_confirm")) {
+      return { documentType: "deposit_confirmation", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("check_image") || fn.includes("check_scan") || fn.includes("cheque")) {
+      return { documentType: "check_image", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("donation_ack") || fn.includes("donation_acknowledgment") || fn.includes("donation_receipt")) {
+      return { documentType: "donation_acknowledgment", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
   }
 
   // 3. Keyword scoring
@@ -227,9 +360,9 @@ export function classifyDocumentType(
   };
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Lightweight metadata extraction
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 export interface LightweightMetadata {
   sourceName: string | null;
@@ -454,9 +587,9 @@ function extractOther(text: string, people: string[], companies: string[]): stri
   return dedupe(other).slice(0, 20);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 // Main entrypoint
-// ─────────────────────────────────────────────────────────────────────────────
+// -----------------------------------------------------------------------------
 
 export function extractLightweightMetadata(
   text: string,
