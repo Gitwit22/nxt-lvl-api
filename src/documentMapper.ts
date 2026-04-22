@@ -63,5 +63,18 @@ export function toApiDocument(doc: Document) {
     searchIndex: doc.searchIndex ?? undefined,
     needsReview: doc.needsReview,
     aiSummary: doc.aiSummary,
+    // ── Lightweight metadata (Phase 2 search-first model) ──────────────
+    documentType: (doc as unknown as Record<string, unknown>).documentType as string | undefined ?? undefined,
+    sourceName: (doc as unknown as Record<string, unknown>).sourceName as string | undefined ?? undefined,
+    documentDate: (doc as unknown as Record<string, unknown>).documentDate as string | undefined ?? undefined,
+    metaPeople: asStringArray((doc as unknown as Record<string, unknown>).metaPeople),
+    metaCompanies: asStringArray((doc as unknown as Record<string, unknown>).metaCompanies),
+    metaLocations: asStringArray((doc as unknown as Record<string, unknown>).metaLocations),
+    metaReferenceNumbers: asStringArray((doc as unknown as Record<string, unknown>).metaReferenceNumbers),
+    metaOther: asStringArray((doc as unknown as Record<string, unknown>).metaOther),
+    classificationStatus: (doc as unknown as Record<string, unknown>).classificationStatus as string | undefined ?? undefined,
+    classificationMatchedBy: (doc as unknown as Record<string, unknown>).classificationMatchedBy as string | undefined ?? undefined,
+    classificationConfidence: (doc as unknown as Record<string, unknown>).classificationConfidence as number | undefined ?? undefined,
+    reviewRequired: Boolean((doc as unknown as Record<string, unknown>).reviewRequired),
   };
 }

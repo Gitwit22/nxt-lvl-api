@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import express from "express";
 import { prisma } from "../../../core/db/prisma.js";
 import { toApiDocument } from "../../../documentMapper.js";
@@ -15,6 +16,10 @@ import {
   getR2EnvMetadata,
   probeR2Connection,
 } from "../../../core/storage/r2.js";
+import {
+  SYSTEM_DOCUMENT_TYPES,
+  DOCUMENT_TYPE_LABELS,
+} from "../../../core/services/documentIntelligence/lightweightMetadata.js";
 import {
   resolveStorageAdapter,
   StorageConfigError,
@@ -1187,6 +1192,397 @@ router.post("/review-queue/:id/mark", requireAuth, requireRole("reviewer"), asyn
   res.json(toApiDocumentWithUploaderFallback(refreshed));
 });
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Document type registry endpoints
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /document-types
+ * Returns the merged list of system types + any admin-created custom types
+ * for this org.  Always includes the full set of system types even if no DB
+ * rows exist yet (lazy seeding).
+ */
+router.get("/document-types", requireAuth, async (req, res) => {
+  const scope = getRequestTenantScope(req);
+
+  // Ensure system types exist for this org (idempotent upsert on first call)
+  const now = new Date();
+  await Promise.all(
+    SYSTEM_DOCUMENT_TYPES.map((key) =>
+      prisma.chronicleDocumentType.upsert({
+        where: {
+          organizationId_programDomain_key: {
+            organizationId: scope.organizationId,
+            programDomain: scope.programDomain,
+            key,
+          },
+        },
+        create: {
+          id: crypto.randomUUID(),
+          organizationId: scope.organizationId,
+          programDomain: scope.programDomain,
+          key,
+          label: DOCUMENT_TYPE_LABELS[key as keyof typeof DOCUMENT_TYPE_LABELS] ?? key,
+          description: "",
+          isSystemType: true,
+          isUserCreated: false,
+          active: true,
+          createdAt: now,
+          updatedAt: now,
+        },
+        update: {},
+      }),
+    ),
+  );
+
+  const types = await prisma.chronicleDocumentType.findMany({
+    where: { organizationId: scope.organizationId, programDomain: scope.programDomain, active: true },
+    include: { fingerprint: true },
+    orderBy: [{ isSystemType: "desc" }, { label: "asc" }],
+  });
+
+  res.json(types);
+});
+
+/**
+ * POST /document-types
+ * Admin creates a new custom document type (typically after reviewing
+ * several other_unclassified documents).
+ */
+router.post("/document-types", requireAuth, requireRole("admin"), async (req, res) => {
+  const scope = getRequestTenantScope(req);
+  const body = req.body as Record<string, unknown>;
+
+  const key = typeof body.key === "string" ? body.key.trim().toLowerCase().replace(/\s+/g, "_") : null;
+  const label = typeof body.label === "string" ? body.label.trim() : null;
+
+  if (!key || !label) {
+    res.status(400).json({ error: "key and label are required" });
+    return;
+  }
+
+  const existing = await prisma.chronicleDocumentType.findUnique({
+    where: {
+      organizationId_programDomain_key: {
+        organizationId: scope.organizationId,
+        programDomain: scope.programDomain,
+        key,
+      },
+    },
+  });
+  if (existing) {
+    res.status(409).json({ error: `Document type '${key}' already exists` });
+    return;
+  }
+
+  const created = await prisma.chronicleDocumentType.create({
+    data: {
+      id: crypto.randomUUID(),
+      organizationId: scope.organizationId,
+      programDomain: scope.programDomain,
+      key,
+      label,
+      description: typeof body.description === "string" ? body.description : "",
+      isSystemType: false,
+      isUserCreated: true,
+      active: true,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    },
+  });
+
+  logger.info("Custom document type created", {
+    typeId: created.id,
+    key: created.key,
+    organizationId: scope.organizationId,
+  });
+  res.status(201).json(created);
+});
+
+/**
+ * PATCH /document-types/:id
+ * Update a custom type's label / description / active flag.
+ * System types cannot be modified except to deactivate.
+ */
+router.patch("/document-types/:id", requireAuth, requireRole("admin"), async (req, res) => {
+  const id = parseRouteId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const scope = getRequestTenantScope(req);
+  const docType = await prisma.chronicleDocumentType.findFirst({
+    where: { id, organizationId: scope.organizationId, programDomain: scope.programDomain },
+  });
+  if (!docType) { res.status(404).json({ error: "Document type not found" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const updated = await prisma.chronicleDocumentType.update({
+    where: { id },
+    data: {
+      label: !docType.isSystemType && typeof body.label === "string" ? body.label.trim() : undefined,
+      description: typeof body.description === "string" ? body.description.trim() : undefined,
+      active: typeof body.active === "boolean" ? body.active : undefined,
+      updatedAt: new Date(),
+    },
+  });
+  res.json(updated);
+});
+
+/**
+ * PUT /document-types/:id/fingerprint
+ * Save or update the learned classification patterns for a document type.
+ * Admins call this when they want future similar documents to auto-classify.
+ */
+router.put("/document-types/:id/fingerprint", requireAuth, requireRole("admin"), async (req, res) => {
+  const id = parseRouteId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid id" }); return; }
+
+  const scope = getRequestTenantScope(req);
+  const docType = await prisma.chronicleDocumentType.findFirst({
+    where: { id, organizationId: scope.organizationId, programDomain: scope.programDomain },
+  });
+  if (!docType) { res.status(404).json({ error: "Document type not found" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const phrases = Array.isArray(body.phrases) ? (body.phrases as unknown[]).map(String) : [];
+  const companies = Array.isArray(body.companies) ? (body.companies as unknown[]).map(String) : [];
+  const filenamePatterns = Array.isArray(body.filenamePatterns) ? (body.filenamePatterns as unknown[]).map(String) : [];
+  const datePatterns = Array.isArray(body.datePatterns) ? (body.datePatterns as unknown[]).map(String) : [];
+  const sampleDocumentIds = Array.isArray(body.sampleDocumentIds) ? (body.sampleDocumentIds as unknown[]).map(String) : [];
+
+  const fp = await prisma.chronicleTypeFingerprint.upsert({
+    where: { documentTypeId: id },
+    create: {
+      id: crypto.randomUUID(),
+      documentTypeId: id,
+      phrases,
+      companies,
+      filenamePatterns,
+      datePatterns,
+      sampleDocumentIds,
+      updatedAt: new Date(),
+    },
+    update: {
+      phrases,
+      companies,
+      filenamePatterns,
+      datePatterns,
+      sampleDocumentIds,
+      updatedAt: new Date(),
+    },
+  });
+
+  logger.info("Type fingerprint updated", {
+    documentTypeId: id,
+    key: docType.key,
+    phrases: phrases.length,
+    companies: companies.length,
+  });
+  res.json(fp);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enhanced review endpoints — reclassify / type assignment
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /review-queue/:id/reclassify
+ * Admin assigns a document type to a previously other_unclassified document.
+ * Optionally promotes the doc to a custom type (creates the type if not found).
+ * Optionally saves the document's extracted phrases as a fingerprint hint.
+ */
+router.post("/review-queue/:id/reclassify", requireAuth, requireRole("reviewer"), async (req, res) => {
+  const id = parseRouteId(req.params.id);
+  if (!id) { res.status(400).json({ error: "Invalid document id" }); return; }
+
+  const tenantScope = getRequestTenantScope(req);
+  const doc = await findScopedDocument(id, tenantScope);
+  if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+
+  const body = req.body as Record<string, unknown>;
+  const newDocumentType = typeof body.documentType === "string" ? body.documentType.trim() : null;
+  const notes = typeof body.notes === "string" ? body.notes.trim() : undefined;
+  const saveAsFingerprint = body.saveAsFingerprint === true;
+  const createNewType = body.createNewType === true;
+  const newTypeLabel = typeof body.newTypeLabel === "string" ? body.newTypeLabel.trim() : undefined;
+
+  if (!newDocumentType) {
+    res.status(400).json({ error: "documentType is required" });
+    return;
+  }
+
+  // If admin wants to create a new custom type on-the-fly
+  if (createNewType && newTypeLabel) {
+    const typeKey = newDocumentType.toLowerCase().replace(/\s+/g, "_");
+    await prisma.chronicleDocumentType.upsert({
+      where: {
+        organizationId_programDomain_key: {
+          organizationId: tenantScope.organizationId,
+          programDomain: tenantScope.programDomain,
+          key: typeKey,
+        },
+      },
+      create: {
+        id: crypto.randomUUID(),
+        organizationId: tenantScope.organizationId,
+        programDomain: tenantScope.programDomain,
+        key: typeKey,
+        label: newTypeLabel,
+        description: notes ?? "",
+        isSystemType: false,
+        isUserCreated: true,
+        active: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      update: { active: true, updatedAt: new Date() },
+    });
+  }
+
+  // If admin wants to save this doc's patterns as fingerprint hints
+  if (saveAsFingerprint) {
+    const typeKey = newDocumentType.toLowerCase().replace(/\s+/g, "_");
+    const typeRecord = await prisma.chronicleDocumentType.findFirst({
+      where: {
+        organizationId: tenantScope.organizationId,
+        programDomain: tenantScope.programDomain,
+        key: typeKey,
+      },
+      include: { fingerprint: true },
+    });
+
+    if (typeRecord) {
+      const existingIds: string[] = Array.isArray(typeRecord.fingerprint?.sampleDocumentIds)
+        ? (typeRecord.fingerprint.sampleDocumentIds as string[])
+        : [];
+      const updatedIds = [...new Set([...existingIds, id])].slice(0, 25);
+      await prisma.chronicleTypeFingerprint.upsert({
+        where: { documentTypeId: typeRecord.id },
+        create: {
+          id: crypto.randomUUID(),
+          documentTypeId: typeRecord.id,
+          phrases: [],
+          companies: [],
+          filenamePatterns: [],
+          datePatterns: [],
+          sampleDocumentIds: updatedIds,
+          updatedAt: new Date(),
+        },
+        update: { sampleDocumentIds: updatedIds, updatedAt: new Date() },
+      });
+    }
+  }
+
+  const user = getRequestUser(req);
+  await prisma.document.update({
+    where: { id },
+    data: {
+      documentType: newDocumentType,
+      classificationStatus: "reviewed_mapped",
+      classificationMatchedBy: "manual",
+      reviewRequired: false,
+      needsReview: false,
+      reviewedById: user?.userId ?? null,
+      review: {
+        required: false,
+        resolution: "corrected",
+        notes,
+        reviewedBy: user?.email ?? "unknown",
+        reviewedAt: new Date().toISOString(),
+        reclassifiedTo: newDocumentType,
+      },
+      status: "archived",
+    } as never,
+  });
+
+  logger.info("Document reclassified", {
+    documentId: id,
+    newDocumentType,
+    createNewType,
+    saveAsFingerprint,
+    organizationId: tenantScope.organizationId,
+  });
+
+  const refreshed = await findScopedDocument(id, tenantScope);
+  if (!refreshed) { res.status(404).json({ error: "Document not found" }); return; }
+  res.json(toApiDocumentWithUploaderFallback(refreshed));
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Enhanced search endpoint for lightweight metadata
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * GET /documents/search-meta
+ * Lightweight search across the new metadata fields:
+ * person, company, location, referenceNumber, sourceName, documentType, keyword
+ */
+router.get("/documents/search-meta", requireAuth, async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const q = req.query;
+
+  const person = typeof q.person === "string" ? q.person.toLowerCase() : undefined;
+  const company = typeof q.company === "string" ? q.company.toLowerCase() : undefined;
+  const location = typeof q.location === "string" ? q.location.toLowerCase() : undefined;
+  const referenceNumber = typeof q.referenceNumber === "string" ? q.referenceNumber.toLowerCase() : undefined;
+  const sourceName = typeof q.sourceName === "string" ? q.sourceName.toLowerCase() : undefined;
+  const documentType = typeof q.documentType === "string" ? q.documentType : undefined;
+  const keyword = typeof q.keyword === "string" ? q.keyword.toLowerCase() : undefined;
+  const limit = Math.min(Number(q.limit ?? 50), 200);
+  const offset = Number(q.offset ?? 0);
+
+  const scope = getDocumentScope(tenantScope);
+
+  const docs = await prisma.document.findMany({
+    where: {
+      ...scope,
+      ...(documentType ? { documentType } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: limit * 3, // over-fetch to compensate for in-memory filtering
+    skip: offset,
+    include: {
+      uploadedBy: {
+        select: { displayName: true, firstName: true, lastName: true, email: true },
+      },
+    },
+  });
+
+  const filtered = docs.filter((doc) => {
+    const people = Array.isArray(doc.metaPeople) ? (doc.metaPeople as string[]).map((s) => s.toLowerCase()) : [];
+    const companies = Array.isArray(doc.metaCompanies) ? (doc.metaCompanies as string[]).map((s) => s.toLowerCase()) : [];
+    const locations = Array.isArray(doc.metaLocations) ? (doc.metaLocations as string[]).map((s) => s.toLowerCase()) : [];
+    const refs = Array.isArray(doc.metaReferenceNumbers) ? (doc.metaReferenceNumbers as string[]).map((s) => s.toLowerCase()) : [];
+    const source = (doc.sourceName ?? "").toLowerCase();
+
+    if (person && !people.some((p) => p.includes(person))) return false;
+    if (company && !companies.some((c) => c.includes(company))) return false;
+    if (location && !locations.some((l) => l.includes(location))) return false;
+    if (referenceNumber && !refs.some((r) => r.includes(referenceNumber))) return false;
+    if (sourceName && !source.includes(sourceName)) return false;
+    if (keyword) {
+      const haystack = [
+        doc.title,
+        doc.extractedText?.slice(0, 2000) ?? "",
+        doc.sourceName ?? "",
+        ...(doc.metaPeople as string[] ?? []),
+        ...(doc.metaCompanies as string[] ?? []),
+        ...(doc.metaOther as string[] ?? []),
+      ].join(" ").toLowerCase();
+      if (!haystack.includes(keyword)) return false;
+    }
+
+    return true;
+  });
+
+  const results = filtered.slice(0, limit);
+
+  res.json({
+    documents: results.map(toApiDocumentWithUploaderFallback),
+    total: filtered.length,
+    limit,
+    offset,
+  });
+});
 /**
  * POST /documents/:id/attach-file
  *
