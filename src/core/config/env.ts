@@ -5,6 +5,7 @@ export const PLATFORM_DISPLAY_NAME = "Nxt Lvl Platform API";
 export const PLATFORM_SYSTEM_NAME = "nxt-lvl-platform";
 
 export const PORT = Number(process.env.PORT || 4000);
+export const HOST = process.env.HOST || "0.0.0.0";
 export const NODE_ENV = process.env.NODE_ENV || "development";
 export const API_PREFIX = "/api";
 export const UPLOAD_DIR = process.env.UPLOAD_DIR || path.resolve(process.cwd(), "uploads");

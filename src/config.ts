@@ -1,4 +1,5 @@
 export {
+  HOST,
   PORT,
   NODE_ENV,
   API_PREFIX,
