@@ -487,6 +487,12 @@ const PREDICTION_RULES: Array<{
     sourceHints: ["adp", "quickbooks"],
   },
   {
+    type: "statement",
+    filenameTokens: ["statement", "billing_summary", "acct_stmt"],
+    headerPhrases: ["statement", "account statement", "current balance", "statement period"],
+    sourceHints: ["bank", "utility", "vendor"],
+  },
+  {
     type: "receipt",
     filenameTokens: ["receipt", "ack", "donation_receipt"],
     headerPhrases: ["receipt", "payment received", "thank you for your donation"],
@@ -499,15 +505,39 @@ const PREDICTION_RULES: Array<{
     sourceHints: ["petty cash"],
   },
   {
+    type: "donation_form",
+    filenameTokens: ["donation_form", "contribution_form", "pledge_form", "reply_card"],
+    headerPhrases: ["donation form", "contribution form", "tax deductible", "donor information"],
+    sourceHints: ["donor", "campaign", "contribution"],
+  },
+  {
     type: "reimbursement_request",
     filenameTokens: ["reimbursement", "expense_report", "expense_claim"],
     headerPhrases: ["reimbursement", "expense report", "request for reimbursement"],
     sourceHints: ["employee expense"],
   },
   {
-    type: "payroll_record",
-    filenameTokens: ["payroll", "paystub", "pay_stub", "payslip"],
-    headerPhrases: ["pay stub", "earnings statement", "gross pay", "net pay"],
+    type: "payroll_liability_report",
+    filenameTokens: ["payroll_liability", "liability_report"],
+    headerPhrases: ["payroll liability", "tax liability", "federal withholding", "fica"],
+    sourceHints: ["adp", "gusto", "paychex"],
+  },
+  {
+    type: "payroll_detail_report",
+    filenameTokens: ["payroll_detail", "paystub", "pay_stub", "payslip"],
+    headerPhrases: ["payroll detail", "earnings detail", "gross pay", "net pay"],
+    sourceHints: ["adp", "gusto", "paychex"],
+  },
+  {
+    type: "payroll_worksheet",
+    filenameTokens: ["payroll_worksheet", "payroll_summary", "check_summary"],
+    headerPhrases: ["payroll worksheet", "payroll summary", "check summary", "earnings summary"],
+    sourceHints: ["adp", "gusto", "paychex"],
+  },
+  {
+    type: "timesheet",
+    filenameTokens: ["timesheet", "time_sheet"],
+    headerPhrases: ["timesheet", "hours worked", "time in", "time out"],
     sourceHints: ["adp", "gusto", "paychex"],
   },
   {
@@ -539,6 +569,12 @@ const PREDICTION_RULES: Array<{
     filenameTokens: ["check_image", "check_scan", "cheque"],
     headerPhrases: ["pay to the order of", "routing number", "account number"],
     sourceHints: ["bank"],
+  },
+  {
+    type: "remittance_advice",
+    filenameTokens: ["remittance", "payment_advice", "payment_stub"],
+    headerPhrases: ["remittance advice", "payment advice", "payment breakdown", "amount remitted"],
+    sourceHints: ["vendor", "invoice", "payment"],
   },
 ];
 
@@ -626,7 +662,17 @@ function buildTypePrediction(args: {
       score += 0.12;
       reasons.push("layout hint: banking fields");
     }
-    if ((rule.type === "invoice" || rule.type === "receipt" || rule.type === "voucher") && layoutHints.includes("currency_dense")) {
+    if ((
+      rule.type === "invoice"
+      || rule.type === "statement"
+      || rule.type === "receipt"
+      || rule.type === "voucher"
+      || rule.type === "reimbursement_request"
+      || rule.type === "remittance_advice"
+      || rule.type === "payroll_liability_report"
+      || rule.type === "payroll_detail_report"
+      || rule.type === "payroll_worksheet"
+    ) && layoutHints.includes("currency_dense")) {
       score += 0.1;
       reasons.push("layout hint: currency-heavy content");
     }
@@ -1919,20 +1965,23 @@ router.post("/review-queue/:id/reclassify", requireAuth, requireRole("reviewer")
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
 
   const body = req.body as Record<string, unknown>;
-  const newDocumentType = typeof body.documentType === "string" ? body.documentType.trim() : null;
+  const newType =
+    typeof body.type === "string"
+      ? body.type.trim()
+      : (typeof body.documentType === "string" ? body.documentType.trim() : null);
   const notes = typeof body.notes === "string" ? body.notes.trim() : undefined;
   const saveAsFingerprint = body.saveAsFingerprint === true;
   const createNewType = body.createNewType === true;
   const newTypeLabel = typeof body.newTypeLabel === "string" ? body.newTypeLabel.trim() : undefined;
 
-  if (!newDocumentType) {
-    res.status(400).json({ error: "documentType is required" });
+  if (!newType) {
+    res.status(400).json({ error: "type is required" });
     return;
   }
 
   // If admin wants to create a new custom type on-the-fly
   if (createNewType && newTypeLabel) {
-    const typeKey = newDocumentType.toLowerCase().replace(/\s+/g, "_");
+    const typeKey = newType.toLowerCase().replace(/\s+/g, "_");
     await prisma.chronicleDocumentType.upsert({
       where: {
         organizationId_programDomain_key: {
@@ -1960,7 +2009,7 @@ router.post("/review-queue/:id/reclassify", requireAuth, requireRole("reviewer")
 
   // If admin wants to save this doc's patterns as fingerprint hints
   if (saveAsFingerprint) {
-    const typeKey = newDocumentType.toLowerCase().replace(/\s+/g, "_");
+    const typeKey = newType.toLowerCase().replace(/\s+/g, "_");
     const typeRecord = await prisma.chronicleDocumentType.findFirst({
       where: {
         organizationId: tenantScope.organizationId,
@@ -1996,10 +2045,9 @@ router.post("/review-queue/:id/reclassify", requireAuth, requireRole("reviewer")
   await prisma.document.update({
     where: { id },
     data: {
-      documentType: newDocumentType,
+      type: newType,
       classificationStatus: "reviewed_mapped",
       classificationMatchedBy: "manual",
-      reviewRequired: false,
       needsReview: false,
       reviewedById: user?.userId ?? null,
       review: {
@@ -2008,7 +2056,7 @@ router.post("/review-queue/:id/reclassify", requireAuth, requireRole("reviewer")
         notes,
         reviewedBy: user?.email ?? "unknown",
         reviewedAt: new Date().toISOString(),
-        reclassifiedTo: newDocumentType,
+        reclassifiedTo: newType,
       },
       status: "archived",
     } as never,
@@ -2016,7 +2064,7 @@ router.post("/review-queue/:id/reclassify", requireAuth, requireRole("reviewer")
 
   logger.info("Document reclassified", {
     documentId: id,
-    newDocumentType,
+    newType,
     createNewType,
     saveAsFingerprint,
     organizationId: tenantScope.organizationId,
@@ -2034,7 +2082,7 @@ router.post("/review-queue/:id/reclassify", requireAuth, requireRole("reviewer")
 /**
  * GET /documents/search-meta
  * Lightweight search across the new metadata fields:
- * person, company, location, referenceNumber, sourceName, documentType, keyword
+ * person, company, location, referenceNumber, sourceName, type, keyword
  */
 router.get("/documents/search-meta", requireAuth, async (req, res) => {
   const tenantScope = getRequestTenantScope(req);
@@ -2045,7 +2093,10 @@ router.get("/documents/search-meta", requireAuth, async (req, res) => {
   const location = typeof q.location === "string" ? q.location.toLowerCase() : undefined;
   const referenceNumber = typeof q.referenceNumber === "string" ? q.referenceNumber.toLowerCase() : undefined;
   const sourceName = typeof q.sourceName === "string" ? q.sourceName.toLowerCase() : undefined;
-  const documentType = typeof q.documentType === "string" ? q.documentType : undefined;
+  const type =
+    typeof q.type === "string"
+      ? q.type
+      : (typeof q.documentType === "string" ? q.documentType : undefined);
   const keyword = typeof q.keyword === "string" ? q.keyword.toLowerCase() : undefined;
   const limit = Math.min(Number(q.limit ?? 50), 200);
   const offset = Number(q.offset ?? 0);
@@ -2055,7 +2106,7 @@ router.get("/documents/search-meta", requireAuth, async (req, res) => {
   const docs = await prisma.document.findMany({
     where: {
       ...scope,
-      ...(documentType ? { documentType } : {}),
+      ...(type ? { type } : {}),
     },
     orderBy: { createdAt: "desc" },
     take: limit * 3, // over-fetch to compensate for in-memory filtering

@@ -23,46 +23,58 @@
 // -----------------------------------------------------------------------------
 
 export const SYSTEM_DOCUMENT_TYPES = [
-  "invoice",
-  "receipt",
-  "letter",
-  "form",
-  "sign_in_sheet",
   "business_card",
-  "report",
-  "notice",
+  "form",
+  "invoice",
+  "statement",
   "voucher",
   "reimbursement_request",
-  "payroll_record",
+  "receipt",
+  "letter",
   "email_correspondence",
   "approval_message",
+  "notice",
+  "report",
+  "sign_in_sheet",
   "donation_acknowledgment",
+  "donation_form",
   "grant_award_letter",
   "deposit_confirmation",
   "check_image",
+  "payroll_liability_report",
+  "payroll_detail_report",
+  "payroll_worksheet",
+  "timesheet",
+  "remittance_advice",
   "other_unclassified",
 ] as const;
 
 export type SystemDocumentType = typeof SYSTEM_DOCUMENT_TYPES[number];
 
 export const DOCUMENT_TYPE_LABELS: Record<SystemDocumentType, string> = {
+  business_card:           "Business Card",
+  form:                    "Form / Application",
   invoice:                 "Invoice",
+  statement:               "Statement / Billing Summary",
+  voucher:                 "Voucher / Payment Approval",
+  reimbursement_request:   "Reimbursement Request",
   receipt:                 "Receipt / Acknowledgment",
   letter:                  "Letter / Correspondence",
-  form:                    "Form / Application",
-  sign_in_sheet:           "Sign-In Sheet / Roster",
-  business_card:           "Business Card",
-  report:                  "Report / Study",
-  notice:                  "Notice / Government Document",
-  voucher:                 "Voucher",
-  reimbursement_request:   "Reimbursement Request",
-  payroll_record:          "Payroll Record",
   email_correspondence:    "Email Correspondence",
   approval_message:        "Approval Message",
+  notice:                  "Notice / Government Document",
+  report:                  "Report / Study",
+  sign_in_sheet:           "Sign-In Sheet / Roster",
   donation_acknowledgment: "Donation Acknowledgment",
+  donation_form:           "Donation / Contribution Form",
   grant_award_letter:      "Grant Award Letter",
   deposit_confirmation:    "Deposit Confirmation",
   check_image:             "Check Image",
+  payroll_liability_report:"Payroll Liability Report",
+  payroll_detail_report:   "Payroll Detail Report",
+  payroll_worksheet:       "Payroll Worksheet / Summary",
+  timesheet:               "Employee Timesheet",
+  remittance_advice:       "Remittance / Payment Advice",
   other_unclassified:      "Other (Unclassified)",
 };
 
@@ -156,6 +168,16 @@ const TYPE_RULES: TypeRule[] = [
     weight: 1.0,
   },
   {
+    type: "statement",
+    keywords: [
+      "statement", "account statement", "billing summary",
+      "statement period", "previous balance", "current balance",
+      "ending balance", "payment due", "minimum payment",
+      "statement date", "service period",
+    ],
+    weight: 0.9,
+  },
+  {
     type: "voucher",
     keywords: [
       "voucher", "voucher number", "voucher #", "payment voucher",
@@ -175,12 +197,38 @@ const TYPE_RULES: TypeRule[] = [
     weight: 1.0,
   },
   {
-    type: "payroll_record",
+    type: "payroll_liability_report",
     keywords: [
-      "payroll", "pay stub", "pay slip", "earnings statement",
-      "gross pay", "net pay", "deductions", "fica", "federal withholding",
-      "state withholding", "ytd earnings", "pay period", "direct deposit",
-      "w-2", "1099",
+      "payroll liability", "liability report", "tax liability",
+      "federal withholding", "state withholding", "fica", "medicare",
+      "unemployment tax", "payroll taxes", "liability period",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: "payroll_detail_report",
+    keywords: [
+      "payroll detail", "employee payroll detail", "earnings detail",
+      "gross pay", "net pay", "deductions", "ytd earnings",
+      "pay period", "employee id", "hours worked",
+    ],
+    weight: 1.0,
+  },
+  {
+    type: "payroll_worksheet",
+    keywords: [
+      "payroll worksheet", "payroll summary", "check summary",
+      "payroll register", "total payroll", "department totals",
+      "earnings summary", "deduction summary", "payroll batch",
+    ],
+    weight: 0.95,
+  },
+  {
+    type: "timesheet",
+    keywords: [
+      "timesheet", "time sheet", "clock in", "clock out",
+      "time in", "time out", "hours worked", "regular hours",
+      "overtime", "employee hours", "daily hours",
     ],
     weight: 1.0,
   },
@@ -215,6 +263,16 @@ const TYPE_RULES: TypeRule[] = [
     weight: 1.0,
   },
   {
+    type: "donation_form",
+    keywords: [
+      "donation form", "contribution form", "donor information",
+      "gift amount", "pledge amount", "payment method",
+      "tax deductible", "donation details", "donor signature",
+      "campaign", "matching gift",
+    ],
+    weight: 1.0,
+  },
+  {
     type: "grant_award_letter",
     keywords: [
       "grant award", "award letter", "grant agreement", "award amount",
@@ -242,6 +300,16 @@ const TYPE_RULES: TypeRule[] = [
       "bank name", "negotiable instrument", "cents",
     ],
     weight: 0.9,
+  },
+  {
+    type: "remittance_advice",
+    keywords: [
+      "remittance", "remittance advice", "payment advice",
+      "payment remittance", "invoice payment", "amount remitted",
+      "apply payment", "reference invoice", "stub",
+      "payment breakdown", "advice number",
+    ],
+    weight: 0.95,
   },
 ];
 
@@ -289,6 +357,9 @@ export function classifyDocumentType(
     if (fn.includes("invoice") || fn.includes("inv_") || fn.includes("bill")) {
       return { documentType: "invoice", confidence: 0.75, classificationStatus: "known", classificationMatchedBy: "rule" };
     }
+    if (fn.includes("statement") || fn.includes("billing_summary") || fn.includes("acct_stmt")) {
+      return { documentType: "statement", confidence: 0.78, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
     if (fn.includes("receipt") || fn.includes("ack") || fn.includes("acknowledgment")) {
       return { documentType: "receipt", confidence: 0.75, classificationStatus: "known", classificationMatchedBy: "rule" };
     }
@@ -304,8 +375,20 @@ export function classifyDocumentType(
     if (fn.includes("reimbursement") || fn.includes("expense_report") || fn.includes("expense_claim")) {
       return { documentType: "reimbursement_request", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
     }
+    if (fn.includes("payroll_liability") || fn.includes("liability_report")) {
+      return { documentType: "payroll_liability_report", confidence: 0.84, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("payroll_detail") || fn.includes("detail_report")) {
+      return { documentType: "payroll_detail_report", confidence: 0.84, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("payroll_worksheet") || fn.includes("payroll_summary") || fn.includes("check_summary")) {
+      return { documentType: "payroll_worksheet", confidence: 0.82, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("timesheet") || fn.includes("time_sheet")) {
+      return { documentType: "timesheet", confidence: 0.82, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
     if (fn.includes("payroll") || fn.includes("pay_stub") || fn.includes("paystub") || fn.includes("payslip")) {
-      return { documentType: "payroll_record", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+      return { documentType: "payroll_detail_report", confidence: 0.76, classificationStatus: "known", classificationMatchedBy: "rule" };
     }
     if (fn.includes("email") || fn.includes("correspondence") || fn.includes("message")) {
       return { documentType: "email_correspondence", confidence: 0.75, classificationStatus: "known", classificationMatchedBy: "rule" };
@@ -324,6 +407,12 @@ export function classifyDocumentType(
     }
     if (fn.includes("donation_ack") || fn.includes("donation_acknowledgment") || fn.includes("donation_receipt")) {
       return { documentType: "donation_acknowledgment", confidence: 0.80, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("donation_form") || fn.includes("contribution_form") || fn.includes("pledge_form")) {
+      return { documentType: "donation_form", confidence: 0.82, classificationStatus: "known", classificationMatchedBy: "rule" };
+    }
+    if (fn.includes("remittance") || fn.includes("payment_advice")) {
+      return { documentType: "remittance_advice", confidence: 0.82, classificationStatus: "known", classificationMatchedBy: "rule" };
     }
   }
 

@@ -24,7 +24,22 @@ function asObjectArray(value: unknown): JsonObject[] {
   return [];
 }
 
+function asNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 export function toApiDocument(doc: Document) {
+  const rawDoc = doc as unknown as Record<string, unknown>;
+  const extraction = asObject(doc.extraction);
+  const typePrediction = asObject(extraction.typePrediction);
+  const candidateObjects = asObjectArray(typePrediction.candidates);
+  const alternates = candidateObjects.map((item) => ({
+    type: typeof item.type === "string" ? item.type : "",
+    label: typeof item.label === "string" ? item.label : "",
+    confidence: asNumber(item.confidence) ?? 0,
+    reasons: asStringArray(item.reasons),
+  }));
+
   return {
     id: doc.id,
     title: doc.title,
@@ -63,18 +78,30 @@ export function toApiDocument(doc: Document) {
     searchIndex: doc.searchIndex ?? undefined,
     needsReview: doc.needsReview,
     aiSummary: doc.aiSummary,
+    intake: {
+      predictedType:
+        (typeof typePrediction.predictedType === "string" ? typePrediction.predictedType : undefined)
+        ?? doc.type,
+      confidence:
+        asNumber(typePrediction.confidence)
+        ?? asNumber(rawDoc.classificationConfidence)
+        ?? null,
+      alternates,
+      tags: asStringArray(doc.tags),
+      routeDecision:
+        (typeof extraction.routeDecision === "string" ? extraction.routeDecision : undefined)
+        ?? null,
+    },
     // ── Lightweight metadata (Phase 2 search-first model) ──────────────
-    documentType: (doc as unknown as Record<string, unknown>).documentType as string | undefined ?? undefined,
-    sourceName: (doc as unknown as Record<string, unknown>).sourceName as string | undefined ?? undefined,
-    documentDate: (doc as unknown as Record<string, unknown>).documentDate as string | undefined ?? undefined,
-    metaPeople: asStringArray((doc as unknown as Record<string, unknown>).metaPeople),
-    metaCompanies: asStringArray((doc as unknown as Record<string, unknown>).metaCompanies),
-    metaLocations: asStringArray((doc as unknown as Record<string, unknown>).metaLocations),
-    metaReferenceNumbers: asStringArray((doc as unknown as Record<string, unknown>).metaReferenceNumbers),
-    metaOther: asStringArray((doc as unknown as Record<string, unknown>).metaOther),
-    classificationStatus: (doc as unknown as Record<string, unknown>).classificationStatus as string | undefined ?? undefined,
-    classificationMatchedBy: (doc as unknown as Record<string, unknown>).classificationMatchedBy as string | undefined ?? undefined,
-    classificationConfidence: (doc as unknown as Record<string, unknown>).classificationConfidence as number | undefined ?? undefined,
-    reviewRequired: Boolean((doc as unknown as Record<string, unknown>).reviewRequired),
+    sourceName: rawDoc.sourceName as string | undefined ?? undefined,
+    documentDate: rawDoc.documentDate as string | undefined ?? undefined,
+    metaPeople: asStringArray(rawDoc.metaPeople),
+    metaCompanies: asStringArray(rawDoc.metaCompanies),
+    metaLocations: asStringArray(rawDoc.metaLocations),
+    metaReferenceNumbers: asStringArray(rawDoc.metaReferenceNumbers),
+    metaOther: asStringArray(rawDoc.metaOther),
+    classificationStatus: rawDoc.classificationStatus as string | undefined ?? undefined,
+    classificationMatchedBy: rawDoc.classificationMatchedBy as string | undefined ?? undefined,
+    classificationConfidence: asNumber(rawDoc.classificationConfidence),
   };
 }

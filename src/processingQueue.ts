@@ -20,6 +20,7 @@ import {
   type ChronicleClassificationResult,
 } from "./core/services/documentIntelligence/coreApiClient.js";
 import {
+  classifyDocumentType,
   extractStepOneIntakeMetadata,
 } from "./core/services/documentIntelligence/lightweightMetadata.js";
 import { isR2Configured, isR2Key, downloadFromR2 } from "./core/storage/r2.js";
@@ -754,6 +755,64 @@ async function resolveStableTaxonomy(
 }
 
 // ---------------------------------------------------------------------------
+// Quick filename-based intake (synchronous, no I/O)
+// Produces a preliminary type prediction from filename + MIME type alone.
+// Runs before any file extraction so the UI can show a prediction immediately.
+// ---------------------------------------------------------------------------
+
+type QuickIntakeResult = {
+  typePrediction: {
+    predictedType: string;
+    confidence: number;
+    confidenceBand: "high" | "medium" | "low";
+    sourceName: null;
+    pageCount: number;
+    firstPageSnippet: string;
+    candidates: Array<{ type: string; label: string; confidence: number; reasons: string[] }>;
+    layoutHints: string[];
+  };
+  routeDecision: "auto_extract" | "confirmation_required" | "unknown_waiting_for_type";
+};
+
+function runFilenameIntake(
+  filename: string | null,
+  mimeType: string | null,
+  _title: string,
+): QuickIntakeResult {
+  // Use empty string as text so only filename heuristics fire
+  const classification = classifyDocumentType("", filename);
+
+  const layoutHints: string[] = [];
+  if (mimeType === "application/pdf") layoutHints.push("pdf");
+  else if (mimeType?.startsWith("image/")) layoutHints.push("image_file");
+  else if (mimeType?.startsWith("text/")) layoutHints.push("text_file");
+
+  const band: "high" | "medium" | "low" =
+    classification.confidence >= 0.78 ? "high"
+    : classification.confidence >= 0.52 ? "medium"
+    : "low";
+
+  const routeDecision: QuickIntakeResult["routeDecision"] =
+    band === "high" ? "auto_extract"
+    : classification.documentType === "other_unclassified" ? "unknown_waiting_for_type"
+    : "confirmation_required";
+
+  return {
+    typePrediction: {
+      predictedType: classification.documentType,
+      confidence: classification.confidence,
+      confidenceBand: band,
+      sourceName: null,
+      pageCount: 0,
+      firstPageSnippet: "",
+      candidates: [],
+      layoutHints,
+    },
+    routeDecision,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Timeout wrapper
 // ---------------------------------------------------------------------------
 
@@ -1166,21 +1225,51 @@ async function processSingleJob(): Promise<void> {
       ? existingExtractionMeta.forcedDocumentType.trim()
       : null;
 
+  // ── Quick filename-based intake (synchronous, no I/O) ─────────────────────
+  // Runs before heavy file-extraction so the UI immediately shows a preliminary
+  // prediction.  The full pipeline will overwrite typePrediction with richer
+  // data once extracted text is available.
+  const filenameIntake = runFilenameIntake(
+    updatedJob.document.originalFileName,
+    updatedJob.document.mimeType,
+    updatedJob.document.title,
+  );
+  // If the filename alone gives a high-confidence signal, write canonical
+  // type/review fields immediately so list views can reflect intake routing.
+  const earlyTypeFields: Record<string, unknown> = filenameIntake.typePrediction.confidence >= 0.78
+    ? {
+        type: filenameIntake.typePrediction.predictedType,
+        classificationStatus: "known",
+        classificationMatchedBy: "rule",
+        classificationConfidence: filenameIntake.typePrediction.confidence,
+        needsReview: false,
+      }
+    : {};
+
   await prisma.document.update({
     where: { id: job.documentId },
     data: {
-      processingStatus: "processing",
+      processingStatus: "intake_complete",
       ocrStatus: "in_progress",
       status: "extracting",
       statusUpdatedAt: new Date(),
+      ...earlyTypeFields,
       processingHistory: appendHistory(job.document.processingHistory, {
         timestamp: new Date().toISOString(),
-        action: "processing_start",
-        status: "processing",
-        details: `Processing started (attempt ${updatedJob.attempts})`,
+        action: "intake_complete",
+        status: "intake_complete",
+        details: `Processing started (attempt ${updatedJob.attempts}). Quick intake: predicted '${filenameIntake.typePrediction.predictedType}' (${Math.round(filenameIntake.typePrediction.confidence * 100)}%, ${filenameIntake.typePrediction.confidenceBand}). Route: ${filenameIntake.routeDecision}.`,
+        quickIntake: filenameIntake.typePrediction,
+        routeDecision: filenameIntake.routeDecision,
       }),
-      extraction: { status: "processing" },
-    },
+      extraction: {
+        ...existingExtractionMeta,
+        status: "intake_complete",
+        typePrediction: filenameIntake.typePrediction,
+        routeDecision: filenameIntake.routeDecision,
+        intakeTimestamp: new Date().toISOString(),
+      },
+    } as never,
   });
 
   logger.info("Processing job started", {
@@ -1488,6 +1577,16 @@ async function processSingleJob(): Promise<void> {
       (!forcedDocumentType && lightClassification.classificationStatus === "other_unclassified") ||
       (!forcedDocumentType && lightClassification.confidence < 0.4);
 
+    // Route decision — persisted in extraction so the UI can show why the
+    // document went to its current state and what the user should do next.
+    const finalRouteDecision: "auto_extract" | "confirmation_required" | "generic_fallback" | "manual_override" | "unknown_waiting_for_type" =
+      forcedDocumentType ? "manual_override"
+      : !needsReview && canAutoApprove ? "auto_extract"
+      : lightClassification.classificationStatus === "other_unclassified" ? "unknown_waiting_for_type"
+      : lightReviewRequired ? "confirmation_required"
+      : needsReview ? "confirmation_required"
+      : "generic_fallback";
+
     const searchHelpers = buildSearchHelpers(
       job.document.title,
       baseText,
@@ -1558,6 +1657,24 @@ async function processSingleJob(): Promise<void> {
           documentType: finalDocumentType,
           classificationConfidence: lightClassification.confidence,
           forcedDocumentType: forcedDocumentType ?? undefined,
+          // routeDecision: final semantics after full extraction + classification
+          routeDecision: finalRouteDecision,
+          // Upgrade typePrediction with real extraction data
+          typePrediction: {
+            predictedType: finalDocumentType,
+            confidence: lightClassification.confidence,
+            confidenceBand:
+              lightClassification.confidence >= 0.78 ? "high"
+              : lightClassification.confidence >= 0.52 ? "medium"
+              : "low",
+            sourceName: stepOneMetadata.organization.name ?? null,
+            pageCount: extraction.pageCount ?? 0,
+            firstPageSnippet: baseText.slice(0, 2500),
+            candidates: [],
+            layoutHints: (existingExtractionMeta.typePrediction as Record<string, unknown> | undefined)
+              ? ((existingExtractionMeta.typePrediction as Record<string, unknown>).layoutHints as string[] | undefined) ?? []
+              : [],
+          },
         },
         extractedMetadata: toPrismaJson({
           wordCount: extractedWordCount,
@@ -1641,7 +1758,6 @@ async function processSingleJob(): Promise<void> {
           lightweightConfidence: lightClassification.confidence,
         }),
         // ── Lightweight metadata fields (search-first model) ─────────────
-        documentType: lightClassification.documentType,
         sourceName: stepOneMetadata.organization.name ?? lightMeta.sourceName,
         documentDate: stepOneMetadata.documentDate.exactDate ?? lightMeta.documentDate,
         metaPeople: toPrismaJson(stepOneMetadata.people.map((p) => p.name)),
@@ -1655,7 +1771,6 @@ async function processSingleJob(): Promise<void> {
         classificationStatus: lightClassification.classificationStatus,
         classificationMatchedBy: lightClassification.classificationMatchedBy,
         classificationConfidence: lightClassification.confidence,
-        reviewRequired: lightReviewRequired,
       },
     });
 
