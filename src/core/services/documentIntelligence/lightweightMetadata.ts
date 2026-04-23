@@ -378,8 +378,210 @@ export interface LightweightMetadata {
   };
 }
 
+type StepOneSource =
+  | "header"
+  | "title"
+  | "table_headers"
+  | "keywords"
+  | "filename"
+  | "body"
+  | "fallback"
+  | "manual";
+
+export type StepOnePersonRole =
+  | "primary_subject"
+  | "sender"
+  | "recipient"
+  | "attendee"
+  | "staff_contact"
+  | "unknown_person_mention";
+
+export interface StepOnePerson {
+  name: string;
+  role: StepOnePersonRole;
+  confidence: number;
+}
+
+export interface StepOneIntakeMetadata {
+  documentId: string | null;
+  organization: {
+    name: string | null;
+    confidence: number;
+    source: StepOneSource;
+  };
+  documentType: {
+    value: string;
+    confidence: number;
+    source: StepOneSource[];
+  };
+  documentDate: {
+    exactDate: string | null;
+    month: number | null;
+    year: number | null;
+    confidence: number;
+    source: StepOneSource;
+  };
+  people: StepOnePerson[];
+  headerText: string;
+  classificationVersion: "v1";
+}
+
+export interface StepOneExtractionResult {
+  metadata: StepOneIntakeMetadata;
+  lightweight: LightweightMetadata;
+  classification: DocumentTypeClassification;
+  searchTextSeed: string;
+}
+
 function dedupe<T>(items: T[]): T[] {
   return [...new Set(items)].filter(Boolean);
+}
+
+function normalizeForStepOne(text: string): string {
+  return text
+    .replace(/\r/g, "")
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]+/g, " ")
+    .replace(/[\u200B-\u200D\uFEFF]/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractHeaderZone(text: string): string {
+  const lines = text
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return lines.slice(0, 24).join("\n");
+}
+
+function extractDateParts(value: string | null): { exactDate: string | null; month: number | null; year: number | null } {
+  if (!value) {
+    return { exactDate: null, month: null, year: null };
+  }
+
+  const iso = value.match(/^(20\d{2})-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/);
+  if (iso) {
+    return {
+      exactDate: value,
+      month: Number(iso[2]),
+      year: Number(iso[1]),
+    };
+  }
+
+  const parsed = new Date(value);
+  if (!Number.isNaN(parsed.getTime())) {
+    const month = parsed.getUTCMonth() + 1;
+    const year = parsed.getUTCFullYear();
+    const hasDay = /\b\d{1,2}\b/.test(value) && /\b20\d{2}\b/.test(value);
+    return {
+      exactDate: hasDay ? parsed.toISOString().slice(0, 10) : null,
+      month,
+      year,
+    };
+  }
+
+  const slash = value.match(/\b(0?[1-9]|1[0-2])\/(0?[1-9]|[12]\d|3[01])\/(20\d{2})\b/);
+  if (slash) {
+    return {
+      exactDate: `${slash[3]}-${String(slash[1]).padStart(2, "0")}-${String(slash[2]).padStart(2, "0")}`,
+      month: Number(slash[1]),
+      year: Number(slash[3]),
+    };
+  }
+
+  const year = value.match(/\b(20\d{2})\b/)?.[1];
+  return {
+    exactDate: null,
+    month: null,
+    year: year ? Number(year) : null,
+  };
+}
+
+function normalizePersonName(name: string): string {
+  return name.replace(/\s+/g, " ").trim();
+}
+
+function extractPeopleWithRoles(text: string, documentType: string): StepOnePerson[] {
+  const allPeople = extractPeople(text);
+  const result = new Map<string, StepOnePerson>();
+
+  const addPerson = (nameRaw: string, role: StepOnePersonRole, confidence: number) => {
+    const name = normalizePersonName(nameRaw);
+    if (!name) return;
+    const key = name.toLowerCase();
+    const existing = result.get(key);
+    if (!existing || confidence > existing.confidence) {
+      result.set(key, { name, role, confidence });
+    }
+  };
+
+  const senderMatches = text.match(/(?:from|prepared by|authorized by|reviewed by|submitted by|contact)[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)/gi) ?? [];
+  for (const raw of senderMatches) {
+    const name = raw.split(/[:\s]+/).slice(-2).join(" ");
+    addPerson(name, "sender", 0.84);
+  }
+
+  const recipientMatches = text.match(/(?:to|dear)[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)/gi) ?? [];
+  for (const raw of recipientMatches) {
+    const name = raw.split(/[:\s]+/).slice(-2).join(" ");
+    addPerson(name, "recipient", 0.8);
+  }
+
+  const primaryMatches = text.match(/(?:participant|client|applicant|patient|resident|employee|student)\s*name[:\s]+([A-Z][a-z]+\s+[A-Z][a-z]+)/gi) ?? [];
+  for (const raw of primaryMatches) {
+    const name = raw.split(/[:\s]+/).slice(-2).join(" ");
+    addPerson(name, "primary_subject", 0.88);
+  }
+
+  for (const person of allPeople) {
+    if (documentType === "sign_in_sheet") {
+      addPerson(person, "attendee", 0.72);
+    } else {
+      addPerson(person, "unknown_person_mention", 0.55);
+    }
+  }
+
+  return Array.from(result.values()).slice(0, 30);
+}
+
+function inferDocumentTypeSources(
+  headerText: string,
+  bodyText: string,
+  filename: string | null | undefined,
+  classificationMatchedBy: DocumentTypeClassification["classificationMatchedBy"],
+): StepOneSource[] {
+  const sources = new Set<StepOneSource>();
+
+  if (classificationMatchedBy === "manual") {
+    sources.add("manual");
+  }
+  if (classificationMatchedBy === "keyword") {
+    sources.add("keywords");
+  }
+  if (classificationMatchedBy === "rule") {
+    sources.add(filename ? "filename" : "title");
+  }
+  if (classificationMatchedBy === "source") {
+    sources.add("header");
+  }
+  if (classificationMatchedBy === "fingerprint") {
+    sources.add("keywords");
+    sources.add("header");
+  }
+
+  if (/\b(invoice|receipt|statement|intake form|sign\s*-?in|attendance|donation|grant|report|notice)\b/i.test(headerText)) {
+    sources.add("title");
+  }
+  if (/\b(name|signature|date|amount|total|account|reference)\b/i.test(bodyText)) {
+    sources.add("table_headers");
+  }
+
+  if (sources.size === 0) {
+    sources.add("fallback");
+  }
+
+  return Array.from(sources);
 }
 
 function extractDocumentDate(text: string): { date: string | null; confidence: number } {
@@ -615,5 +817,80 @@ export function extractLightweightMetadata(
       sourceName: sourceConf,
       documentDate: dateConf,
     },
+  };
+}
+
+export function extractStepOneIntakeMetadata(input: {
+  text: string;
+  filename?: string | null;
+  documentId?: string | null;
+  fingerprintTypes?: Array<{ key: string; phrases: string[]; companies: string[] }>;
+}): StepOneExtractionResult {
+  const normalizedText = normalizeForStepOne(input.text);
+  const headerText = extractHeaderZone(normalizedText);
+  const lightweight = extractLightweightMetadata(normalizedText, input.filename);
+
+  // Header-first classification, then fallback to full text if confidence is weak.
+  const headerClassification = classifyDocumentType(headerText, input.filename, input.fingerprintTypes);
+  const classification =
+    headerClassification.confidence >= 0.4
+      ? headerClassification
+      : classifyDocumentType(normalizedText, input.filename, input.fingerprintTypes);
+
+  const orgFromHeader = extractSourceName(headerText, input.filename);
+  const orgFromBody = orgFromHeader.name ? orgFromHeader : extractSourceName(normalizedText, input.filename);
+  const dateFromHeader = extractDocumentDate(headerText);
+  const dateCandidate = dateFromHeader.date ? dateFromHeader : extractDocumentDate(normalizedText);
+  const dateParts = extractDateParts(dateCandidate.date);
+
+  const people = extractPeopleWithRoles(normalizedText, classification.documentType);
+  const documentTypeSources = inferDocumentTypeSources(
+    headerText,
+    normalizedText,
+    input.filename,
+    classification.classificationMatchedBy,
+  );
+
+  const metadata: StepOneIntakeMetadata = {
+    documentId: input.documentId ?? null,
+    organization: {
+      name: orgFromBody.name,
+      confidence: orgFromBody.confidence,
+      source: orgFromHeader.name ? "header" : (input.filename ? "filename" : "body"),
+    },
+    documentType: {
+      value: classification.documentType,
+      confidence: classification.confidence,
+      source: documentTypeSources,
+    },
+    documentDate: {
+      exactDate: dateParts.exactDate,
+      month: dateParts.month,
+      year: dateParts.year,
+      confidence: dateCandidate.confidence,
+      source: dateFromHeader.date ? "header" : "body",
+    },
+    people,
+    headerText,
+    classificationVersion: "v1",
+  };
+
+  const searchTextSeed = [
+    metadata.organization.name ?? "",
+    metadata.documentType.value,
+    metadata.documentDate.exactDate ?? "",
+    metadata.documentDate.month ? String(metadata.documentDate.month) : "",
+    metadata.documentDate.year ? String(metadata.documentDate.year) : "",
+    ...metadata.people.map((p) => p.name),
+    headerText,
+  ]
+    .join(" ")
+    .trim();
+
+  return {
+    metadata,
+    lightweight,
+    classification,
+    searchTextSeed,
   };
 }

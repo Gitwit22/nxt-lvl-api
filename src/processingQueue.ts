@@ -20,8 +20,7 @@ import {
   type ChronicleClassificationResult,
 } from "./core/services/documentIntelligence/coreApiClient.js";
 import {
-  extractLightweightMetadata,
-  classifyDocumentType,
+  extractStepOneIntakeMetadata,
 } from "./core/services/documentIntelligence/lightweightMetadata.js";
 import { isR2Configured, isR2Key, downloadFromR2 } from "./core/storage/r2.js";
 import {
@@ -1433,11 +1432,6 @@ async function processSingleJob(): Promise<void> {
     // Lightweight metadata extraction (Phase 2 — search-first model)
     // Runs on every document regardless of file type or extraction quality.
     // ─────────────────────────────────────────────────────────────────────
-    const lightMeta = extractLightweightMetadata(
-      baseText,
-      job.document.originalFileName ?? null,
-    );
-
     // Fetch any learned type fingerprints for this tenant so classification
     // can benefit from admin-reviewed custom types.
     let typeFingerprints: Array<{ key: string; phrases: string[]; companies: string[] }> = [];
@@ -1461,11 +1455,14 @@ async function processSingleJob(): Promise<void> {
       // Non-fatal: fingerprint table may not exist yet (migration pending)
     }
 
-    const lightClassificationRaw = classifyDocumentType(
-      baseText,
-      job.document.originalFileName ?? null,
-      typeFingerprints,
-    );
+    const stepOne = extractStepOneIntakeMetadata({
+      text: baseText,
+      filename: job.document.originalFileName ?? null,
+      documentId: job.documentId,
+      fingerprintTypes: typeFingerprints,
+    });
+    const lightMeta = stepOne.lightweight;
+    const lightClassificationRaw = stepOne.classification;
     const lightClassification = forcedDocumentType
       ? {
           documentType: forcedDocumentType,
@@ -1474,6 +1471,17 @@ async function processSingleJob(): Promise<void> {
           classificationMatchedBy: "manual" as const,
         }
       : lightClassificationRaw;
+
+    const stepOneMetadata = forcedDocumentType
+      ? {
+          ...stepOne.metadata,
+          documentType: {
+            value: forcedDocumentType,
+            confidence: Math.max(0.9, stepOne.metadata.documentType.confidence),
+            source: ["manual" as const],
+          },
+        }
+      : stepOne.metadata;
 
     // Determine whether this document needs review based on new classification
     const lightReviewRequired =
@@ -1560,6 +1568,7 @@ async function processSingleJob(): Promise<void> {
           autoTopics: autoLabels.topicLabels,
           entities: autoLabels.entities,
           timeLabel: autoLabels.timeLabel,
+          stepOne: stepOneMetadata,
         }),
         classificationResult: toPrismaJson({
           method: aiDocumentType ? "ai_assisted" : "rule_based",
@@ -1591,6 +1600,15 @@ async function processSingleJob(): Promise<void> {
         }),
         searchIndex: toPrismaJson({
           ...searchHelpers,
+          stepOne: {
+            organizationName: stepOneMetadata.organization.name,
+            documentType: stepOneMetadata.documentType.value,
+            documentDate: stepOneMetadata.documentDate,
+            people: stepOneMetadata.people,
+            headerText: stepOneMetadata.headerText,
+            searchTextSeed: stepOne.searchTextSeed,
+            classificationVersion: stepOneMetadata.classificationVersion,
+          },
           relationships: {
             duplicateOf: similarity.duplicateOf,
             similarTo: similarity.similarTo,
@@ -1624,13 +1642,16 @@ async function processSingleJob(): Promise<void> {
         }),
         // ── Lightweight metadata fields (search-first model) ─────────────
         documentType: lightClassification.documentType,
-        sourceName: lightMeta.sourceName,
-        documentDate: lightMeta.documentDate,
-        metaPeople: toPrismaJson(lightMeta.people),
+        sourceName: stepOneMetadata.organization.name ?? lightMeta.sourceName,
+        documentDate: stepOneMetadata.documentDate.exactDate ?? lightMeta.documentDate,
+        metaPeople: toPrismaJson(stepOneMetadata.people.map((p) => p.name)),
         metaCompanies: toPrismaJson(lightMeta.companies),
         metaLocations: toPrismaJson(lightMeta.locations),
         metaReferenceNumbers: toPrismaJson(lightMeta.referenceNumbers),
-        metaOther: toPrismaJson(lightMeta.other),
+        metaOther: toPrismaJson([
+          ...lightMeta.other,
+          ...stepOneMetadata.people.map((p) => `${p.role}:${p.name}`),
+        ]),
         classificationStatus: lightClassification.classificationStatus,
         classificationMatchedBy: lightClassification.classificationMatchedBy,
         classificationConfidence: lightClassification.confidence,
