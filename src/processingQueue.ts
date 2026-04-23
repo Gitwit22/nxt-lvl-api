@@ -33,6 +33,7 @@ import type { TenantScope } from "./tenant.js";
 
 let workerRunning = false;
 let workerTimer: NodeJS.Timeout | null = null;
+let workerLastTickAt: string | null = null;
 
 // ---------------------------------------------------------------------------
 // Extraction result shape
@@ -1684,6 +1685,7 @@ async function processSingleJob(): Promise<void> {
 async function tick(): Promise<void> {
   if (workerRunning) return;
   workerRunning = true;
+  workerLastTickAt = new Date().toISOString();
   try {
     await processSingleJob();
   } catch (err) {
@@ -1732,6 +1734,18 @@ export function stopProcessingWorker(): void {
   clearInterval(workerTimer);
   workerTimer = null;
   logger.info("Processing worker stopped");
+}
+
+export function getProcessingWorkerState(): {
+  started: boolean;
+  busy: boolean;
+  lastTickAt: string | null;
+} {
+  return {
+    started: Boolean(workerTimer),
+    busy: workerRunning,
+    lastTickAt: workerLastTickAt,
+  };
 }
 
 // Exported for tests

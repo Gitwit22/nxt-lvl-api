@@ -22,6 +22,8 @@ export const LLAMA_CLOUD_API_KEY = process.env.LLAMA_CLOUD_API_KEY || "";
 export const DOC_INTEL_API_BASE_URL = process.env.DOC_INTEL_API_BASE_URL || "";
 export const DOC_INTEL_API_TOKEN = process.env.DOC_INTEL_API_TOKEN || "";
 export const DOC_INTEL_TIMEOUT_MS = Number(process.env.DOC_INTEL_TIMEOUT_MS || 60_000);
+export const HEALTH_SYSTEM_TIMEOUT_MS = Number(process.env.HEALTH_SYSTEM_TIMEOUT_MS || 2500);
+export const HEALTH_SYSTEM_TOKEN = process.env.HEALTH_SYSTEM_TOKEN || "";
 export const ENABLE_DOC_INTEL_CLASSIFY = process.env.ENABLE_DOC_INTEL_CLASSIFY !== "false";
 
 // Llama Cloud — document classification
