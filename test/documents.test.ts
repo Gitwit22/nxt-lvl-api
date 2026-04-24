@@ -2,86 +2,58 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import request from "supertest";
 
 // --- Prisma mock (before app import) ---
-vi.mock("../src/db.js", () => {
-  const doc = {
-    id: "doc-1",
-    organizationId: "default-org",
-    programDomain: "community-chronicle",
-    title: "Test Doc",
-    description: "",
-    author: "Test",
-    year: 2024,
-    month: null,
-    category: "General",
-    type: "Report",
-    financialCategory: null,
-    financialDocumentType: null,
-    tags: [],
-    keywords: [],
-    originalFileName: null,
-    mimeType: null,
-    fileSize: null,
-    fileUrl: "#",
-    filePath: null,
-    processingStatus: "processed",
-    ocrStatus: "not_needed",
-    extractedText: "",
-    extractedMetadata: {},
-    classificationResult: null,
-    intakeSource: "manual_entry",
-    sourceReference: null,
-    department: null,
-    createdAt: new Date("2024-01-01"),
-    updatedAt: new Date("2024-01-01"),
-    importedAt: new Date("2024-01-01"),
-    processingHistory: [],
-    status: "archived",
-    statusUpdatedAt: null,
-    auditTrail: [],
-    extraction: null,
-    duplicateCheck: null,
-    review: { required: false },
-    searchIndex: null,
-    needsReview: false,
-    aiSummary: "",
-    createdByUserId: null,
-    uploadedById: null,
-    reviewedById: null,
-  };
+const prismaMock = vi.hoisted(() => ({
+  $queryRaw: vi.fn().mockResolvedValue([]),
+  document: {
+    findMany: vi.fn(),
+    findFirst: vi.fn(),
+    findUnique: vi.fn(),
+    findUniqueOrThrow: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    delete: vi.fn(),
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+  },
+  processingJob: {
+    create: vi.fn().mockResolvedValue({ id: "job-1" }),
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+  },
+  user: {
+    findUnique: vi.fn(),
+    count: vi.fn().mockResolvedValue(1),
+    create: vi.fn(),
+  },
+}));
 
-  return {
-    prisma: {
-      $queryRaw: vi.fn().mockResolvedValue([]),
-      document: {
-        findMany: vi.fn().mockResolvedValue([doc]),
-        findFirst: vi.fn().mockResolvedValue(doc),
-        findUnique: vi.fn().mockResolvedValue(doc),
-        findUniqueOrThrow: vi.fn().mockResolvedValue(doc),
-        create: vi.fn().mockResolvedValue(doc),
-        update: vi.fn().mockResolvedValue(doc),
-        delete: vi.fn().mockResolvedValue(doc),
-        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
-      },
-      processingJob: {
-        create: vi.fn().mockResolvedValue({ id: "job-1" }),
-        deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
-      },
-      user: {
-        findUnique: vi.fn(),
-        count: vi.fn().mockResolvedValue(1),
-        create: vi.fn(),
-      },
-    },
-  };
-});
+vi.mock("../src/core/db/prisma.js", () => ({
+  prisma: prismaMock,
+}));
+
+vi.mock("../src/db.js", () => ({
+  prisma: prismaMock,
+}));
 
 vi.mock("../src/processingQueue.js", () => ({
   enqueueProcessing: vi.fn().mockResolvedValue(undefined),
 }));
 
+const getDownloadUrlMock = vi.hoisted(() => vi.fn().mockResolvedValue("https://signed.example.com/doc-1"));
+
+vi.mock("../src/core/storage/storageResolver.js", () => ({
+  resolveStorageAdapter: vi.fn().mockResolvedValue({
+    adapter: {
+      backendId: "r2",
+      ownsKey: vi.fn().mockReturnValue(true),
+      getDownloadUrl: getDownloadUrlMock,
+    },
+  }),
+  StorageConfigError: class StorageConfigError extends Error {},
+}));
+
 import { app } from "../src/app.js";
-import { prisma } from "../src/db.js";
+import { prisma } from "../src/core/db/prisma.js";
 import { signToken } from "../src/auth.js";
+import { resolveStorageAdapter } from "../src/core/storage/storageResolver.js";
 
 // Token helpers
 const uploaderToken = () =>
@@ -146,6 +118,7 @@ beforeEach(() => {
   (prisma.document.create as ReturnType<typeof vi.fn>).mockResolvedValue(doc);
   (prisma.document.update as ReturnType<typeof vi.fn>).mockResolvedValue(doc);
   (prisma.$queryRaw as ReturnType<typeof vi.fn>).mockResolvedValue([]);
+  getDownloadUrlMock.mockResolvedValue("https://signed.example.com/doc-1");
 });
 
 // ---------------------------------------------------------------------------
@@ -303,7 +276,8 @@ describe("DELETE /api/documents/:id", () => {
     const res = await request(app)
       .delete("/api/documents/doc-1")
       .set("Authorization", adminToken());
-    expect(res.status).toBe(204);
+    expect(res.status).toBe(200);
+    expect(res.body.deleted).toBe(true);
   });
 });
 
@@ -316,14 +290,61 @@ describe("POST /api/documents/:id/retry", () => {
     expect(res.status).toBe(401);
   });
 
-  it("returns 403 for reviewer", async () => {
+  it("returns 403 for uploader", async () => {
     const res = await request(app)
       .post("/api/documents/doc-1/retry")
-      .set("Authorization", reviewerToken());
+      .set("Authorization", uploaderToken());
     expect(res.status).toBe(403);
   });
 
-  it("allows admin to retry", async () => {
+  it("allows admin to retry when file exists", async () => {
+    (prisma.document.findFirst as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: "doc-1",
+      organizationId: "default-org",
+      programDomain: "community-chronicle",
+      title: "Test Doc",
+      description: "",
+      author: "Test",
+      year: 2024,
+      month: null,
+      category: "General",
+      type: "Report",
+      financialCategory: null,
+      financialDocumentType: null,
+      tags: [],
+      keywords: [],
+      originalFileName: "test.pdf",
+      mimeType: "application/pdf",
+      fileSize: 10,
+      fileUrl: "#",
+      filePath: "docs/doc-1.pdf",
+      processingStatus: "processed",
+      ocrStatus: "not_needed",
+      extractedText: "",
+      extractedMetadata: {},
+      classificationResult: null,
+      intakeSource: "manual_entry",
+      sourceReference: null,
+      department: null,
+      createdAt: new Date("2024-01-01"),
+      updatedAt: new Date("2024-01-01"),
+      importedAt: new Date("2024-01-01"),
+      processingHistory: [],
+      status: "archived",
+      statusUpdatedAt: null,
+      auditTrail: [],
+      extraction: null,
+      duplicateCheck: null,
+      review: { required: false },
+      searchIndex: null,
+      needsReview: false,
+      aiSummary: "",
+      createdByUserId: null,
+      uploadedById: null,
+      reviewedById: null,
+      uploadedBy: null,
+    });
+
     const res = await request(app)
       .post("/api/documents/doc-1/retry")
       .set("Authorization", adminToken());
@@ -372,5 +393,124 @@ describe("POST /api/review-queue/:id/resolve", () => {
       .set("Authorization", reviewerToken())
       .send({ resolution: "approved" });
     expect(res.status).toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/documents/search
+// ---------------------------------------------------------------------------
+describe("GET /api/documents/search", () => {
+  it("returns normalized search payload", async () => {
+    const res = await request(app)
+      .get("/api/documents/search?q=test&limit=10&offset=0")
+      .set("Authorization", reviewerToken());
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.results)).toBe(true);
+    expect(typeof res.body.total).toBe("number");
+    expect(res.body.limit).toBe(10);
+    expect(res.body.offset).toBe(0);
+  });
+
+  it("applies tenant scope in prisma query", async () => {
+    await request(app)
+      .get("/api/documents/search?q=test")
+      .set("Authorization", reviewerToken());
+
+    expect(prisma.document.findMany).toHaveBeenCalled();
+    const firstCallArg = (prisma.document.findMany as ReturnType<typeof vi.fn>).mock.calls[0]?.[0];
+    expect(firstCallArg?.where?.organizationId).toBe("default-org");
+    expect(firstCallArg?.where?.programDomain).toBe("community-chronicle");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/documents/:id/preview
+// ---------------------------------------------------------------------------
+describe("GET /api/documents/:id/preview", () => {
+  it("returns text preview without generating a signed original URL", async () => {
+    const res = await request(app)
+      .get("/api/documents/doc-1/preview")
+      .set("Authorization", reviewerToken());
+
+    expect(res.status).toBe(200);
+    expect(res.body.id).toBe("doc-1");
+    expect(resolveStorageAdapter).not.toHaveBeenCalled();
+    expect(getDownloadUrlMock).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/documents/:id/original-url
+// ---------------------------------------------------------------------------
+describe("GET /api/documents/:id/original-url", () => {
+  it("generates a signed URL only when endpoint is called", async () => {
+    (prisma.document.findFirst as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      id: "doc-1",
+      organizationId: "default-org",
+      programDomain: "community-chronicle",
+      title: "Test Doc",
+      description: "",
+      author: "Test",
+      year: 2024,
+      month: null,
+      category: "General",
+      type: "Report",
+      financialCategory: null,
+      financialDocumentType: null,
+      tags: [],
+      keywords: [],
+      originalFileName: "test.pdf",
+      mimeType: "application/pdf",
+      fileSize: 10,
+      fileUrl: "#",
+      filePath: "docs/doc-1.pdf",
+      processingStatus: "processed",
+      ocrStatus: "not_needed",
+      extractedText: "",
+      extractedMetadata: {},
+      classificationResult: null,
+      intakeSource: "manual_entry",
+      sourceReference: null,
+      department: null,
+      createdAt: new Date("2024-01-01"),
+      updatedAt: new Date("2024-01-01"),
+      importedAt: new Date("2024-01-01"),
+      processingHistory: [],
+      status: "archived",
+      statusUpdatedAt: null,
+      auditTrail: [],
+      extraction: null,
+      duplicateCheck: null,
+      review: { required: false },
+      searchIndex: null,
+      needsReview: false,
+      aiSummary: "",
+      createdByUserId: null,
+      uploadedById: null,
+      reviewedById: null,
+      documentType: null,
+      sourceName: null,
+      documentDate: null,
+      metaPeople: null,
+      metaCompanies: null,
+      metaLocations: null,
+      metaReferenceNumbers: null,
+      metaOther: null,
+      classificationStatus: null,
+      classificationMatchedBy: null,
+      classificationConfidence: null,
+      reviewRequired: false,
+    });
+
+    const res = await request(app)
+      .get("/api/documents/doc-1/original-url")
+      .set("Authorization", reviewerToken());
+
+    expect(res.status).toBe(200);
+    expect(res.body.url).toContain("signed.example.com");
+    expect(typeof res.body.expiresAt).toBe("string");
+    expect(resolveStorageAdapter).toHaveBeenCalled();
+    expect(getDownloadUrlMock).toHaveBeenCalledTimes(1);
   });
 });

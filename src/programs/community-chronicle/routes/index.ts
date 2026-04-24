@@ -454,6 +454,45 @@ function parseFilters(query: Record<string, unknown>) {
   };
 }
 
+function parseCommaList(value: unknown): string[] {
+  if (typeof value !== "string") return [];
+  return value
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function coerceStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item));
+}
+
+function extractMarkdownCandidate(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const source = value as Record<string, unknown>;
+
+  if (typeof source.markdown === "string" && source.markdown.trim().length > 0) {
+    return source.markdown;
+  }
+
+  if (typeof source.textMarkdown === "string" && source.textMarkdown.trim().length > 0) {
+    return source.textMarkdown;
+  }
+
+  if (typeof source.contentMarkdown === "string" && source.contentMarkdown.trim().length > 0) {
+    return source.contentMarkdown;
+  }
+
+  return null;
+}
+
+function toPreviewSnippet(text: string, maxLength = 240): string {
+  const compact = text.replace(/\s+/g, " ").trim();
+  if (!compact) return "";
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, maxLength).trim()}...`;
+}
+
 type PredictionConfidenceBand = "high" | "medium" | "low";
 
 type PredictionCandidate = {
@@ -974,6 +1013,132 @@ router.get("/documents", requireAuth, async (req, res) => {
   res.json(filtered.map(toApiDocumentWithUploaderFallback));
 });
 
+router.get("/documents/search", requireAuth, async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+  const tags = parseCommaList(req.query.tags).map((tag) => tag.toLowerCase());
+  const type = typeof req.query.type === "string" ? req.query.type.trim() : "";
+  const person = typeof req.query.person === "string" ? req.query.person.trim().toLowerCase() : "";
+  const organization = typeof req.query.organization === "string"
+    ? req.query.organization.trim().toLowerCase()
+    : "";
+  const dateFrom = typeof req.query.dateFrom === "string" ? req.query.dateFrom : "";
+  const dateTo = typeof req.query.dateTo === "string" ? req.query.dateTo : "";
+  const limit = Math.min(Math.max(parseNumber(req.query.limit) ?? 20, 1), 100);
+  const offset = Math.max(parseNumber(req.query.offset) ?? 0, 0);
+
+  const baseScope = getDocumentScope(tenantScope);
+
+  const docs = (await prisma.document.findMany({
+    where: {
+      ...baseScope,
+      ...(q
+        ? {
+            OR: [
+              { title: { contains: q, mode: "insensitive" } },
+              { description: { contains: q, mode: "insensitive" } },
+              { extractedText: { contains: q, mode: "insensitive" } },
+            ],
+          }
+        : {}),
+    },
+    orderBy: { createdAt: "desc" },
+  })) as Array<Record<string, unknown>>;
+
+  const fromDate = dateFrom ? new Date(dateFrom) : null;
+  const toDate = dateTo ? new Date(dateTo) : null;
+
+  const filtered = docs.filter((doc) => {
+    const docType = String(doc["type"] ?? "");
+    const docTypeCanonical = String(doc["documentType"] ?? "");
+    const docTags = coerceStringArray(doc["tags"]).map((tag) => tag.toLowerCase());
+    const people = coerceStringArray(doc["metaPeople"]).map((entry) => entry.toLowerCase());
+    const companies = coerceStringArray(doc["metaCompanies"]).map((entry) => entry.toLowerCase());
+    const sourceName = String(doc["sourceName"] ?? "").toLowerCase();
+
+    if (type && docType !== type && docTypeCanonical !== type) {
+      return false;
+    }
+
+    const qNeedle = q.toLowerCase();
+    if (qNeedle) {
+      const qHaystack = [
+        String(doc["title"] ?? ""),
+        String(doc["description"] ?? ""),
+        String(doc["extractedText"] ?? ""),
+        String(doc["sourceName"] ?? ""),
+        ...docTags,
+        ...people,
+        ...companies,
+      ]
+        .join(" ")
+        .toLowerCase();
+      if (!qHaystack.includes(qNeedle)) return false;
+    }
+
+    if (tags.length > 0 && !tags.every((tag) => docTags.some((docTag) => docTag.includes(tag)))) {
+      return false;
+    }
+
+    if (person && !people.some((entry) => entry.includes(person))) {
+      return false;
+    }
+
+    if (
+      organization &&
+      !sourceName.includes(organization) &&
+      !companies.some((entry) => entry.includes(organization))
+    ) {
+      return false;
+    }
+
+    if (fromDate || toDate) {
+      const rawDate = String(doc["documentDate"] ?? "") || null;
+      if (!rawDate) return false;
+      const parsed = new Date(rawDate);
+      if (Number.isNaN(parsed.getTime())) return false;
+      if (fromDate && parsed < fromDate) return false;
+      if (toDate && parsed > toDate) return false;
+    }
+
+    return true;
+  });
+
+  const paged = filtered.slice(offset, offset + limit);
+
+  res.json({
+    results: paged.map((doc) => {
+      const text = String(doc["extractedText"] ?? "").trim();
+      const markdown = extractMarkdownCandidate(doc["extractedMetadata"]) ?? extractMarkdownCandidate(doc["searchIndex"]);
+      const createdAtRaw = doc["createdAt"];
+      const createdAtIso = createdAtRaw instanceof Date
+        ? createdAtRaw.toISOString()
+        : new Date(String(createdAtRaw ?? "")).toISOString();
+      return {
+        id: String(doc["id"]),
+        title: String(doc["title"] ?? "Untitled"),
+        filename: String(doc["originalFileName"] ?? "") || null,
+        documentType: String(doc["documentType"] ?? doc["type"] ?? "unknown_document"),
+        tags: coerceStringArray(doc["tags"]),
+        entities: {
+          people: coerceStringArray(doc["metaPeople"]),
+          organizations: coerceStringArray(doc["metaCompanies"]),
+          locations: coerceStringArray(doc["metaLocations"]),
+          references: coerceStringArray(doc["metaReferenceNumbers"]),
+        },
+        uploadedAt: createdAtIso,
+        documentDate: String(doc["documentDate"] ?? "") || null,
+        snippet: toPreviewSnippet(text || markdown || ""),
+        markdownAvailable: Boolean(markdown && markdown.trim().length > 0),
+        originalAvailable: Boolean(doc["filePath"]),
+      };
+    }),
+    total: filtered.length,
+    limit,
+    offset,
+  });
+});
+
 router.get("/documents/:id", requireAuth, async (req, res) => {
   const tenantScope = getRequestTenantScope(req);
   const id = parseRouteId(req.params.id);
@@ -988,6 +1153,47 @@ router.get("/documents/:id", requireAuth, async (req, res) => {
     return;
   }
   res.json(toApiDocumentWithUploaderFallback(doc));
+});
+
+router.get("/documents/:id/preview", requireAuth, async (req, res) => {
+  const id = parseRouteId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Invalid document id" });
+    return;
+  }
+
+  const tenantScope = getRequestTenantScope(req);
+  const doc = await findScopedDocument(id, tenantScope);
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const docRecord = doc as Record<string, unknown>;
+  const markdown = extractMarkdownCandidate(docRecord["extractedMetadata"]) ?? extractMarkdownCandidate(docRecord["searchIndex"]);
+  const text = String(docRecord["extractedText"] ?? "").trim();
+  const previewText = text || markdown || "";
+
+  const maxChars = 12000;
+  const limitedText = previewText.slice(0, maxChars);
+  const limitedMarkdown = markdown ? markdown.slice(0, maxChars) : null;
+
+  res.json({
+    id: String(docRecord["id"]),
+    title: String(docRecord["title"] ?? "Untitled"),
+    filename: String(docRecord["originalFileName"] ?? "") || null,
+    documentType: String(docRecord["documentType"] ?? docRecord["type"] ?? "unknown_document"),
+    uploadedAt: (docRecord["createdAt"] instanceof Date
+      ? docRecord["createdAt"].toISOString()
+      : new Date(String(docRecord["createdAt"] ?? "")).toISOString()),
+    documentDate: String(docRecord["documentDate"] ?? "") || null,
+    previewText: limitedText,
+    previewMarkdown: limitedMarkdown,
+    snippet: toPreviewSnippet(previewText),
+    markdownAvailable: Boolean(markdown && markdown.trim().length > 0),
+    originalAvailable: Boolean(docRecord["filePath"]),
+    truncated: previewText.length > maxChars,
+  });
 });
 
 router.get("/documents/:id/download", requireAuth, async (req, res) => {
@@ -1061,6 +1267,42 @@ router.get("/documents/:id/resolve", requireAuth, async (req, res) => {
 
   res.json({
     url: signedUrl,
+    filename: doc.originalFileName ?? null,
+    disposition,
+  });
+});
+
+router.get("/documents/:id/original-url", requireAuth, async (req, res) => {
+  const id = parseRouteId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Invalid document id" });
+    return;
+  }
+
+  const tenantScope = getRequestTenantScope(req);
+  const doc = await findScopedDocument(id, tenantScope);
+  if (!doc?.filePath) {
+    res.status(404).json({ error: "File not found" });
+    return;
+  }
+
+  const storage = await resolveStorageAdapter(tenantScope);
+  if (!storage.adapter.ownsKey(doc.filePath) || storage.adapter.backendId === "local") {
+    res.status(409).json({ error: "original-url endpoint is only available for R2-backed files" });
+    return;
+  }
+
+  const disposition = req.query.disposition === "inline" ? "inline" : "attachment";
+  const signedUrl = await storage.adapter.getDownloadUrl(doc.filePath, {
+    filename: doc.originalFileName ?? undefined,
+    disposition,
+  });
+
+  const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+  res.json({
+    url: signedUrl,
+    expiresAt,
     filename: doc.originalFileName ?? null,
     disposition,
   });
@@ -2103,7 +2345,7 @@ router.get("/documents/search-meta", requireAuth, async (req, res) => {
 
   const scope = getDocumentScope(tenantScope);
 
-  const docs = await prisma.document.findMany({
+  const docs = (await prisma.document.findMany({
     where: {
       ...scope,
       ...(type ? { type } : {}),
@@ -2116,14 +2358,14 @@ router.get("/documents/search-meta", requireAuth, async (req, res) => {
         select: { displayName: true, firstName: true, lastName: true, email: true },
       },
     },
-  });
+  })) as Array<Record<string, unknown>>;
 
   const filtered = docs.filter((doc) => {
-    const people = Array.isArray(doc.metaPeople) ? (doc.metaPeople as string[]).map((s) => s.toLowerCase()) : [];
-    const companies = Array.isArray(doc.metaCompanies) ? (doc.metaCompanies as string[]).map((s) => s.toLowerCase()) : [];
-    const locations = Array.isArray(doc.metaLocations) ? (doc.metaLocations as string[]).map((s) => s.toLowerCase()) : [];
-    const refs = Array.isArray(doc.metaReferenceNumbers) ? (doc.metaReferenceNumbers as string[]).map((s) => s.toLowerCase()) : [];
-    const source = (doc.sourceName ?? "").toLowerCase();
+    const people = coerceStringArray(doc["metaPeople"]).map((s) => s.toLowerCase());
+    const companies = coerceStringArray(doc["metaCompanies"]).map((s) => s.toLowerCase());
+    const locations = coerceStringArray(doc["metaLocations"]).map((s) => s.toLowerCase());
+    const refs = coerceStringArray(doc["metaReferenceNumbers"]).map((s) => s.toLowerCase());
+    const source = String(doc["sourceName"] ?? "").toLowerCase();
 
     if (person && !people.some((p) => p.includes(person))) return false;
     if (company && !companies.some((c) => c.includes(company))) return false;
@@ -2132,12 +2374,12 @@ router.get("/documents/search-meta", requireAuth, async (req, res) => {
     if (sourceName && !source.includes(sourceName)) return false;
     if (keyword) {
       const haystack = [
-        doc.title,
-        doc.extractedText?.slice(0, 2000) ?? "",
-        doc.sourceName ?? "",
-        ...(doc.metaPeople as string[] ?? []),
-        ...(doc.metaCompanies as string[] ?? []),
-        ...(doc.metaOther as string[] ?? []),
+        String(doc["title"] ?? ""),
+        String(doc["extractedText"] ?? "").slice(0, 2000),
+        String(doc["sourceName"] ?? ""),
+        ...coerceStringArray(doc["metaPeople"]),
+        ...coerceStringArray(doc["metaCompanies"]),
+        ...coerceStringArray(doc["metaOther"]),
       ].join(" ").toLowerCase();
       if (!haystack.includes(keyword)) return false;
     }
@@ -2148,7 +2390,7 @@ router.get("/documents/search-meta", requireAuth, async (req, res) => {
   const results = filtered.slice(0, limit);
 
   res.json({
-    documents: results.map(toApiDocumentWithUploaderFallback),
+    documents: results.map((doc) => toApiDocumentWithUploaderFallback(doc)),
     total: filtered.length,
     limit,
     offset,
