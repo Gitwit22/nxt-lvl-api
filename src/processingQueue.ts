@@ -14,6 +14,10 @@ import {
   MAX_FILE_SIZE_BYTES,
   LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD,
   LLAMA_CLASSIFY_REVIEW_THRESHOLD,
+  PDF_BATCH_GROUPING_ENABLED,
+  PDF_BATCH_GROUPING_SHADOW_ONLY,
+  PDF_BATCH_MIN_PAGES,
+  PDF_BATCH_MAX_PAGES,
 } from "./core/config/env.js";
 import {
   classifyDocumentWithCoreApi,
@@ -21,8 +25,14 @@ import {
 } from "./core/services/documentIntelligence/coreApiClient.js";
 import {
   classifyDocumentType,
+  enrichPostClassificationMetadata,
   extractStepOneIntakeMetadata,
 } from "./core/services/documentIntelligence/lightweightMetadata.js";
+import {
+  buildPdfPageFeatures,
+  proposePdfSegments,
+  scorePdfBoundaries,
+} from "./core/services/documentIntelligence/pdfBatchGrouping.js";
 import { isR2Configured, isR2Key, downloadFromR2 } from "./core/storage/r2.js";
 import {
   canUseSharedParser,
@@ -44,6 +54,7 @@ interface ExtractionResult {
   confidence: number;
   method: "text" | "pdf" | "pdf_scanned" | "ocr" | "llama_cloud" | "core_api" | "unsupported";
   pageCount?: number;
+  pages?: string[];
   warnings?: string[];
 }
 
@@ -874,8 +885,12 @@ async function extractPdf(filePath: string): Promise<ExtractionResult> {
   }
 
   const rawText = (data.text || "").trim();
+  const extractedPages = rawText
+    .split(/\f+/)
+    .map((chunk) => chunk.trim())
+    .filter((chunk) => chunk.length > 0);
   const wordCount = rawText.split(/\s+/).filter(Boolean).length;
-  const pageCount = data.numpages || 1;
+  const pageCount = data.numpages || extractedPages.length || 1;
   const wordsPerPage = wordCount / pageCount;
 
   if (wordsPerPage < SCANNED_PDF_WORDS_PER_PAGE_THRESHOLD) {
@@ -884,6 +899,7 @@ async function extractPdf(filePath: string): Promise<ExtractionResult> {
       confidence: 0.3,
       method: "pdf_scanned",
       pageCount,
+      pages: extractedPages.length > 1 ? extractedPages : undefined,
       warnings: [
         `PDF appears to be scanned (${Math.round(wordsPerPage)} words/page < threshold ${SCANNED_PDF_WORDS_PER_PAGE_THRESHOLD}).`,
         "Full scanned-PDF OCR requires system-level tools (e.g. poppler). Document flagged for manual review.",
@@ -896,7 +912,34 @@ async function extractPdf(filePath: string): Promise<ExtractionResult> {
     confidence: 0.92,
     method: "pdf",
     pageCount,
+    pages: extractedPages.length > 1 ? extractedPages : undefined,
   };
+}
+
+function extractPageTextsFromParsedPages(pages: unknown): string[] {
+  if (!Array.isArray(pages)) return [];
+
+  const values = pages
+    .map((page) => {
+      if (!page || typeof page !== "object") return "";
+      const candidate = page as Record<string, unknown>;
+      const textCandidates = [
+        candidate.text,
+        candidate.markdown,
+        candidate.content,
+        candidate.pageText,
+        candidate.rawText,
+      ];
+      for (const value of textCandidates) {
+        if (typeof value === "string" && value.trim().length > 0) {
+          return value.trim();
+        }
+      }
+      return "";
+    })
+    .filter((value) => value.length > 0);
+
+  return values;
 }
 
 // ---------------------------------------------------------------------------
@@ -983,11 +1026,14 @@ async function runExtraction(
       });
 
       const parsedText = parsed.text?.trim() || parsed.markdown?.trim() || "";
+      const parsedPages = extractPageTextsFromParsedPages(parsed.pages);
       if (parsedText.length > 0) {
         return {
           text: parsedText.slice(0, 200_000),
           confidence: 0.93,
           method: "core_api",
+          pageCount: parsedPages.length > 0 ? parsedPages.length : undefined,
+          pages: parsedPages.length > 1 ? parsedPages : undefined,
           warnings: [],
         };
       }
@@ -1335,6 +1381,107 @@ async function processSingleJob(): Promise<void> {
     }
 
     const autoLabels = classifyDocumentTypeAndTopics(job.document.title, baseText);
+
+    let batchGrouping: {
+      enabled: boolean;
+      ran: boolean;
+      shadowMode: boolean;
+      reason?: string;
+      pageCount: number;
+      proposedSegments: Array<{ startPage: number; endPage: number; confidence: number; reason: string }>;
+      uncertainEdges: number;
+      splitCandidates: number;
+    } = {
+      enabled: PDF_BATCH_GROUPING_ENABLED,
+      ran: false,
+      shadowMode: PDF_BATCH_GROUPING_SHADOW_ONLY,
+      pageCount: extraction.pageCount ?? 0,
+      proposedSegments: [],
+      uncertainEdges: 0,
+      splitCandidates: 0,
+    };
+
+    if (PDF_BATCH_GROUPING_ENABLED && job.document.mimeType === "application/pdf") {
+      const totalPages = extraction.pageCount ?? extraction.pages?.length ?? 0;
+      const canProcessPageSignals =
+        totalPages >= PDF_BATCH_MIN_PAGES &&
+        totalPages <= PDF_BATCH_MAX_PAGES &&
+        Array.isArray(extraction.pages) &&
+        extraction.pages.length > 1;
+
+      if (!canProcessPageSignals) {
+        batchGrouping.reason =
+          totalPages < PDF_BATCH_MIN_PAGES
+            ? `below_min_pages:${totalPages}`
+            : totalPages > PDF_BATCH_MAX_PAGES
+              ? `above_max_pages:${totalPages}`
+              : "missing_page_text";
+      } else {
+        const pageFeatures = buildPdfPageFeatures(extraction.pages ?? []);
+        const boundaryDecisions = scorePdfBoundaries(pageFeatures);
+        const proposal = proposePdfSegments(totalPages, boundaryDecisions);
+
+        batchGrouping = {
+          ...batchGrouping,
+          ran: true,
+          pageCount: totalPages,
+          proposedSegments: proposal.segments,
+          uncertainEdges: proposal.uncertainEdges,
+          splitCandidates: boundaryDecisions.filter((edge) => edge.decision === "split").length,
+        };
+
+        try {
+          await prisma.chroniclePdfPageFeature.deleteMany({ where: { documentId: job.documentId } });
+          await prisma.chroniclePdfBoundaryDecision.deleteMany({ where: { documentId: job.documentId } });
+
+          if (pageFeatures.length > 0) {
+            await prisma.chroniclePdfPageFeature.createMany({
+              data: pageFeatures.map((feature) => ({
+                organizationId: tenantScope.organizationId,
+                programDomain: tenantScope.programDomain,
+                documentId: job.documentId,
+                pageIndex: feature.pageIndex,
+                topLines: toPrismaJson(feature.topLines),
+                bottomLines: toPrismaJson(feature.bottomLines),
+                headerTitle: feature.headerTitle,
+                identifierTokens: toPrismaJson(feature.identifierTokens),
+                pageNumberCue: feature.pageNumberCue ? toPrismaJson(feature.pageNumberCue) : undefined,
+                templateSignature: feature.templateSignature,
+                layoutHints: toPrismaJson(feature.layoutHints),
+              })),
+            });
+          }
+
+          if (boundaryDecisions.length > 0) {
+            await prisma.chroniclePdfBoundaryDecision.createMany({
+              data: boundaryDecisions.map((edge) => ({
+                organizationId: tenantScope.organizationId,
+                programDomain: tenantScope.programDomain,
+                documentId: job.documentId,
+                leftPageIndex: edge.leftPageIndex,
+                rightPageIndex: edge.rightPageIndex,
+                continuationScore: edge.continuationScore,
+                boundaryScore: edge.boundaryScore,
+                confidence: edge.confidence,
+                decision: edge.decision,
+                reasons: toPrismaJson(edge.reasons),
+                evidence: toPrismaJson(edge.evidence),
+              })),
+            });
+          }
+        } catch (groupingPersistError) {
+          logger.warn("Batch grouping persistence failed (non-fatal)", {
+            jobId: job.id,
+            documentId: job.documentId,
+            error:
+              groupingPersistError instanceof Error
+                ? groupingPersistError.message
+                : String(groupingPersistError),
+          });
+          batchGrouping.reason = "persist_failed";
+        }
+      }
+    }
     // Pass extractionFilePath (the resolved local/temp path) so computeFingerprint
     // can read the file bytes for the exact file hash. For R2-backed documents,
     // job.document.filePath is the R2 object key (not a local path), so using it
@@ -1378,7 +1525,7 @@ async function processSingleJob(): Promise<void> {
       ...autoLabels.entities.organizations,
       ...autoLabels.entities.locations,
     ].map((value) => value.toLowerCase());
-    const mergedTags = [...new Set([...existingTags, ...topicTags, ...taxSpecificTags, ...entityTags])].slice(0, 60);
+    const baseMergedTags = [...new Set([...existingTags, ...topicTags, ...taxSpecificTags, ...entityTags])].slice(0, 60);
 
     const suggestedYear = autoLabels.timeLabel.approximateYear;
     const finalYear = suggestedYear ?? job.document.year;
@@ -1517,6 +1664,12 @@ async function processSingleJob(): Promise<void> {
       reviewReasons.push("⚠️ Similar documents found — verify relationships and deduplication");
     }
 
+    if (batchGrouping.ran && batchGrouping.uncertainEdges > 0) {
+      reviewReasons.push(
+        `Split review suggested: ${batchGrouping.uncertainEdges} uncertain page boundaries in proposed grouping`,
+      );
+    }
+
     // ─────────────────────────────────────────────────────────────────────
     // Lightweight metadata extraction (Phase 2 — search-first model)
     // Runs on every document regardless of file type or extraction quality.
@@ -1572,6 +1725,19 @@ async function processSingleJob(): Promise<void> {
         }
       : stepOne.metadata;
 
+    const enrichment = enrichPostClassificationMetadata({
+      text: baseText,
+      documentType: finalDocumentType,
+      sourceName: stepOneMetadata.organization.name ?? lightMeta.sourceName,
+      documentDate: stepOneMetadata.documentDate.exactDate ?? lightMeta.documentDate,
+      companies: lightMeta.companies,
+      people: stepOneMetadata.people.map((person) => person.name),
+      locations: lightMeta.locations,
+      referenceNumbers: lightMeta.referenceNumbers,
+    });
+
+    const mergedTags = [...new Set([...baseMergedTags, ...enrichment.tags])].slice(0, 60);
+
     // Determine whether this document needs review based on new classification
     const lightReviewRequired =
       (!forcedDocumentType && lightClassification.classificationStatus === "other_unclassified") ||
@@ -1620,6 +1786,13 @@ async function processSingleJob(): Promise<void> {
       ocrStatus = "completed";
     }
 
+    const persistedKeywords = [
+      ...new Set([
+        ...((searchHelpers.normalizedKeywords as string[]) ?? []),
+        ...enrichment.keywords,
+      ]),
+    ].slice(0, 80);
+
     await prisma.document.update({
       where: { id: job.documentId },
       data: {
@@ -1628,12 +1801,17 @@ async function processSingleJob(): Promise<void> {
         month: finalMonth,
         type: finalDocumentType,
         tags: mergedTags,
-        keywords: (searchHelpers.normalizedKeywords as string[]).slice(0, 80),
+        keywords: persistedKeywords,
         processingStatus: "processed",
         ocrStatus,
         status: needsReview ? "review_required" : (canAutoApprove ? "archived" : "review_required"),
         statusUpdatedAt: new Date(),
         needsReview,
+        splitReviewRequired: batchGrouping.ran && batchGrouping.uncertainEdges > 0,
+        segmentationStatus:
+          batchGrouping.ran
+            ? (batchGrouping.uncertainEdges > 0 ? "shadow_uncertain" : "shadow_ready")
+            : (batchGrouping.enabled ? "shadow_skipped" : "disabled"),
         review: needsReview
           ? {
               required: true,
@@ -1642,8 +1820,13 @@ async function processSingleJob(): Promise<void> {
               priority: reviewPriority,
               suggestions: autoLabels.confidenceNarrative,
               canAutoApprove: false,
+              splitReviewRequired: batchGrouping.ran && batchGrouping.uncertainEdges > 0,
             }
-          : { required: false, canAutoApprove },
+          : {
+              required: false,
+              canAutoApprove,
+              splitReviewRequired: batchGrouping.ran && batchGrouping.uncertainEdges > 0,
+            },
         extraction: {
           ...existingExtractionMeta,
           status: "complete",
@@ -1675,6 +1858,7 @@ async function processSingleJob(): Promise<void> {
               ? ((existingExtractionMeta.typePrediction as Record<string, unknown>).layoutHints as string[] | undefined) ?? []
               : [],
           },
+          batchGrouping,
         },
         extractedMetadata: toPrismaJson({
           wordCount: extractedWordCount,
@@ -1756,6 +1940,7 @@ async function processSingleJob(): Promise<void> {
           aiClassification: aiClassResult ?? undefined,
           lightweightDocumentType: lightClassification.documentType,
           lightweightConfidence: lightClassification.confidence,
+          batchGrouping,
         }),
         // ── Lightweight metadata fields (search-first model) ─────────────
         sourceName: stepOneMetadata.organization.name ?? lightMeta.sourceName,
@@ -1788,10 +1973,12 @@ async function processSingleJob(): Promise<void> {
       ocrStatus,
       contentLength: extractedWordCount,
       needsReview,
+      splitReviewRequired: batchGrouping.ran && batchGrouping.uncertainEdges > 0,
       reviewPriority,
       aiClassifyStatus: aiClassResult?.status ?? "not_run",
       aiDocumentType: aiClassResult?.documentType ?? null,
       aiConfidence: aiClassResult?.confidence ?? null,
+      batchGrouping,
     });
   } catch (error) {
     const err = error instanceof Error ? error : new Error(String(error));

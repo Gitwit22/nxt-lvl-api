@@ -878,6 +878,194 @@ function extractOther(text: string, people: string[], companies: string[]): stri
   return dedupe(other).slice(0, 20);
 }
 
+export interface PostClassificationEnrichmentInput {
+  text: string;
+  documentType: string;
+  sourceName?: string | null;
+  documentDate?: string | null;
+  companies?: string[];
+  people?: string[];
+  locations?: string[];
+  referenceNumbers?: string[];
+}
+
+export interface PostClassificationEnrichment {
+  tags: string[];
+  keywords: string[];
+}
+
+function extractMonthYearTag(value?: string | null): string | null {
+  if (!value) return null;
+  const parsed = extractDateParts(value);
+  if (!parsed.year) return null;
+  if (!parsed.month) return String(parsed.year);
+
+  const monthNames = [
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+  ];
+  return `${monthNames[parsed.month - 1]} ${parsed.year}`;
+}
+
+function extractRepeatedHeaderPhrases(text: string): string[] {
+  const stopPhrases = new Set([
+    "page",
+    "continued",
+    "account number",
+    "statement date",
+  ]);
+
+  const counts = new Map<string, number>();
+  const lines = text
+    .split("\n")
+    .slice(0, 40)
+    .map((line) => line.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim())
+    .filter((line) => line.length >= 10 && line.length <= 64)
+    .filter((line) => !/^\d+[\d\s\-./]*$/.test(line));
+
+  for (const line of lines) {
+    if (stopPhrases.has(line)) continue;
+    counts.set(line, (counts.get(line) ?? 0) + 1);
+  }
+
+  return Array.from(counts.entries())
+    .filter(([, count]) => count >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .map(([phrase]) => phrase)
+    .slice(0, 3);
+}
+
+export function enrichPostClassificationMetadata(input: PostClassificationEnrichmentInput): PostClassificationEnrichment {
+  const text = input.text || "";
+  const corpus = text.toLowerCase();
+  const type = (input.documentType || "other_unclassified").toLowerCase();
+  const tags = new Set<string>();
+  const keywords = new Set<string>();
+
+  tags.add(type.replace(/_/g, " "));
+  keywords.add(type);
+
+  const typeClues: Array<{ test: RegExp; tags: string[]; keywords: string[] }> = [
+    {
+      test: /statement|account statement|statement period|ending balance|available balance/i,
+      tags: ["bank statement", "financial", "statement period"],
+      keywords: ["statement", "account statement", "ending balance", "available balance"],
+    },
+    {
+      test: /invoice|bill to|amount due|purchase order|line item/i,
+      tags: ["invoice", "billing", "vendor"],
+      keywords: ["invoice number", "amount due", "purchase order", "vendor"],
+    },
+    {
+      test: /payroll|pay period|gross pay|net pay|deductions|timesheet/i,
+      tags: ["payroll", "employee compensation"],
+      keywords: ["pay period", "gross pay", "net pay", "deductions", "hours worked"],
+    },
+    {
+      test: /grant|donation|award amount|grantee|notice of award|501\(c\)\(3\)/i,
+      tags: ["funding", "nonprofit"],
+      keywords: ["grant", "donation", "award", "grantee", "charitable"],
+    },
+    {
+      test: /notice|department of|internal revenue service|irs|treasury|penalty/i,
+      tags: ["official notice", "government"],
+      keywords: ["notice", "government agency", "irs", "treasury"],
+    },
+    {
+      test: /from:|to:|subject:|dear\s|sincerely|regards/i,
+      tags: ["correspondence"],
+      keywords: ["sender", "recipient", "subject line"],
+    },
+  ];
+
+  for (const clue of typeClues) {
+    if (!clue.test.test(corpus)) continue;
+    for (const tag of clue.tags) tags.add(tag);
+    for (const keyword of clue.keywords) keywords.add(keyword);
+  }
+
+  const accountProductClues = [
+    "checking",
+    "savings",
+    "money market",
+    "credit card",
+    "wire transfer",
+    "ach",
+    "routing number",
+    "account ending",
+  ];
+  for (const clue of accountProductClues) {
+    if (corpus.includes(clue)) {
+      tags.add(clue);
+      keywords.add(clue);
+    }
+  }
+
+  const sourceName = input.sourceName?.trim();
+  if (sourceName) {
+    tags.add(sourceName.toLowerCase());
+    keywords.add(sourceName.toLowerCase());
+  }
+
+  for (const company of input.companies ?? []) {
+    const value = company.trim().toLowerCase();
+    if (!value) continue;
+    tags.add(value);
+    keywords.add(value);
+  }
+
+  for (const person of input.people ?? []) {
+    const value = person.trim().toLowerCase();
+    if (!value) continue;
+    keywords.add(value);
+  }
+
+  for (const location of input.locations ?? []) {
+    const value = location.trim().toLowerCase();
+    if (!value) continue;
+    keywords.add(value);
+  }
+
+  for (const reference of input.referenceNumbers ?? []) {
+    const value = reference.trim().toLowerCase();
+    if (!value) continue;
+    keywords.add(value);
+  }
+
+  const monthYear = extractMonthYearTag(input.documentDate);
+  if (monthYear) {
+    tags.add(monthYear);
+    keywords.add(monthYear);
+  }
+
+  const repeatedPhrases = extractRepeatedHeaderPhrases(text);
+  for (const phrase of repeatedPhrases) {
+    tags.add(phrase);
+    keywords.add(phrase);
+  }
+
+  return {
+    tags: Array.from(tags)
+      .map((value) => value.replace(/\s+/g, " ").trim())
+      .filter((value) => value.length >= 3)
+      .slice(0, 24),
+    keywords: Array.from(keywords)
+      .map((value) => value.replace(/\s+/g, " ").trim())
+      .filter((value) => value.length >= 2)
+      .slice(0, 50),
+  };
+}
+
 // -----------------------------------------------------------------------------
 // Main entrypoint
 // -----------------------------------------------------------------------------

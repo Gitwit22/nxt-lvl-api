@@ -17,27 +17,48 @@ const prismaMock = vi.hoisted(() => ({
     findUniqueOrThrow: vi.fn(),
     findMany: vi.fn(),
   },
+  chronicleTypeFingerprint: {
+    findMany: vi.fn(),
+  },
+  chroniclePdfPageFeature: {
+    deleteMany: vi.fn(),
+    createMany: vi.fn(),
+  },
+  chroniclePdfBoundaryDecision: {
+    deleteMany: vi.fn(),
+    createMany: vi.fn(),
+  },
 }));
 
-vi.mock("../src/db.js", () => ({ prisma: prismaMock }));
+vi.mock("../src/core/db/prisma.js", () => ({ prisma: prismaMock }));
 
 // ---------------------------------------------------------------------------
 // Config mock (keep MAX_ATTEMPTS controllable)
 // ---------------------------------------------------------------------------
-vi.mock("../src/config.js", () => ({
-  CURRENT_PROGRAM_DOMAIN: "community-chronicle",
+vi.mock("../src/core/config/env.js", () => ({
   MAX_ATTEMPTS: 3,
   JOB_TIMEOUT_MS: 5000,
   RETRY_BACKOFF_BASE_MS: 100, // short for tests
   SCANNED_PDF_WORDS_PER_PAGE_THRESHOLD: 20,
   OCR_CONFIDENCE_REVIEW_THRESHOLD: 0.7,
   MAX_FILE_SIZE_BYTES: 50 * 1024 * 1024,
-  UPLOAD_DIR: os.tmpdir(),
-  PORT: 4000,
-  API_PREFIX: "/api",
-  JWT_SECRET: "test-secret",
-  JWT_EXPIRES_IN: "8h",
-  ALLOWED_MIME_TYPES: new Set(["text/plain", "application/pdf", "image/jpeg"]),
+  LLAMA_CLASSIFY_AUTO_ACCEPT_THRESHOLD: 0.85,
+  LLAMA_CLASSIFY_REVIEW_THRESHOLD: 0.6,
+  PDF_BATCH_GROUPING_ENABLED: true,
+  PDF_BATCH_GROUPING_SHADOW_ONLY: true,
+  PDF_BATCH_MIN_PAGES: 12,
+  PDF_BATCH_MAX_PAGES: 300,
+  DOC_INTEL_API_BASE_URL: "",
+  DOC_INTEL_API_TOKEN: "",
+  DOC_INTEL_TIMEOUT_MS: 5000,
+  ENABLE_DOC_INTEL_CLASSIFY: false,
+  STORAGE_BACKEND: "local",
+  R2_ACCOUNT_ID: "",
+  R2_ACCESS_KEY_ID: "",
+  R2_SECRET_ACCESS_KEY: "",
+  R2_BUCKET_NAME: "",
+  R2_PUBLIC_URL: "",
+  R2_DEFAULT_PREFIX: "",
 }));
 
 import { processSingleJob, handleJobFailure, runExtraction } from "../src/processingQueue.js";
@@ -79,6 +100,11 @@ beforeEach(() => {
   prismaMock.processingJob.update.mockResolvedValue(mockJob);
   prismaMock.document.update.mockResolvedValue({});
   prismaMock.document.findMany.mockResolvedValue([]);
+  prismaMock.chronicleTypeFingerprint.findMany.mockResolvedValue([]);
+  prismaMock.chroniclePdfPageFeature.deleteMany.mockResolvedValue({ count: 0 });
+  prismaMock.chroniclePdfPageFeature.createMany.mockResolvedValue({ count: 0 });
+  prismaMock.chroniclePdfBoundaryDecision.deleteMany.mockResolvedValue({ count: 0 });
+  prismaMock.chroniclePdfBoundaryDecision.createMany.mockResolvedValue({ count: 0 });
 });
 
 // ---------------------------------------------------------------------------

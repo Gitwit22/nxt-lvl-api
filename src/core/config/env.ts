@@ -165,3 +165,11 @@ export const SCANNED_PDF_WORDS_PER_PAGE_THRESHOLD = Number(
 export const OCR_CONFIDENCE_REVIEW_THRESHOLD = Number(
   process.env.OCR_CONFIDENCE_REVIEW_THRESHOLD || 0.7,
 );
+
+// Large-PDF batch grouping (Phase 1/2)
+// v1 runs in shadow mode only: persist page features + boundary decisions,
+// propose virtual segments, but do not create child documents yet.
+export const PDF_BATCH_GROUPING_ENABLED = process.env.PDF_BATCH_GROUPING_ENABLED !== "false";
+export const PDF_BATCH_GROUPING_SHADOW_ONLY = process.env.PDF_BATCH_GROUPING_SHADOW_ONLY !== "false";
+export const PDF_BATCH_MIN_PAGES = Number(process.env.PDF_BATCH_MIN_PAGES || 12);
+export const PDF_BATCH_MAX_PAGES = Number(process.env.PDF_BATCH_MAX_PAGES || 300);

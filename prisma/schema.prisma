@@ -612,6 +612,15 @@ model Document {
   id                    String    @id
   organizationId        String
   programDomain         String
+  parentDocumentId      String?
+  rootDocumentId        String?
+  isVirtualSegment      Boolean   @default(false)
+  segmentIndex          Int?
+  segmentPageStart      Int?
+  segmentPageEnd        Int?
+  segmentConfidence     Float?
+  splitReviewRequired   Boolean   @default(false)
+  segmentationStatus    String?
   title                 String
   description           String    @default("")
   author                String    @default("Unknown")
@@ -676,17 +685,24 @@ model Document {
   createdByUserId String?
   uploadedById  String?
   reviewedById  String?
+  parentDocument Document? @relation("DocumentSegments", fields: [parentDocumentId], references: [id], onDelete: SetNull)
+  childSegments  Document[] @relation("DocumentSegments")
   createdBy     User?   @relation("CreatedBy", fields: [createdByUserId], references: [id])
   uploadedBy    User?   @relation("UploadedBy", fields: [uploadedById], references: [id])
   reviewedBy    User?   @relation("ReviewedBy", fields: [reviewedById], references: [id])
 
   jobs ProcessingJob[]
+  pageFeatures ChroniclePdfPageFeature[]
+  boundaryDecisions ChroniclePdfBoundaryDecision[]
 
   @@index([organizationId, programDomain, createdAt])
   @@index([organizationId, programDomain, needsReview, updatedAt])
   @@index([organizationId, programDomain, documentType])
   @@index([organizationId, programDomain, classificationStatus])
   @@index([organizationId, programDomain, reviewRequired, updatedAt])
+  @@index([organizationId, programDomain, parentDocumentId])
+  @@index([organizationId, programDomain, rootDocumentId])
+  @@index([organizationId, programDomain, splitReviewRequired, updatedAt])
 }
 
 // ── Community Chronicle: document type registry ───────────────────────────────
@@ -748,4 +764,48 @@ model ProcessingJob {
   @@index([status, scheduledAt])
   @@index([documentId])
   @@index([organizationId, programDomain, status, scheduledAt])
+}
+
+model ChroniclePdfPageFeature {
+  id               String   @id @default(cuid())
+  organizationId   String
+  programDomain    String
+  documentId       String
+  pageIndex        Int
+  topLines         Json     @default("[]")
+  bottomLines      Json     @default("[]")
+  headerTitle      String?
+  identifierTokens Json     @default("[]")
+  pageNumberCue    Json?
+  templateSignature String?
+  layoutHints      Json     @default("[]")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, pageIndex])
+  @@index([organizationId, programDomain, documentId])
+}
+
+model ChroniclePdfBoundaryDecision {
+  id                String   @id @default(cuid())
+  organizationId    String
+  programDomain     String
+  documentId        String
+  leftPageIndex     Int
+  rightPageIndex    Int
+  continuationScore Float
+  boundaryScore     Float
+  confidence        Float
+  decision          String
+  reasons           Json     @default("[]")
+  evidence          Json?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([documentId, leftPageIndex, rightPageIndex])
+  @@index([organizationId, programDomain, documentId])
 }

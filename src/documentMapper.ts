@@ -77,6 +77,15 @@ export function toApiDocument(doc: Document) {
     review: doc.review ?? undefined,
     searchIndex: doc.searchIndex ?? undefined,
     needsReview: doc.needsReview,
+    splitReviewRequired: Boolean(rawDoc.splitReviewRequired),
+    segmentationStatus: rawDoc.segmentationStatus as string | undefined ?? undefined,
+    parentDocumentId: rawDoc.parentDocumentId as string | undefined ?? undefined,
+    rootDocumentId: rawDoc.rootDocumentId as string | undefined ?? undefined,
+    isVirtualSegment: Boolean(rawDoc.isVirtualSegment),
+    segmentIndex: asNumber(rawDoc.segmentIndex),
+    segmentPageStart: asNumber(rawDoc.segmentPageStart),
+    segmentPageEnd: asNumber(rawDoc.segmentPageEnd),
+    segmentConfidence: asNumber(rawDoc.segmentConfidence),
     aiSummary: doc.aiSummary,
     intake: {
       predictedType:
