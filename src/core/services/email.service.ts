@@ -1,8 +1,34 @@
-import { Resend } from "resend";
-import { RESEND_API_KEY, FRONTEND_BASE_URL } from "../config/env.js";
+import {
+  loadNotificationConfig,
+  ResendEmailProvider,
+  SendEmailUseCase,
+  ConsoleEmailLogger,
+} from "@nxtlvl/notification-core";
+import { FRONTEND_BASE_URL } from "../config/env.js";
 import { logger } from "../../logger.js";
 
-const resend = new Resend(RESEND_API_KEY);
+// ---------------------------------------------------------------------------
+// Lazy singleton — avoids startup crashes if env vars are missing at boot.
+// A failed init is cached so we don't retry on every request.
+// ---------------------------------------------------------------------------
+let _emailService: SendEmailUseCase | null = null;
+let _emailServiceInitFailed = false;
+
+function getEmailService(): SendEmailUseCase | null {
+  if (_emailServiceInitFailed) return null;
+  if (_emailService) return _emailService;
+  try {
+    const config = loadNotificationConfig();
+    const provider = new ResendEmailProvider(config);
+    const emailLogger = new ConsoleEmailLogger(config.logLevel);
+    _emailService = new SendEmailUseCase({ provider, config, logger: emailLogger });
+    return _emailService;
+  } catch (err) {
+    _emailServiceInitFailed = true;
+    logger.warn("[email] Core email service failed to initialize — invite emails will be skipped", { err });
+    return null;
+  }
+}
 
 export interface InviteEmailParams {
   to: string;
@@ -14,24 +40,56 @@ export interface InviteEmailParams {
 }
 
 export async function sendInviteEmail(params: InviteEmailParams): Promise<boolean> {
-  const link = `${FRONTEND_BASE_URL}/invite/accept?token=${params.rawToken}`;
-  try {
-    const { error } = await resend.emails.send({
-      from: "Nxt Lvl Support <support@nxtlvlts.com>",
-      to: params.to,
-      subject: "You've been invited to Mission Hub",
-      html: buildInviteHtml({ ...params, link }),
-    });
-    if (error) {
-      logger.warn("[email] Resend returned error", { error, to: params.to });
-      return false;
-    }
-    logger.info("[email] Invite sent", { to: params.to });
-    return true;
-  } catch (err) {
-    logger.warn("[email] sendInviteEmail threw", { err, to: params.to });
+  const service = getEmailService();
+  if (!service) {
+    logger.warn("[email] Email service unavailable — skipping invite email", { to: params.to });
     return false;
   }
+
+  const link = buildInviteLink(params.rawToken);
+  const subject = "You've been invited to Mission Hub";
+  const html = buildInviteHtml({ ...params, link });
+  const text = buildInviteText({ ...params, link });
+
+  const result = await service.execute({ to: params.to, subject, html, text });
+
+  if (result.success) {
+    logger.info("[email] Invite sent", { to: params.to });
+    return true;
+  }
+
+  if ("skipped" in result && result.skipped) {
+    logger.warn("[email] Invite email skipped (sending disabled)", { to: params.to });
+  } else {
+    logger.warn("[email] Invite email failed", {
+      to: params.to,
+      code: "error" in result ? (result as { success: false; error: { code: string } }).error?.code : undefined,
+    });
+  }
+  return false;
+}
+
+function buildInviteLink(rawToken: string): string {
+  return `${FRONTEND_BASE_URL.replace(/\/$/, "")}/invite/accept?token=${encodeURIComponent(rawToken)}`;
+}
+
+function buildInviteText(params: InviteEmailParams & { link: string }): string {
+  const { recipientName, organizationName, assignedRole, assignedPosition, link } = params;
+  const positionLine = assignedPosition ? `\nPosition: ${assignedPosition}` : "";
+  return [
+    `Hi ${recipientName},`,
+    "",
+    `You've been invited to join ${organizationName} on Mission Hub.`,
+    `Role: ${assignedRole}${positionLine}`,
+    "",
+    "Click the link below to activate your account and set your password.",
+    "This link expires in 7 days.",
+    "",
+    link,
+    "",
+    "If you didn't expect this invite, you can safely ignore this email.",
+    "Questions? Email us at support@nxtlvlts.com",
+  ].join("\n");
 }
 
 function buildInviteHtml(params: InviteEmailParams & { link: string }): string {

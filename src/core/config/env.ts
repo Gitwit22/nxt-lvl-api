@@ -106,8 +106,6 @@ export function getCorsOrigins(): true | ((origin: string | undefined, cb: (err:
 
 export const PLATFORM_SETUP_TOKEN = process.env.PLATFORM_SETUP_TOKEN || "";
 
-// Email — Resend
-export const RESEND_API_KEY = process.env.RESEND_API_KEY ?? "";
 // Base URL of the Mission Hub frontend — used to build invite links
 export const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL ?? "http://localhost:5174";
 
