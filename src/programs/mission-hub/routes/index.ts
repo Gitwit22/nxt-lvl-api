@@ -8,10 +8,12 @@
  */
 import express, { type NextFunction, type Request, type Response } from "express";
 import jwt from "jsonwebtoken";
+import crypto from "crypto";
 import { prisma } from "../../../core/db/prisma.js";
-import { JWT_SECRET, PLATFORM_LAUNCH_TOKEN_SECRET } from "../../../core/config/env.js";
-import { signToken } from "../../../core/auth/auth.service.js";
+import { JWT_SECRET, PLATFORM_LAUNCH_TOKEN_SECRET, FRONTEND_BASE_URL } from "../../../core/config/env.js";
+import { signToken, hashPassword } from "../../../core/auth/auth.service.js";
 import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
+import { sendInviteEmail } from "../../../core/services/email.service.js";
 import { logger } from "../../../logger.js";
 
 const router = express.Router();
@@ -75,6 +77,170 @@ function getUser(req: Request): MissionHubTokenPayload {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
+
+// ─── Invite token helpers ─────────────────────────────────────────────────────
+
+function generateInviteToken(): { raw: string; hash: string } {
+  const raw = crypto.randomBytes(32).toString("hex");
+  const hash = crypto.createHash("sha256").update(raw).digest("hex");
+  return { raw, hash };
+}
+
+function hashToken(raw: string): string {
+  return crypto.createHash("sha256").update(raw).digest("hex");
+}
+
+function inviteExpiresAt(): Date {
+  return new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+}
+
+type InviteStore = {
+  missionHubInvite: {
+    findUnique: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    findFirst: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    update: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    findMany: (a: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+  };
+  missionHubPersonnel: {
+    findFirst: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    update: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    create: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+  user: {
+    findUnique: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+  membership: {
+    findFirst: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+};
+
+function getInviteStore(): InviteStore {
+  return prisma as unknown as InviteStore;
+}
+
+function mapPersonnelRoleToMembership(role: string): "owner" | "admin" | "manager" | "member" | "viewer" {
+  switch (role) {
+    case "Executive Director": return "owner";
+    case "Deputy Director": return "admin";
+    case "Finance":
+    case "Admin": return "manager";
+    case "Board Member":
+    case "Staff": return "member";
+    case "Volunteer": return "viewer";
+    default: return "member";
+  }
+}
+
+function mapPersonnelRoleToUserRole(role: string): "admin" | "reviewer" | "uploader" {
+  switch (role) {
+    case "Executive Director":
+    case "Deputy Director": return "admin";
+    case "Finance":
+    case "Board Member": return "reviewer";
+    default: return "uploader";
+  }
+}
+
+// ─── Public invite routes (no auth required) ──────────────────────────────────
+
+router.get("/invites/validate", async (req, res) => {
+  const raw = typeof req.query.token === "string" ? req.query.token.trim() : "";
+  if (!raw) { res.status(400).json({ error: "token is required" }); return; }
+
+  const db = getInviteStore();
+  const invite = await db.missionHubInvite.findUnique({ where: { tokenHash: hashToken(raw) } });
+
+  if (!invite) { res.status(404).json({ error: "invalid" }); return; }
+  if (invite.status === "revoked") { res.status(410).json({ error: "revoked" }); return; }
+  if (invite.status === "accepted") { res.status(410).json({ error: "already_accepted" }); return; }
+  if (new Date(invite.expiresAt as string) < new Date()) {
+    await db.missionHubInvite.update({ where: { tokenHash: hashToken(raw) }, data: { status: "expired" } });
+    res.status(410).json({ error: "expired" }); return;
+  }
+
+  const org = await prisma.organization.findUnique({ where: { id: invite.organizationId as string } });
+
+  res.json({
+    recipientName: invite.recipientName,
+    recipientEmail: invite.recipientEmail,
+    assignedRole: invite.assignedRole,
+    assignedPosition: invite.assignedPosition,
+    organizationName: org?.name ?? "Your Organization",
+  });
+});
+
+router.post("/invites/accept", async (req, res) => {
+  const body = isRecord(req.body) ? req.body : {};
+  const raw = typeof body.token === "string" ? body.token.trim() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+  const confirmPassword = typeof body.confirmPassword === "string" ? body.confirmPassword : "";
+
+  if (!raw || !password) { res.status(400).json({ error: "token and password are required" }); return; }
+  if (password !== confirmPassword) { res.status(400).json({ error: "Passwords do not match" }); return; }
+  if (password.length < 8) { res.status(400).json({ error: "Password must be at least 8 characters" }); return; }
+
+  const db = getInviteStore();
+  const tokenHash = hashToken(raw);
+  const invite = await db.missionHubInvite.findUnique({ where: { tokenHash } });
+
+  if (!invite) { res.status(404).json({ error: "invalid" }); return; }
+  if (invite.status === "revoked") { res.status(410).json({ error: "revoked" }); return; }
+  if (invite.status === "accepted") { res.status(410).json({ error: "already_accepted" }); return; }
+  if (new Date(invite.expiresAt as string) < new Date()) {
+    await db.missionHubInvite.update({ where: { tokenHash }, data: { status: "expired" } });
+    res.status(410).json({ error: "expired" }); return;
+  }
+
+  const email = (invite.recipientEmail as string).toLowerCase();
+  const organizationId = invite.organizationId as string;
+  const passwordHash = await hashPassword(password);
+  const membershipRole = mapPersonnelRoleToMembership(invite.assignedRole as string);
+  const userRole = mapPersonnelRoleToUserRole(invite.assignedRole as string);
+
+  let userId: string;
+  const existing = await db.user.findUnique({ where: { email } });
+  if (existing) {
+    userId = existing.id as string;
+  } else {
+    const [firstName, ...rest] = (invite.recipientName as string).trim().split(" ");
+    const lastName = rest.join(" ");
+    const newUser = await db.user.create({
+      data: {
+        email,
+        passwordHash,
+        role: userRole,
+        organizationId,
+        firstName: firstName ?? "",
+        lastName: lastName ?? "",
+        displayName: invite.recipientName as string,
+        mustChangePassword: false,
+        isActive: true,
+      },
+    });
+    userId = newUser.id as string;
+  }
+
+  const hasMembership = await db.membership.findFirst({ where: { userId, organizationId } });
+  if (!hasMembership) {
+    await db.membership.create({ data: { userId, organizationId, role: membershipRole } });
+  }
+
+  await db.missionHubPersonnel.update({
+    where: { id: invite.personnelId as string },
+    data: { inviteStatus: "accepted", status: "Active" },
+  });
+
+  await db.missionHubInvite.update({
+    where: { tokenHash },
+    data: { status: "accepted", acceptedAt: new Date() },
+  });
+
+  logger.info("[invite] Account activated", { email, organizationId });
+  res.json({ success: true });
+});
 
 // ─── Platform Auth / Consume ──────────────────────────────────────────────────
 
@@ -651,34 +817,99 @@ router.get("/personnel/:id", requireMissionHubAuth, async (req, res) => {
 router.post("/personnel", requireMissionHubAuth, async (req, res) => {
   const { userId, organizationId } = getUser(req);
   const body = isRecord(req.body) ? req.body : {};
-  const store = prisma as unknown as {
-    missionHubPersonnel: { create: (args: Record<string, unknown>) => Promise<Record<string, unknown>> };
-  };
   if (typeof body.firstName !== "string" || !body.firstName.trim()) {
     res.status(400).json({ error: "firstName is required" }); return;
   }
   if (typeof body.lastName !== "string" || !body.lastName.trim()) {
     res.status(400).json({ error: "lastName is required" }); return;
   }
-  const person = await store.missionHubPersonnel.create({
+
+  const db = getInviteStore();
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  const role = typeof body.role === "string" ? body.role : "Admin";
+  const title = typeof body.title === "string" ? body.title : "";
+  const firstName = (body.firstName as string).trim();
+  const lastName = (body.lastName as string).trim();
+  const recipientName = `${firstName} ${lastName}`.trim();
+
+  const person = await db.missionHubPersonnel.create({
     data: {
       organizationId, userId,
-      firstName: (body.firstName as string).trim(),
-      lastName: (body.lastName as string).trim(),
-      email: typeof body.email === "string" ? body.email : "",
+      firstName,
+      lastName,
+      email,
       phone: typeof body.phone === "string" ? body.phone : "",
-      title: typeof body.title === "string" ? body.title : "",
+      title,
       department: typeof body.department === "string" ? body.department : "",
       type: typeof body.type === "string" ? body.type : "Staff",
-      role: typeof body.role === "string" ? body.role : "Admin",
-      status: typeof body.status === "string" ? body.status : "Active",
+      role,
+      status: "Inactive",
+      inviteStatus: "invite_created",
       accessLevel: typeof body.accessLevel === "string" ? body.accessLevel : "Basic",
       assignedPrograms: Array.isArray(body.assignedPrograms) ? body.assignedPrograms : [],
       assignedGrants: Array.isArray(body.assignedGrants) ? body.assignedGrants : [],
       notes: typeof body.notes === "string" ? body.notes : "",
     },
   });
-  res.status(201).json(person);
+
+  // Create invite record
+  const { raw, hash } = generateInviteToken();
+  const expiresAt = inviteExpiresAt();
+  const org = await prisma.organization.findUnique({ where: { id: organizationId } });
+
+  const invite = await db.missionHubInvite.create({
+    data: {
+      organizationId,
+      personnelId: person.id as string,
+      recipientEmail: email,
+      recipientName,
+      assignedRole: role,
+      assignedPosition: title,
+      createdByAdminId: userId,
+      tokenHash: hash,
+      expiresAt,
+      status: "pending",
+      emailStatus: "not_sent",
+    },
+  });
+
+  // Attempt email send
+  let emailSent = false;
+  if (email) {
+    emailSent = await sendInviteEmail({
+      to: email,
+      recipientName,
+      organizationName: org?.name ?? "Your Organization",
+      assignedRole: role,
+      assignedPosition: title,
+      rawToken: raw,
+    });
+  }
+
+  const newInviteStatus = emailSent ? "invite_pending" : "invite_created";
+  const newEmailStatus = emailSent ? "sent" : (email ? "failed" : "not_sent");
+
+  await db.missionHubPersonnel.update({
+    where: { id: person.id as string },
+    data: { inviteStatus: newInviteStatus },
+  });
+  await db.missionHubInvite.update({
+    where: { id: invite.id as string },
+    data: { emailStatus: newEmailStatus },
+  });
+
+  const inviteLink = `${FRONTEND_BASE_URL}/invite/accept?token=${raw}`;
+
+  res.status(201).json({
+    ...person,
+    inviteStatus: newInviteStatus,
+    invite: {
+      id: invite.id,
+      emailSent,
+      emailStatus: newEmailStatus,
+      inviteLink,
+    },
+  });
 });
 
 router.put("/personnel/:id", requireMissionHubAuth, async (req, res) => {
@@ -714,6 +945,85 @@ router.delete("/personnel/:id", requireMissionHubAuth, async (req, res) => {
   const existing = await store.missionHubPersonnel.findFirst({ where: { id: req.params.id, organizationId, userId } });
   if (!existing) { res.status(404).json({ error: "Personnel record not found" }); return; }
   await store.missionHubPersonnel.update({ where: { id: req.params.id }, data: { isActive: false } });
+  res.status(204).send();
+});
+
+// ─── Invites (admin) ──────────────────────────────────────────────────────────
+
+router.get("/invites", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const db = getInviteStore();
+  const invites = await db.missionHubInvite.findMany({
+    where: { organizationId },
+    orderBy: { createdAt: "desc" } as Record<string, unknown>,
+  });
+  res.json(invites);
+});
+
+router.post("/invites/:id/resend", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const db = getInviteStore();
+
+  const invite = await db.missionHubInvite.findFirst({
+    where: { id: req.params.id, organizationId },
+  });
+  if (!invite) { res.status(404).json({ error: "Invite not found" }); return; }
+  if (invite.status === "accepted") { res.status(409).json({ error: "Invite already accepted" }); return; }
+  if (invite.status === "revoked") { res.status(409).json({ error: "Invite has been revoked" }); return; }
+
+  const { raw, hash } = generateInviteToken();
+  const expiresAt = inviteExpiresAt();
+  const org = await prisma.organization.findUnique({ where: { id: organizationId } });
+
+  const emailSent = await sendInviteEmail({
+    to: invite.recipientEmail as string,
+    recipientName: invite.recipientName as string,
+    organizationName: org?.name ?? "Your Organization",
+    assignedRole: invite.assignedRole as string,
+    assignedPosition: invite.assignedPosition as string,
+    rawToken: raw,
+  });
+
+  await db.missionHubInvite.update({
+    where: { id: req.params.id },
+    data: {
+      tokenHash: hash,
+      expiresAt,
+      status: "pending",
+      emailStatus: emailSent ? "sent" : "failed",
+      resentAt: new Date(),
+    },
+  });
+
+  if (emailSent) {
+    await db.missionHubPersonnel.update({
+      where: { id: invite.personnelId as string },
+      data: { inviteStatus: "invite_pending" },
+    });
+  }
+
+  const inviteLink = `${FRONTEND_BASE_URL}/invite/accept?token=${raw}`;
+  res.json({ emailSent, inviteLink });
+});
+
+router.delete("/invites/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const db = getInviteStore();
+
+  const invite = await db.missionHubInvite.findFirst({
+    where: { id: req.params.id, organizationId },
+  });
+  if (!invite) { res.status(404).json({ error: "Invite not found" }); return; }
+
+  await db.missionHubInvite.update({
+    where: { id: req.params.id },
+    data: { status: "revoked", revokedAt: new Date() },
+  });
+  await db.missionHubPersonnel.update({
+    where: { id: invite.personnelId as string },
+    data: { inviteStatus: "revoked" },
+  });
+
   res.status(204).send();
 });
 

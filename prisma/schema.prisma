@@ -513,6 +513,8 @@ model MissionHubPersonnel {
   assignedPrograms Json     @default("[]")
   assignedGrants   Json     @default("[]")
   notes            String   @default("")
+  inviteStatus     String   @default("none")
+  // "none" | "invite_created" | "invite_pending" | "accepted" | "revoked"
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -520,6 +522,30 @@ model MissionHubPersonnel {
   @@index([organizationId, userId])
   @@index([organizationId, userId, status])
   @@index([organizationId, userId, type])
+}
+
+model MissionHubInvite {
+  id               String    @id @default(cuid())
+  organizationId   String
+  personnelId      String    @unique
+  recipientEmail   String
+  recipientName    String
+  assignedRole     String
+  assignedPosition String    @default("")
+  createdByAdminId String
+  tokenHash        String    @unique
+  expiresAt        DateTime
+  status           String    @default("pending")   // pending | accepted | revoked | expired
+  emailStatus      String    @default("not_sent")  // not_sent | sent | failed
+  acceptedAt       DateTime?
+  revokedAt        DateTime?
+  resentAt         DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([organizationId, status])
+  @@index([tokenHash])
+  @@index([organizationId, personnelId])
 }
 
 model MissionHubCalendarEntry {
