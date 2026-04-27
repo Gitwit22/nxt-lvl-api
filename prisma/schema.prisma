@@ -496,15 +496,36 @@ model MissionHubExpense {
   amount          Float    @default(0)
   date            String   @default("")
   category        String   @default("")
+  customCategory  String?
   type            String   @default("")
+  expenseScope    String?
+  customExpenseScope String?
   linkedProgramId String?
   linkedProgram   String?
+  linkedProjectId String?
+  linkedProject   String?
+  linkedEventId   String?
+  linkedEvent     String?
+  linkedGrantId   String?
   linkedGrant     String?
-  linkedCampaign  String?
+  linkedSponsorId String?
+  linkedSponsor   String?
+  linkedFundraisingCampaignId String?
+  linkedFundraisingCampaign   String?
+  linkedCampaign  String?  // legacy alias for linkedFundraisingCampaign
+  fundingSourceType String?
+  fundingSourceId   String?
+  customFundingSource String?
   fundingSource   String?
+  billable        Boolean  @default(false)
+  reimbursable    Boolean  @default(false)
   notes           String   @default("")
-  approvalStatus  String   @default("Pending")   // Pending|Approved|Rejected
+  approvalStatus  String   @default("Pending")   // Pending|Approved|Rejected|Draft
   recurring       Boolean  @default(false)
+  receiptFileId   String?
+  receiptUrl      String?
+  receiptName     String?
+  receiptFileMeta Json?
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -512,6 +533,11 @@ model MissionHubExpense {
   @@index([organizationId, userId])
   @@index([organizationId, userId, category])
   @@index([organizationId, userId, approvalStatus])
+  @@index([organizationId, userId, linkedProjectId])
+  @@index([organizationId, userId, linkedEventId])
+  @@index([organizationId, userId, linkedGrantId])
+  @@index([organizationId, userId, linkedSponsorId])
+  @@index([organizationId, userId, linkedFundraisingCampaignId])
 }
 
 model MissionHubSponsor {
@@ -661,12 +687,24 @@ model MissionHubTask {
   title           String
   description     String   @default("")
   assignedTo      String   @default("")
+  assignedPersonId String?
   owner           String   @default("")
   dueDate         String   @default("")
+  completedAt     DateTime?
   priority        String   @default("Medium") // Low|Medium|High
   status          String   @default("To Do")   // To Do|In Progress|Done
   linkedProgramId String?
   linkedProgram   String?
+  linkedProjectId String?
+  linkedProject   String?
+  linkedEventId   String?
+  linkedEvent     String?
+  linkedGrantId   String?
+  linkedGrant     String?
+  linkedSponsorId String?
+  linkedSponsor   String?
+  linkedFundraisingCampaignId String?
+  linkedFundraisingCampaign   String?
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -674,6 +712,8 @@ model MissionHubTask {
   @@index([organizationId, userId, programDomain])
   @@index([organizationId, userId, programDomain, status])
   @@index([organizationId, userId, programDomain, dueDate])
+  @@index([organizationId, userId, programDomain, linkedProjectId])
+  @@index([organizationId, userId, programDomain, assignedPersonId])
 }
 
 model MissionHubTimeEntry {
@@ -768,6 +808,82 @@ model MissionHubTimesheetApprovalLog {
 
   @@index([organizationId, programDomain, timesheetSubmissionId, createdAt])
   @@index([organizationId, actorUserId, programDomain])
+}
+
+model MissionHubDocument {
+  id               String   @id @default(cuid())
+  organizationId   String
+  programDomain    String   @default("mission-hub")
+  uploaderUserId   String
+  title            String
+  originalFilename String   @default("")
+  mimeType         String   @default("")
+  sizeBytes        Int      @default(0)
+  storageKey       String   @default("")
+  storageBucket    String   @default("")
+  storageProvider  String   @default("r2")  // r2|local|external
+  linkedEntityType String?  // program|project|event|grant|sponsor|campaign|expense|personnel
+  linkedEntityId   String?
+  tags             Json     @default("[]")
+  metadata         Json     @default("{}")
+  isActive         Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([organizationId, programDomain])
+  @@index([organizationId, programDomain, linkedEntityType, linkedEntityId])
+  @@index([organizationId, programDomain, uploaderUserId])
+}
+
+model MissionHubStorageEndpoint {
+  id             String   @id @default(cuid())
+  organizationId String
+  programDomain  String   @default("mission-hub")
+  name           String
+  provider       String   @default("r2")  // r2|local_server_storage|shared_file_system|external
+  bucketOrBinding String  @default("")    // bucket name or Cloudflare binding name
+  basePrefix     String   @default("")
+  enabled        Boolean  @default(true)
+  isDefault      Boolean  @default(false)
+  config         Json     @default("{}")  // non-secret provider settings (region, endpoint URL, etc.)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([organizationId, programDomain, name])
+  @@index([organizationId, programDomain])
+  @@index([organizationId, programDomain, enabled])
+}
+
+model MissionHubOrganizationSettings {
+  id              String   @id @default(cuid())
+  organizationId  String   @unique
+  orgDisplayName  String   @default("")
+  fiscalYearStart String   @default("01-01") // MM-DD format
+  defaultTimezone String   @default("America/New_York")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([organizationId])
+}
+
+model MissionHubScheduledReport {
+  id             String   @id @default(cuid())
+  organizationId String
+  createdByUserId String
+  name           String
+  reportType     String   @default("")
+  schedule       String   @default("weekly")  // daily|weekly|monthly|quarterly
+  recipients     Json     @default("[]")       // string[] of email addresses
+  filters        Json     @default("{}")
+  isActive       Boolean  @default(true)
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+  @@index([organizationId, isActive])
+  @@index([nextRunAt])
 }
 
 // ─── End Mission Hub ──────────────────────────────────────────────────────────

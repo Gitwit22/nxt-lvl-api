@@ -105,6 +105,19 @@ const TIME_ENTRY_STATUSES = new Set([
 
 const FINANCE_APPROVER_ROLES = new Set(["finance", "admin", "executive director", "deputy director"]);
 const ADMIN_ROLES = new Set(["admin", "executive director", "deputy director"]);
+
+// Personnel roles that require the requester to hold an admin role to assign.
+// A non-admin cannot elevate another person (or themselves) to these roles.
+const ELEVATED_PERSONNEL_ROLES = new Set([
+  "executive director",
+  "deputy director",
+  "finance",
+  "admin",
+  "program manager",
+]);
+
+// Minimum milliseconds between consecutive resends for the same invite.
+const INVITE_RESEND_COOLDOWN_MS = 60_000;
 const LOCKED_ENTRY_STATUSES = new Set(["submitted", "finance_review", "approved", "processed", "archived"]);
 
 function normalizeRoleValue(value: unknown): string {
@@ -425,23 +438,23 @@ router.use(requireMissionHubAuth, requireProgramSubscription("mission-hub"));
 // ─── Programs ────────────────────────────────────────────────────────────────
 
 router.get("/programs", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubProgram: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
   const programs = await store.missionHubProgram.findMany({
-    where: { organizationId, userId, isActive: true },
+    where: { organizationId, isActive: true },
     orderBy: { name: "asc" },
   });
   res.json(programs);
 });
 
 router.get("/programs/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubProgram: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
   };
-  const program = await store.missionHubProgram.findFirst({ where: { id: req.params.id, organizationId, userId } });
+  const program = await store.missionHubProgram.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
   if (!program) { res.status(404).json({ error: "Program not found" }); return; }
   res.json(program);
 });
@@ -532,7 +545,6 @@ router.get("/projects", requireMissionHubAuth, async (req, res) => {
 
   const where: Record<string, unknown> = {
     organizationId,
-    userId,
     programDomain: MISSION_HUB_PROGRAM_DOMAIN,
     isActive: true,
   };
@@ -571,7 +583,7 @@ router.get("/projects", requireMissionHubAuth, async (req, res) => {
 });
 
 router.get("/projects/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubProject: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
   };
@@ -579,7 +591,6 @@ router.get("/projects/:id", requireMissionHubAuth, async (req, res) => {
     where: {
       id: req.params.id,
       organizationId,
-      userId,
       programDomain: MISSION_HUB_PROGRAM_DOMAIN,
       isActive: true,
     },
@@ -806,23 +817,23 @@ router.delete("/projects/:id", requireMissionHubAuth, async (req, res) => {
 // ─── Grants ───────────────────────────────────────────────────────────────────
 
 router.get("/grants", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubGrant: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
   const grants = await store.missionHubGrant.findMany({
-    where: { organizationId, userId, isActive: true },
+    where: { organizationId, isActive: true },
     orderBy: { grantName: "asc" },
   });
   res.json(grants);
 });
 
 router.get("/grants/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubGrant: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
   };
-  const grant = await store.missionHubGrant.findFirst({ where: { id: req.params.id, organizationId, userId } });
+  const grant = await store.missionHubGrant.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
   if (!grant) { res.status(404).json({ error: "Grant not found" }); return; }
   res.json(grant);
 });
@@ -898,12 +909,12 @@ router.delete("/grants/:id", requireMissionHubAuth, async (req, res) => {
 // ─── Expenses ─────────────────────────────────────────────────────────────────
 
 router.get("/expenses", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const { category, approvalStatus } = req.query;
   const store = prisma as unknown as {
     missionHubExpense: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
-  const where: Record<string, unknown> = { organizationId, userId, isActive: true };
+  const where: Record<string, unknown> = { organizationId, isActive: true };
   if (typeof category === "string") where.category = category;
   if (typeof approvalStatus === "string") where.approvalStatus = approvalStatus;
   const expenses = await store.missionHubExpense.findMany({ where, orderBy: { date: "desc" } });
@@ -911,11 +922,11 @@ router.get("/expenses", requireMissionHubAuth, async (req, res) => {
 });
 
 router.get("/expenses/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubExpense: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
   };
-  const expense = await store.missionHubExpense.findFirst({ where: { id: req.params.id, organizationId, userId } });
+  const expense = await store.missionHubExpense.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
   if (!expense) { res.status(404).json({ error: "Expense not found" }); return; }
   res.json(expense);
 });
@@ -929,6 +940,7 @@ router.post("/expenses", requireMissionHubAuth, async (req, res) => {
   if (typeof body.expenseName !== "string" || !body.expenseName.trim()) {
     res.status(400).json({ error: "expenseName is required" }); return;
   }
+  const nullStr = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
   const expense = await store.missionHubExpense.create({
     data: {
       organizationId, userId,
@@ -936,15 +948,38 @@ router.post("/expenses", requireMissionHubAuth, async (req, res) => {
       amount: typeof body.amount === "number" ? body.amount : 0,
       date: typeof body.date === "string" ? body.date : "",
       category: typeof body.category === "string" ? body.category : "",
+      customCategory: nullStr(body.customCategory),
       type: typeof body.type === "string" ? body.type : "",
-      linkedProgramId: typeof body.linkedProgramId === "string" ? body.linkedProgramId : null,
-      linkedProgram: typeof body.linkedProgram === "string" ? body.linkedProgram : null,
-      linkedGrant: typeof body.linkedGrant === "string" ? body.linkedGrant : null,
-      linkedCampaign: typeof body.linkedCampaign === "string" ? body.linkedCampaign : null,
-      fundingSource: typeof body.fundingSource === "string" ? body.fundingSource : null,
+      expenseScope: nullStr(body.expenseScope),
+      customExpenseScope: nullStr(body.customExpenseScope),
+      linkedProgramId: nullStr(body.linkedProgramId),
+      linkedProgram: nullStr(body.linkedProgram),
+      linkedProjectId: nullStr(body.linkedProjectId),
+      linkedProject: nullStr(body.linkedProject),
+      linkedEventId: nullStr(body.linkedEventId),
+      linkedEvent: nullStr(body.linkedEvent),
+      linkedGrantId: nullStr(body.linkedGrantId),
+      linkedGrant: nullStr(body.linkedGrant),
+      linkedSponsorId: nullStr(body.linkedSponsorId),
+      linkedSponsor: nullStr(body.linkedSponsor),
+      linkedFundraisingCampaignId: nullStr(body.linkedFundraisingCampaignId),
+      linkedFundraisingCampaign: nullStr(body.linkedFundraisingCampaign),
+      linkedCampaign: nullStr(body.linkedCampaign) ?? nullStr(body.linkedFundraisingCampaign),
+      fundingSourceType: nullStr(body.fundingSourceType),
+      fundingSourceId: nullStr(body.fundingSourceId),
+      customFundingSource: nullStr(body.customFundingSource),
+      fundingSource: nullStr(body.fundingSource),
+      billable: body.billable === true,
+      reimbursable: body.reimbursable === true,
       notes: typeof body.notes === "string" ? body.notes : "",
       approvalStatus: typeof body.approvalStatus === "string" ? body.approvalStatus : "Pending",
       recurring: body.recurring === true,
+      receiptFileId: nullStr(body.receiptFileId),
+      receiptUrl: nullStr(body.receiptUrl),
+      receiptName: nullStr(body.receiptName),
+      receiptFileMeta: body.receiptFileMeta && typeof body.receiptFileMeta === "object" && !Array.isArray(body.receiptFileMeta)
+        ? body.receiptFileMeta
+        : undefined,
     },
   });
   res.status(201).json(expense);
@@ -963,12 +998,26 @@ router.put("/expenses/:id", requireMissionHubAuth, async (req, res) => {
   if (!existing) { res.status(404).json({ error: "Expense not found" }); return; }
 
   const data: Record<string, unknown> = {};
-  const strFields = ["expenseName", "date", "category", "type", "notes", "approvalStatus"] as const;
+  const strFields = ["expenseName", "date", "category", "type", "notes", "approvalStatus",
+    "expenseScope", "customExpenseScope", "customCategory"] as const;
   for (const f of strFields) { if (typeof body[f] === "string") data[f] = body[f]; }
   if (typeof body.amount === "number") data.amount = body.amount;
   if (typeof body.recurring === "boolean") data.recurring = body.recurring;
-  const nullableStr = ["linkedProgramId", "linkedProgram", "linkedGrant", "linkedCampaign", "fundingSource"] as const;
-  for (const f of nullableStr) { if (f in body) data[f] = typeof body[f] === "string" ? body[f] : null; }
+  if (typeof body.billable === "boolean") data.billable = body.billable;
+  if (typeof body.reimbursable === "boolean") data.reimbursable = body.reimbursable;
+  const nullableStrFields = [
+    "linkedProgramId", "linkedProgram", "linkedProjectId", "linkedProject",
+    "linkedEventId", "linkedEvent", "linkedGrantId", "linkedGrant",
+    "linkedSponsorId", "linkedSponsor", "linkedFundraisingCampaignId", "linkedFundraisingCampaign",
+    "linkedCampaign", "fundingSourceType", "fundingSourceId", "customFundingSource", "fundingSource",
+    "receiptFileId", "receiptUrl", "receiptName",
+  ] as const;
+  for (const f of nullableStrFields) { if (f in body) data[f] = typeof body[f] === "string" ? body[f] : null; }
+  if ("receiptFileMeta" in body) {
+    data.receiptFileMeta = body.receiptFileMeta && typeof body.receiptFileMeta === "object" && !Array.isArray(body.receiptFileMeta)
+      ? body.receiptFileMeta
+      : null;
+  }
 
   const updated = await store.missionHubExpense.update({ where: { id: req.params.id }, data });
   res.json(updated);
@@ -991,23 +1040,23 @@ router.delete("/expenses/:id", requireMissionHubAuth, async (req, res) => {
 // ─── Sponsors ─────────────────────────────────────────────────────────────────
 
 router.get("/sponsors", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const { status } = req.query;
   const store = prisma as unknown as {
     missionHubSponsor: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
-  const where: Record<string, unknown> = { organizationId, userId, isActive: true };
+  const where: Record<string, unknown> = { organizationId, isActive: true };
   if (typeof status === "string") where.status = status;
   const sponsors = await store.missionHubSponsor.findMany({ where, orderBy: { organizationName: "asc" } });
   res.json(sponsors);
 });
 
 router.get("/sponsors/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubSponsor: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
   };
-  const sponsor = await store.missionHubSponsor.findFirst({ where: { id: req.params.id, organizationId, userId } });
+  const sponsor = await store.missionHubSponsor.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
   if (!sponsor) { res.status(404).json({ error: "Sponsor not found" }); return; }
   res.json(sponsor);
 });
@@ -1082,23 +1131,23 @@ router.delete("/sponsors/:id", requireMissionHubAuth, async (req, res) => {
 // ─── Campaigns ────────────────────────────────────────────────────────────────
 
 router.get("/campaigns", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const { status } = req.query;
   const store = prisma as unknown as {
     missionHubCampaign: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
-  const where: Record<string, unknown> = { organizationId, userId, isActive: true };
+  const where: Record<string, unknown> = { organizationId, isActive: true };
   if (typeof status === "string") where.status = status;
   const campaigns = await store.missionHubCampaign.findMany({ where, orderBy: { name: "asc" } });
   res.json(campaigns);
 });
 
 router.get("/campaigns/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubCampaign: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
   };
-  const campaign = await store.missionHubCampaign.findFirst({ where: { id: req.params.id, organizationId, userId } });
+  const campaign = await store.missionHubCampaign.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
   if (!campaign) { res.status(404).json({ error: "Campaign not found" }); return; }
   res.json(campaign);
 });
@@ -1175,12 +1224,12 @@ router.delete("/campaigns/:id", requireMissionHubAuth, async (req, res) => {
 // ─── Personnel ────────────────────────────────────────────────────────────────
 
 router.get("/personnel", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const { status, type } = req.query;
   const store = prisma as unknown as {
     missionHubPersonnel: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
-  const where: Record<string, unknown> = { organizationId, userId, isActive: true };
+  const where: Record<string, unknown> = { organizationId, isActive: true };
   if (typeof status === "string") where.status = status;
   if (typeof type === "string") where.type = type;
   const personnel = await store.missionHubPersonnel.findMany({
@@ -1191,17 +1240,17 @@ router.get("/personnel", requireMissionHubAuth, async (req, res) => {
 });
 
 router.get("/personnel/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubPersonnel: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
   };
-  const person = await store.missionHubPersonnel.findFirst({ where: { id: req.params.id, organizationId, userId } });
+  const person = await store.missionHubPersonnel.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
   if (!person) { res.status(404).json({ error: "Personnel record not found" }); return; }
   res.json(person);
 });
 
 router.post("/personnel", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { userId, organizationId, role: requesterRole } = getUser(req);
   const body = isRecord(req.body) ? req.body : {};
   if (typeof body.firstName !== "string" || !body.firstName.trim()) {
     res.status(400).json({ error: "firstName is required" }); return;
@@ -1213,6 +1262,16 @@ router.post("/personnel", requireMissionHubAuth, async (req, res) => {
   const db = getInviteStore();
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const role = typeof body.role === "string" ? body.role : "Admin";
+
+  // Guard: only admins/executives may assign elevated roles to new personnel.
+  const normalizedRequestedRole = normalizeRoleValue(role);
+  if (ELEVATED_PERSONNEL_ROLES.has(normalizedRequestedRole)) {
+    const normalizedRequesterRole = normalizeRoleValue(requesterRole);
+    if (!ADMIN_ROLES.has(normalizedRequesterRole)) {
+      res.status(403).json({ error: "You do not have permission to assign this role." });
+      return;
+    }
+  }
   const title = typeof body.title === "string" ? body.title : "";
   const firstName = (body.firstName as string).trim();
   const lastName = (body.lastName as string).trim();
@@ -1299,7 +1358,7 @@ router.post("/personnel", requireMissionHubAuth, async (req, res) => {
 });
 
 router.put("/personnel/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { userId, organizationId, role: requesterRole } = getUser(req);
   const body = isRecord(req.body) ? req.body : {};
   const store = prisma as unknown as {
     missionHubPersonnel: {
@@ -1309,6 +1368,18 @@ router.put("/personnel/:id", requireMissionHubAuth, async (req, res) => {
   };
   const existing = await store.missionHubPersonnel.findFirst({ where: { id: req.params.id, organizationId, userId } });
   if (!existing) { res.status(404).json({ error: "Personnel record not found" }); return; }
+
+  // Guard: only admins/executives may assign or change to elevated roles.
+  if (typeof body.role === "string") {
+    const normalizedRequestedRole = normalizeRoleValue(body.role);
+    if (ELEVATED_PERSONNEL_ROLES.has(normalizedRequestedRole)) {
+      const normalizedRequesterRole = normalizeRoleValue(requesterRole);
+      if (!ADMIN_ROLES.has(normalizedRequesterRole)) {
+        res.status(403).json({ error: "You do not have permission to assign this role." });
+        return;
+      }
+    }
+  }
 
   const data: Record<string, unknown> = {};
   const strFields = ["firstName", "lastName", "email", "phone", "title", "department", "type", "role", "status", "accessLevel", "notes"] as const;
@@ -1356,6 +1427,21 @@ router.post("/invites/:id/resend", requireMissionHubAuth, async (req, res) => {
   if (!invite) { res.status(404).json({ error: "Invite not found" }); return; }
   if (invite.status === "accepted") { res.status(409).json({ error: "Invite already accepted" }); return; }
   if (invite.status === "revoked") { res.status(409).json({ error: "Invite has been revoked" }); return; }
+
+  // Rate-limit: enforce a minimum cooldown between resends.
+  const lastSent = invite.resentAt ?? invite.createdAt;
+  if (lastSent) {
+    const msSinceLast = Date.now() - new Date(lastSent as string | Date).getTime();
+    if (msSinceLast < INVITE_RESEND_COOLDOWN_MS) {
+      const retryAfterSecs = Math.ceil((INVITE_RESEND_COOLDOWN_MS - msSinceLast) / 1000);
+      res.setHeader("Retry-After", String(retryAfterSecs));
+      res.status(429).json({
+        error: "Resend too soon. Please wait before sending another invite.",
+        retryAfterSeconds: retryAfterSecs,
+      });
+      return;
+    }
+  }
 
   const { raw, hash } = generateInviteToken();
   const expiresAt = inviteExpiresAt();
@@ -1416,14 +1502,13 @@ router.delete("/invites/:id", requireMissionHubAuth, async (req, res) => {
 // ─── Tasks ───────────────────────────────────────────────────────────────────
 
 router.get("/tasks", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const { status } = req.query;
   const store = prisma as unknown as {
     missionHubTask: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
   const where: Record<string, unknown> = {
     organizationId,
-    userId,
     programDomain: MISSION_HUB_PROGRAM_DOMAIN,
     isActive: true,
   };
@@ -1445,6 +1530,8 @@ router.post("/tasks", requireMissionHubAuth, async (req, res) => {
     return;
   }
 
+  const taskNullStr = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : null);
+  const completedAt = body.status === "Done" ? new Date() : null;
   const task = await store.missionHubTask.create({
     data: {
       organizationId,
@@ -1453,12 +1540,24 @@ router.post("/tasks", requireMissionHubAuth, async (req, res) => {
       title: body.title.trim(),
       description: typeof body.description === "string" ? body.description : "",
       assignedTo: typeof body.assignedTo === "string" ? body.assignedTo : "",
+      assignedPersonId: taskNullStr(body.assignedPersonId),
       owner: typeof body.owner === "string" ? body.owner : "",
       dueDate: typeof body.dueDate === "string" ? body.dueDate : "",
+      completedAt,
       priority: typeof body.priority === "string" ? body.priority : "Medium",
       status: typeof body.status === "string" ? body.status : "To Do",
-      linkedProgramId: typeof body.linkedProgramId === "string" ? body.linkedProgramId : null,
-      linkedProgram: typeof body.linkedProgram === "string" ? body.linkedProgram : null,
+      linkedProgramId: taskNullStr(body.linkedProgramId),
+      linkedProgram: taskNullStr(body.linkedProgram),
+      linkedProjectId: taskNullStr(body.linkedProjectId),
+      linkedProject: taskNullStr(body.linkedProject),
+      linkedEventId: taskNullStr(body.linkedEventId),
+      linkedEvent: taskNullStr(body.linkedEvent),
+      linkedGrantId: taskNullStr(body.linkedGrantId),
+      linkedGrant: taskNullStr(body.linkedGrant),
+      linkedSponsorId: taskNullStr(body.linkedSponsorId),
+      linkedSponsor: taskNullStr(body.linkedSponsor),
+      linkedFundraisingCampaignId: taskNullStr(body.linkedFundraisingCampaignId),
+      linkedFundraisingCampaign: taskNullStr(body.linkedFundraisingCampaign),
     },
   });
 
@@ -1493,8 +1592,19 @@ router.put("/tasks/:id", requireMissionHubAuth, async (req, res) => {
   for (const f of strFields) {
     if (typeof body[f] === "string") data[f] = body[f];
   }
-  if ("linkedProgramId" in body) data.linkedProgramId = typeof body.linkedProgramId === "string" ? body.linkedProgramId : null;
-  if ("linkedProgram" in body) data.linkedProgram = typeof body.linkedProgram === "string" ? body.linkedProgram : null;
+  // Set completedAt when status transitions to Done, clear it otherwise.
+  if (typeof body.status === "string") {
+    data.completedAt = body.status === "Done" ? new Date() : null;
+  }
+  const taskNullableFields = [
+    "linkedProgramId", "linkedProgram", "linkedProjectId", "linkedProject",
+    "linkedEventId", "linkedEvent", "linkedGrantId", "linkedGrant",
+    "linkedSponsorId", "linkedSponsor", "linkedFundraisingCampaignId", "linkedFundraisingCampaign",
+    "assignedPersonId",
+  ] as const;
+  for (const f of taskNullableFields) {
+    if (f in body) data[f] = typeof body[f] === "string" ? body[f] : null;
+  }
 
   const updated = await store.missionHubTask.update({ where: { id: req.params.id }, data });
   res.json(updated);
@@ -2053,12 +2163,12 @@ router.post("/timesheet-submissions/:id/reopen", requireMissionHubAuth, async (r
 // ─── Calendar Entries ─────────────────────────────────────────────────────────
 
 router.get("/calendar", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const { dateFrom, dateTo } = req.query;
   const store = prisma as unknown as {
     missionHubCalendarEntry: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
-  const where: Record<string, unknown> = { organizationId, userId, isActive: true };
+  const where: Record<string, unknown> = { organizationId, isActive: true };
   if (typeof dateFrom === "string" || typeof dateTo === "string") {
     where.date = {};
     if (typeof dateFrom === "string") (where.date as Record<string, unknown>).gte = dateFrom;
@@ -2209,13 +2319,12 @@ async function syncEventToCalendar(
 }
 
 router.get("/events", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as EventStore;
   const { programId, projectId, grantId, sponsorId, fundraisingCampaignId, status, eventType, fundingSourceType, billable, dateFrom, dateTo, search, query } = req.query;
 
   const where: Record<string, unknown> = {
     organizationId,
-    userId,
     programDomain: MISSION_HUB_PROGRAM_DOMAIN,
     isActive: true,
   };
@@ -2267,10 +2376,10 @@ router.get("/events", requireMissionHubAuth, async (req, res) => {
 });
 
 router.get("/events/:id", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as EventStore;
   const event = await store.missionHubEvent.findFirst({
-    where: { id: req.params.id, organizationId, userId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, isActive: true },
+    where: { id: req.params.id, organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, isActive: true },
   });
   if (!event) { res.status(404).json({ error: "Event not found" }); return; }
   res.json(event);
@@ -2512,12 +2621,12 @@ router.delete("/events/:id", requireMissionHubAuth, async (req, res) => {
 // ─── Saved Reports ────────────────────────────────────────────────────────────
 
 router.get("/reports", requireMissionHubAuth, async (req, res) => {
-  const { userId, organizationId } = getUser(req);
+  const { organizationId } = getUser(req);
   const store = prisma as unknown as {
     missionHubSavedReport: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
   const reports = await store.missionHubSavedReport.findMany({
-    where: { organizationId, userId, isActive: true },
+    where: { organizationId, isActive: true },
     orderBy: [{ isFavorite: "desc" }, { name: "asc" }],
   });
   res.json(reports);
@@ -2586,6 +2695,328 @@ router.delete("/reports/:id", requireMissionHubAuth, async (req, res) => {
 
 router.get("/health", (_req, res) => {
   res.json({ ok: true, program: "mission-hub", status: "ready" });
+});
+
+// ─── Documents ────────────────────────────────────────────────────────────────
+
+type DocStore = {
+  missionHubDocument: {
+    findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+};
+
+router.get("/documents", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const { linkedEntityType, linkedEntityId } = req.query;
+  const store = prisma as unknown as DocStore;
+  const where: Record<string, unknown> = { organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, isActive: true };
+  if (typeof linkedEntityType === "string") where.linkedEntityType = linkedEntityType;
+  if (typeof linkedEntityId === "string") where.linkedEntityId = linkedEntityId;
+  const docs = await store.missionHubDocument.findMany({ where, orderBy: { createdAt: "desc" } });
+  res.json(docs);
+});
+
+router.get("/documents/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const store = prisma as unknown as DocStore;
+  const doc = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
+  if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+  res.json(doc);
+});
+
+router.post("/documents", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as DocStore;
+  if (typeof body.title !== "string" || !body.title.trim()) {
+    res.status(400).json({ error: "title is required" }); return;
+  }
+  const doc = await store.missionHubDocument.create({
+    data: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      uploaderUserId: userId,
+      title: (body.title as string).trim(),
+      originalFilename: typeof body.originalFilename === "string" ? body.originalFilename : "",
+      mimeType: typeof body.mimeType === "string" ? body.mimeType : "",
+      sizeBytes: typeof body.sizeBytes === "number" ? body.sizeBytes : 0,
+      storageKey: typeof body.storageKey === "string" ? body.storageKey : "",
+      storageBucket: typeof body.storageBucket === "string" ? body.storageBucket : "",
+      storageProvider: typeof body.storageProvider === "string" ? body.storageProvider : "r2",
+      linkedEntityType: typeof body.linkedEntityType === "string" ? body.linkedEntityType : null,
+      linkedEntityId: typeof body.linkedEntityId === "string" ? body.linkedEntityId : null,
+      tags: Array.isArray(body.tags) ? body.tags : [],
+      metadata: isRecord(body.metadata) ? body.metadata : {},
+    },
+  });
+  res.status(201).json(doc);
+});
+
+router.put("/documents/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as DocStore;
+  const existing = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
+  if (!existing) { res.status(404).json({ error: "Document not found" }); return; }
+  const data: Record<string, unknown> = {};
+  const strFields = ["title", "linkedEntityType", "linkedEntityId", "storageKey", "storageBucket", "storageProvider"] as const;
+  for (const f of strFields) { if (typeof body[f] === "string") data[f] = body[f]; }
+  if ("tags" in body && Array.isArray(body.tags)) data.tags = body.tags;
+  if ("metadata" in body && isRecord(body.metadata)) data.metadata = body.metadata;
+  const updated = await store.missionHubDocument.update({ where: { id: req.params.id }, data });
+  res.json(updated);
+});
+
+router.delete("/documents/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const store = prisma as unknown as DocStore;
+  const existing = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
+  if (!existing) { res.status(404).json({ error: "Document not found" }); return; }
+  await store.missionHubDocument.update({ where: { id: req.params.id }, data: { isActive: false } });
+  res.status(204).send();
+});
+
+// ─── Storage Endpoints ────────────────────────────────────────────────────────
+
+type EndpointStore = {
+  missionHubStorageEndpoint: {
+    findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    delete: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    updateMany: (args: Record<string, unknown>) => Promise<unknown>;
+  };
+};
+
+router.get("/storage-endpoints", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const store = prisma as unknown as EndpointStore;
+  const endpoints = await store.missionHubStorageEndpoint.findMany({
+    where: { organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN },
+    orderBy: { createdAt: "asc" },
+  });
+  res.json(endpoints);
+});
+
+router.post("/storage-endpoints", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as EndpointStore;
+  if (typeof body.name !== "string" || !body.name.trim()) {
+    res.status(400).json({ error: "name is required" }); return;
+  }
+  const endpoint = await store.missionHubStorageEndpoint.create({
+    data: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      name: (body.name as string).trim(),
+      provider: typeof body.provider === "string" ? body.provider : "r2",
+      bucketOrBinding: typeof body.bucketOrBinding === "string" ? body.bucketOrBinding : "",
+      basePrefix: typeof body.basePrefix === "string" ? body.basePrefix : "",
+      enabled: body.enabled !== false,
+      isDefault: body.isDefault === true,
+      config: isRecord(body.config) ? body.config : {},
+    },
+  });
+  // If this is set as default, clear the default flag on others.
+  if (endpoint.isDefault) {
+    await store.missionHubStorageEndpoint.updateMany({
+      where: { organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, id: { not: endpoint.id } },
+      data: { isDefault: false },
+    });
+  }
+  res.status(201).json(endpoint);
+});
+
+router.put("/storage-endpoints/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as EndpointStore;
+  const existing = await store.missionHubStorageEndpoint.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) { res.status(404).json({ error: "Storage endpoint not found" }); return; }
+  const data: Record<string, unknown> = {};
+  const strFields = ["name", "provider", "bucketOrBinding", "basePrefix"] as const;
+  for (const f of strFields) { if (typeof body[f] === "string") data[f] = body[f]; }
+  if (typeof body.enabled === "boolean") data.enabled = body.enabled;
+  if (typeof body.isDefault === "boolean") data.isDefault = body.isDefault;
+  if ("config" in body && isRecord(body.config)) data.config = body.config;
+  const updated = await store.missionHubStorageEndpoint.update({ where: { id: req.params.id }, data });
+  if (updated.isDefault) {
+    await store.missionHubStorageEndpoint.updateMany({
+      where: { organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, id: { not: req.params.id } },
+      data: { isDefault: false },
+    });
+  }
+  res.json(updated);
+});
+
+router.delete("/storage-endpoints/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const store = prisma as unknown as EndpointStore;
+  const existing = await store.missionHubStorageEndpoint.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) { res.status(404).json({ error: "Storage endpoint not found" }); return; }
+  await store.missionHubStorageEndpoint.delete({ where: { id: req.params.id } });
+  res.status(204).send();
+});
+
+// ─── Organization Settings ────────────────────────────────────────────────────
+
+type OrgSettingsStore = {
+  missionHubOrganizationSettings: {
+    findUnique: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    upsert: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+};
+
+router.get("/organization-settings", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const store = prisma as unknown as OrgSettingsStore;
+  const settings = await store.missionHubOrganizationSettings.findUnique({ where: { organizationId } });
+  if (!settings) {
+    // Return defaults for org with no settings yet — do not 404.
+    res.json({ organizationId, orgDisplayName: "", fiscalYearStart: "01-01", defaultTimezone: "America/New_York" });
+    return;
+  }
+  res.json(settings);
+});
+
+router.put("/organization-settings", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, role } = getUser(req);
+  if (!ADMIN_ROLES.has(normalizeRoleValue(role))) {
+    res.status(403).json({ error: "Only admins can update organization settings." });
+    return;
+  }
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as OrgSettingsStore;
+  const data: Record<string, unknown> = {};
+  if (typeof body.orgDisplayName === "string") data.orgDisplayName = body.orgDisplayName.trim();
+  if (typeof body.fiscalYearStart === "string") data.fiscalYearStart = body.fiscalYearStart.trim();
+  if (typeof body.defaultTimezone === "string") data.defaultTimezone = body.defaultTimezone.trim();
+  const settings = await store.missionHubOrganizationSettings.upsert({
+    where: { organizationId },
+    update: data,
+    create: { organizationId, ...data },
+  });
+  res.json(settings);
+});
+
+// ─── Scheduled Reports ────────────────────────────────────────────────────────
+
+type ScheduledReportStore = {
+  missionHubScheduledReport: {
+    findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    delete: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+};
+
+router.get("/scheduled-reports", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const store = prisma as unknown as ScheduledReportStore;
+  const reports = await store.missionHubScheduledReport.findMany({
+    where: { organizationId },
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(reports);
+});
+
+router.post("/scheduled-reports", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as ScheduledReportStore;
+  if (typeof body.name !== "string" || !body.name.trim()) {
+    res.status(400).json({ error: "name is required" }); return;
+  }
+  const report = await store.missionHubScheduledReport.create({
+    data: {
+      organizationId,
+      createdByUserId: userId,
+      name: (body.name as string).trim(),
+      reportType: typeof body.reportType === "string" ? body.reportType : "",
+      schedule: typeof body.schedule === "string" ? body.schedule : "weekly",
+      recipients: Array.isArray(body.recipients) ? body.recipients : [],
+      filters: isRecord(body.filters) ? body.filters : {},
+      isActive: body.isActive !== false,
+    },
+  });
+  res.status(201).json(report);
+});
+
+router.put("/scheduled-reports/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as ScheduledReportStore;
+  const existing = await store.missionHubScheduledReport.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) { res.status(404).json({ error: "Scheduled report not found" }); return; }
+  const data: Record<string, unknown> = {};
+  const strFields = ["name", "reportType", "schedule"] as const;
+  for (const f of strFields) { if (typeof body[f] === "string") data[f] = body[f]; }
+  if ("recipients" in body && Array.isArray(body.recipients)) data.recipients = body.recipients;
+  if ("filters" in body && isRecord(body.filters)) data.filters = body.filters;
+  if (typeof body.isActive === "boolean") data.isActive = body.isActive;
+  const updated = await store.missionHubScheduledReport.update({ where: { id: req.params.id }, data });
+  res.json(updated);
+});
+
+router.delete("/scheduled-reports/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const store = prisma as unknown as ScheduledReportStore;
+  const existing = await store.missionHubScheduledReport.findFirst({ where: { id: req.params.id, organizationId } });
+  if (!existing) { res.status(404).json({ error: "Scheduled report not found" }); return; }
+  await store.missionHubScheduledReport.delete({ where: { id: req.params.id } });
+  res.status(204).send();
+});
+
+// ─── Financial Summary ────────────────────────────────────────────────────────
+
+router.get("/financial-summary", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+
+  type FinancialStore = {
+    missionHubExpense: { aggregate: (args: Record<string, unknown>) => Promise<Record<string, unknown>> };
+    missionHubGrant: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+    missionHubSponsor: { aggregate: (args: Record<string, unknown>) => Promise<Record<string, unknown>> };
+    missionHubCampaign: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+  };
+
+  const store = prisma as unknown as FinancialStore;
+
+  const [expenseAgg, grants, sponsorAgg, campaigns] = await Promise.all([
+    store.missionHubExpense.aggregate({
+      where: { organizationId, isActive: true, approvalStatus: { in: ["Approved", "Pending"] } },
+      _sum: { amount: true },
+    }),
+    store.missionHubGrant.findMany({ where: { organizationId, isActive: true }, select: { amountAwarded: true, status: true } }),
+    store.missionHubSponsor.aggregate({
+      where: { organizationId, isActive: true },
+      _sum: { contributionAmount: true },
+    }),
+    store.missionHubCampaign.findMany({ where: { organizationId, isActive: true }, select: { goalAmount: true, status: true } }),
+  ]);
+
+  const totalExpenses = Number((expenseAgg._sum as Record<string, unknown>)?.amount ?? 0);
+  const totalGrantFunding = grants.reduce((sum, g) => sum + Number(g.amountAwarded ?? 0), 0);
+  const totalSponsorContributions = Number((sponsorAgg._sum as Record<string, unknown>)?.contributionAmount ?? 0);
+  const totalCampaignGoals = campaigns.reduce((sum, c) => sum + Number(c.goalAmount ?? 0), 0);
+  const totalRevenue = totalGrantFunding + totalSponsorContributions;
+  const netPosition = totalRevenue - totalExpenses;
+
+  res.json({
+    totalExpenses,
+    totalGrantFunding,
+    totalSponsorContributions,
+    totalCampaignGoals,
+    totalRevenue,
+    netPosition,
+    activeGrantCount: grants.filter((g) => g.status === "Active").length,
+    activeCampaignCount: campaigns.filter((c) => c.status === "Active").length,
+  });
 });
 
 export { router as missionHubRouter };

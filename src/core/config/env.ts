@@ -58,14 +58,15 @@ export const CORS_ORIGIN =
 
 /**
  * Allowed origin domains for dynamic subdomain matching.
- * Any *.nltops.com, *.ntlops.com, or *.pages.dev subdomain is accepted
- * so new program frontends don't require a config change.
+ * Only our own domains and render.com preview deployments are trusted.
+ * The *.pages.dev wildcard was deliberately removed — it would trust any
+ * Cloudflare Pages tenant, which is too broad for credentialed requests.
+ * Add explicit Cloudflare Pages origins to CORS_ORIGIN env var instead.
  */
 const ALLOWED_ORIGIN_PATTERNS = [
   /^https?:\/\/localhost(:\d+)?$/,
   /^https:\/\/([a-z0-9-]+\.)?nltops\.com$/,
   /^https:\/\/([a-z0-9-]+\.)?ntlops\.com$/,
-  /^https:\/\/[a-z0-9-]+\.pages\.dev$/,
   /^https:\/\/[a-z0-9-]+\.onrender\.com$/,
 ];
 
@@ -109,12 +110,26 @@ export const PLATFORM_SETUP_TOKEN = process.env.PLATFORM_SETUP_TOKEN || "";
 // Base URL of the Mission Hub frontend — used to build invite links
 export const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL ?? "http://localhost:5174";
 
-export const JWT_SECRET = process.env.JWT_SECRET || "changeme-dev-secret-replace-in-production";
+// ── Required secrets — fail fast at boot if missing ───────────────────────────
+// Never provide default values for signing secrets. A missing secret must crash
+// the server at startup rather than silently using a well-known fallback that
+// would allow attackers to forge valid tokens.
+function requireSecret(name: string): string {
+  const value = process.env[name];
+  if (!value || value.trim() === "") {
+    throw new Error(
+      `[startup] Missing required environment variable: ${name}. ` +
+        `Set this value in your .env file or deployment environment before starting the server.`,
+    );
+  }
+  return value.trim();
+}
+
+export const JWT_SECRET: string = requireSecret("JWT_SECRET");
 export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "8h";
 
 // Shared secret for verifying launch tokens issued by the platform hub
-export const PLATFORM_LAUNCH_TOKEN_SECRET =
-  process.env.PLATFORM_LAUNCH_TOKEN_SECRET || "dev-platform-launch-secret";
+export const PLATFORM_LAUNCH_TOKEN_SECRET: string = requireSecret("PLATFORM_LAUNCH_TOKEN_SECRET");
 
 export const MAX_FILE_SIZE_BYTES = Number(process.env.MAX_FILE_SIZE_BYTES || 50 * 1024 * 1024);
 
