@@ -395,6 +395,75 @@ model MissionHubProgram {
   @@index([organizationId, userId, status])
 }
 
+model MissionHubProject {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  programDomain  String   @default("mission-hub")
+  programId      String?
+  name           String
+  description    String   @default("") @db.Text
+  status         String   @default("active") // active|paused|completed|archived
+  managerId      String?
+  managerName    String?
+  grantId        String?
+  grantName      String?
+  sponsorId      String?
+  sponsorName    String?
+  fundraisingCampaignId String?
+  budget         Float    @default(0)
+  startDate      String?
+  endDate        String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, userId, programDomain])
+  @@index([organizationId, userId, programDomain, status])
+  @@index([organizationId, userId, programDomain, programId])
+  @@index([organizationId, userId, programDomain, fundraisingCampaignId])
+}
+
+model MissionHubEvent {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  userId                String
+  programDomain         String   @default("mission-hub")
+  programId             String?
+  projectId             String?
+  grantId               String?
+  sponsorId             String?
+  fundraisingCampaignId String?
+  name                  String
+  description           String   @default("") @db.Text
+  eventType             String?
+  status                String   @default("planned") // planned|scheduled|active|completed|cancelled|archived
+  startDateTime         String
+  endDateTime           String
+  location              String?
+  isVirtual             Boolean  @default(false)
+  meetingUrl            String?
+  calendarEventId       String?
+  assignedStaffIds      Json     @default("[]")
+  assignedVolunteerIds  Json     @default("[]")
+  budget                Float    @default(0)
+  expectedRevenue       Float    @default(0)
+  actualRevenue         Float    @default(0)
+  billable              Boolean  @default(false)
+  billingCode           String?
+  fundingSourceType     String?  // grant|sponsor|fundraiser|program|general|mixed
+  fundingSourceId       String?
+  isActive              Boolean  @default(true)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@index([organizationId, userId, programDomain])
+  @@index([organizationId, userId, programDomain, status])
+  @@index([organizationId, userId, programDomain, programId])
+  @@index([organizationId, userId, programDomain, projectId])
+  @@index([organizationId, userId, programDomain, startDateTime])
+}
+
 model MissionHubGrant {
   id                 String   @id @default(cuid())
   organizationId     String
@@ -513,6 +582,8 @@ model MissionHubPersonnel {
   assignedPrograms Json     @default("[]")
   assignedGrants   Json     @default("[]")
   notes            String   @default("")
+  inviteStatus     String   @default("none")
+  // "none" | "invite_created" | "invite_pending" | "accepted" | "revoked"
   isActive         Boolean  @default(true)
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
@@ -520,6 +591,30 @@ model MissionHubPersonnel {
   @@index([organizationId, userId])
   @@index([organizationId, userId, status])
   @@index([organizationId, userId, type])
+}
+
+model MissionHubInvite {
+  id               String    @id @default(cuid())
+  organizationId   String
+  personnelId      String    @unique
+  recipientEmail   String
+  recipientName    String
+  assignedRole     String
+  assignedPosition String    @default("")
+  createdByAdminId String
+  tokenHash        String    @unique
+  expiresAt        DateTime
+  status           String    @default("pending")   // pending | accepted | revoked | expired
+  emailStatus      String    @default("not_sent")  // not_sent | sent | failed
+  acceptedAt       DateTime?
+  revokedAt        DateTime?
+  resentAt         DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  @@index([organizationId, status])
+  @@index([tokenHash])
+  @@index([organizationId, personnelId])
 }
 
 model MissionHubCalendarEntry {
@@ -532,6 +627,7 @@ model MissionHubCalendarEntry {
   description    String   @default("")
   linkedEntity   String?
   linkedEntityId String?
+  linkedEventId  String?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -585,18 +681,36 @@ model MissionHubTimeEntry {
   organizationId String
   userId         String
   programDomain  String   @default("mission-hub")
+  personId       String?
   person         String
   initials       String   @default("")
   date           String
   startTime      String   @default("")
   endTime        String   @default("")
   hours          Float    @default(0)
+  programId      String?
   projectId      String?
   projectName    String?
+  grantId        String?
+  sponsorId      String?
+  fundraisingCampaignId String?
+  fundingSourceType String?
+  fundingSourceId String?
   linkedGrant    String?
   linkedSponsor  String?
+  eventId        String?
+  eventName      String?
+  timesheetSubmissionId String?
+  billable       Boolean  @default(false)
+  payable        Boolean  @default(false)
+  volunteer      Boolean  @default(false)
+  hourlyRate     Float?
+  laborValue     Float?
   notes          String   @default("")
-  status         String   @default("Draft") // Draft|Submitted|Approved|Rejected
+  status         String   @default("draft")
+  submittedAt    DateTime?
+  approvedAt     DateTime?
+  processedAt    DateTime?
   isActive       Boolean  @default(true)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
@@ -604,6 +718,56 @@ model MissionHubTimeEntry {
   @@index([organizationId, userId, programDomain])
   @@index([organizationId, userId, programDomain, status])
   @@index([organizationId, userId, programDomain, date])
+  @@index([organizationId, programDomain, timesheetSubmissionId])
+}
+
+model MissionHubTimesheetSubmission {
+  id                     String   @id @default(cuid())
+  organizationId         String
+  programDomain          String   @default("mission-hub")
+  submittedByPersonId    String?
+  submittedByUserId      String
+  periodStart            String
+  periodEnd              String
+  status                 String   @default("draft")
+  totalHours             Float    @default(0)
+  payableHours           Float    @default(0)
+  volunteerHours         Float    @default(0)
+  billableHours          Float    @default(0)
+  estimatedPayableAmount Float    @default(0)
+  estimatedBillableAmount Float   @default(0)
+  grantLaborValue        Float?
+  volunteerMatchValue    Float?
+  submittedAt            DateTime?
+  reviewedByUserId       String?
+  reviewedAt             DateTime?
+  financeNotes           String?
+  rejectionReason        String?
+  changeRequestReason    String?
+  processedAt            DateTime?
+  isActive               Boolean  @default(true)
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+
+  @@index([organizationId, programDomain])
+  @@index([organizationId, programDomain, status])
+  @@index([organizationId, submittedByUserId, programDomain])
+}
+
+model MissionHubTimesheetApprovalLog {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  programDomain         String   @default("mission-hub")
+  timesheetSubmissionId String
+  action                String
+  actorUserId           String
+  actorPersonId         String?
+  actorRole             String?
+  note                  String?
+  createdAt             DateTime @default(now())
+
+  @@index([organizationId, programDomain, timesheetSubmissionId, createdAt])
+  @@index([organizationId, actorUserId, programDomain])
 }
 
 // ─── End Mission Hub ──────────────────────────────────────────────────────────

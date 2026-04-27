@@ -106,6 +106,9 @@ export function getCorsOrigins(): true | ((origin: string | undefined, cb: (err:
 
 export const PLATFORM_SETUP_TOKEN = process.env.PLATFORM_SETUP_TOKEN || "";
 
+// Base URL of the Mission Hub frontend — used to build invite links
+export const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL ?? "http://localhost:5174";
+
 export const JWT_SECRET = process.env.JWT_SECRET || "changeme-dev-secret-replace-in-production";
 export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "8h";
 
