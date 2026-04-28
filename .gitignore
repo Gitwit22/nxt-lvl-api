@@ -10,6 +10,8 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+# Allow vendored package dist to be committed
+!packages/notification-core/dist
 *.local
 bun.lock
 bun.lockb

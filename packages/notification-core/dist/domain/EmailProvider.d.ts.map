@@ -1,0 +1,1 @@
+{"version":3,"file":"EmailProvider.d.ts","sourceRoot":"","sources":["../../src/domain/EmailProvider.ts"],"names":[],"mappings":"AAAA;;;;;;GAMG;AAEH,OAAO,KAAK,EAAE,cAAc,EAAE,eAAe,EAAE,MAAM,YAAY,CAAC;AAElE;;;GAGG;AACH,MAAM,WAAW,aAAa;IAC5B;;;OAGG;IACH,IAAI,CAAC,KAAK,EAAE,cAAc,GAAG,OAAO,CAAC,eAAe,CAAC,CAAC;CACvD"}

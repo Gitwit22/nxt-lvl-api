@@ -1,0 +1,23 @@
+{
+  "name": "@nxtlvl/notification-core",
+  "version": "0.0.1",
+  "description": "Reusable email notification service using Resend for Nxt Lvl applications.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc --build tsconfig.json"
+  },
+  "dependencies": {
+    "resend": "^6.12.2"
+  }
+}
