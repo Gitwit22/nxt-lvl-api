@@ -971,6 +971,7 @@ model Document {
   uploadedBy    User?   @relation("UploadedBy", fields: [uploadedById], references: [id])
   reviewedBy    User?   @relation("ReviewedBy", fields: [reviewedById], references: [id])
 
+  links DocumentLink[]
   jobs ProcessingJob[]
   pageFeatures ChroniclePdfPageFeature[]
   boundaryDecisions ChroniclePdfBoundaryDecision[]
@@ -983,6 +984,27 @@ model Document {
   @@index([organizationId, programDomain, parentDocumentId])
   @@index([organizationId, programDomain, rootDocumentId])
   @@index([organizationId, programDomain, splitReviewRequired, updatedAt])
+}
+
+model DocumentLink {
+  id             String   @id @default(cuid())
+  organizationId String
+  programDomain  String
+  documentId     String
+  entityType     String
+  entityId       String
+  linkType       String   @default("attachment")
+  notes          String?
+  sourceContext  String?
+  createdByUserId String?
+  createdAt      DateTime @default(now())
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, programDomain, documentId, entityType, entityId, linkType])
+  @@index([organizationId, programDomain, documentId])
+  @@index([organizationId, programDomain, entityType, entityId])
+  @@index([organizationId, programDomain, entityType, entityId, linkType])
 }
 
 // ── Community Chronicle: document type registry ───────────────────────────────

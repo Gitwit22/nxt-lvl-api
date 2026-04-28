@@ -65,6 +65,75 @@ function parseRouteId(value: string | string[] | undefined): string | null {
   return null;
 }
 
+const SUPPORTED_DOCUMENT_ENTITY_TYPES = new Set([
+  "program",
+  "expense",
+  "grant",
+  "sponsor",
+  "fundraising",
+  "event",
+  "staff",
+  "volunteer",
+  "time_entry",
+  "finance_submission",
+]);
+
+const SUPPORTED_DOCUMENT_LINK_TYPES = new Set([
+  "attachment",
+  "receipt",
+  "invoice",
+  "agreement",
+  "award_letter",
+  "report",
+  "reimbursement_backup",
+  "proof",
+  "logo",
+  "tax_form",
+  "payment_confirmation",
+  "supporting_document",
+]);
+
+function normalizeEntityType(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return SUPPORTED_DOCUMENT_ENTITY_TYPES.has(normalized) ? normalized : null;
+}
+
+function normalizeLinkType(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  return SUPPORTED_DOCUMENT_LINK_TYPES.has(normalized) ? normalized : null;
+}
+
+function getDocumentLinkClient() {
+  return (prisma as unknown as {
+    documentLink?: {
+      findMany: Function;
+      findFirst: Function;
+      create: Function;
+      deleteMany: Function;
+      delete: Function;
+    };
+  }).documentLink;
+}
+
+function toApiDocumentLink(link: Record<string, unknown>) {
+  return {
+    id: String(link.id),
+    documentId: String(link.documentId),
+    orgId: String(link.organizationId),
+    programDomain: String(link.programDomain),
+    entityType: String(link.entityType),
+    entityId: String(link.entityId),
+    linkType: String(link.linkType),
+    notes: typeof link.notes === "string" ? link.notes : null,
+    sourceContext: typeof link.sourceContext === "string" ? link.sourceContext : null,
+    createdBy: typeof link.createdByUserId === "string" ? link.createdByUserId : null,
+    createdAt:
+      link.createdAt instanceof Date ? link.createdAt.toISOString() : String(link.createdAt ?? ""),
+  };
+}
+
 function getDocumentScope(scope: TenantScope) {
   return {
     organizationId: scope.organizationId,
@@ -451,6 +520,9 @@ function parseFilters(query: Record<string, unknown>) {
     processingStatus:
       typeof query.processingStatus === "string" ? query.processingStatus : undefined,
     intakeSource: typeof query.intakeSource === "string" ? query.intakeSource : undefined,
+    linkedEntityType: normalizeEntityType(query.linkedEntityType),
+    linkedEntityId: typeof query.linkedEntityId === "string" ? query.linkedEntityId.trim() : undefined,
+    linkedLinkType: normalizeLinkType(query.linkedLinkType),
   };
 }
 
@@ -975,6 +1047,33 @@ router.post("/storage/test-connection", requireRole("admin"), async (req, res) =
 router.get("/documents", requireAuth, async (req, res) => {
   const tenantScope = getRequestTenantScope(req);
   const filters = parseFilters(req.query as Record<string, unknown>);
+  const documentLinkClient = getDocumentLinkClient();
+  let linkedDocumentIds: string[] | undefined;
+
+  if ((filters.linkedEntityType || filters.linkedEntityId || filters.linkedLinkType) && !documentLinkClient) {
+    res.status(503).json({ error: "Document links are not available yet. Run the latest migrations." });
+    return;
+  }
+
+  if (documentLinkClient && (filters.linkedEntityType || filters.linkedEntityId || filters.linkedLinkType)) {
+    const matchingLinks = await documentLinkClient.findMany({
+      where: {
+        organizationId: tenantScope.organizationId,
+        programDomain: tenantScope.programDomain,
+        entityType: filters.linkedEntityType,
+        entityId: filters.linkedEntityId,
+        linkType: filters.linkedLinkType,
+      },
+      select: { documentId: true },
+    });
+
+    linkedDocumentIds = matchingLinks.map((link: { documentId: string }) => link.documentId);
+    if (linkedDocumentIds.length === 0) {
+      res.json([]);
+      return;
+    }
+  }
+
   const docs = await prisma.document.findMany({
     where: {
       ...getDocumentScope(tenantScope),
@@ -982,6 +1081,7 @@ router.get("/documents", requireAuth, async (req, res) => {
       category: filters.category,
       processingStatus: filters.processingStatus,
       intakeSource: filters.intakeSource,
+      ...(linkedDocumentIds ? { id: { in: linkedDocumentIds } } : {}),
     },
     orderBy: { createdAt: "desc" },
     include: {
@@ -1153,6 +1253,181 @@ router.get("/documents/:id", requireAuth, async (req, res) => {
     return;
   }
   res.json(toApiDocumentWithUploaderFallback(doc));
+});
+
+router.get("/documents/:id/links", requireAuth, async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const id = parseRouteId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Invalid document id" });
+    return;
+  }
+
+  const doc = await findScopedDocument(id, tenantScope);
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const documentLinkClient = getDocumentLinkClient();
+  if (!documentLinkClient) {
+    res.status(503).json({ error: "Document links are not available yet. Run the latest migrations." });
+    return;
+  }
+
+  const links = await documentLinkClient.findMany({
+    where: {
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+      documentId: id,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.json(links.map((link: Record<string, unknown>) => toApiDocumentLink(link)));
+});
+
+router.post("/documents/:id/links", requireAuth, requireRole("uploader"), async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const user = getRequestUser(req);
+  const id = parseRouteId(req.params.id);
+  if (!id) {
+    res.status(400).json({ error: "Invalid document id" });
+    return;
+  }
+
+  const doc = await findScopedDocument(id, tenantScope);
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const entityType = normalizeEntityType(body.entityType);
+  const entityId = typeof body.entityId === "string" ? body.entityId.trim() : "";
+  const linkType = normalizeLinkType(body.linkType) ?? "attachment";
+
+  if (!entityType || !entityId) {
+    res.status(400).json({
+      error: "entityType and entityId are required. entityType must be a supported value.",
+    });
+    return;
+  }
+
+  const documentLinkClient = getDocumentLinkClient();
+  if (!documentLinkClient) {
+    res.status(503).json({ error: "Document links are not available yet. Run the latest migrations." });
+    return;
+  }
+
+  try {
+    const createdLink = await documentLinkClient.create({
+      data: {
+        organizationId: tenantScope.organizationId,
+        programDomain: tenantScope.programDomain,
+        documentId: id,
+        entityType,
+        entityId,
+        linkType,
+        notes: typeof body.notes === "string" ? body.notes : null,
+        sourceContext: typeof body.sourceContext === "string" ? body.sourceContext : null,
+        createdByUserId: user?.userId ?? null,
+      },
+    });
+    res.status(201).json(toApiDocumentLink(createdLink as Record<string, unknown>));
+  } catch (error) {
+    const maybeCode = typeof error === "object" && error && "code" in error
+      ? String((error as { code?: unknown }).code)
+      : "";
+    if (maybeCode === "P2002") {
+      res.status(409).json({ error: "This document is already linked to that entity with the same linkType." });
+      return;
+    }
+    throw error;
+  }
+});
+
+router.delete("/documents/:id/links/:linkId", requireAuth, requireRole("uploader"), async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const id = parseRouteId(req.params.id);
+  const linkId = parseRouteId(req.params.linkId);
+  if (!id || !linkId) {
+    res.status(400).json({ error: "Invalid document id or link id" });
+    return;
+  }
+
+  const documentLinkClient = getDocumentLinkClient();
+  if (!documentLinkClient) {
+    res.status(503).json({ error: "Document links are not available yet. Run the latest migrations." });
+    return;
+  }
+
+  const existing = await documentLinkClient.findFirst({
+    where: {
+      id: linkId,
+      documentId: id,
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+    },
+  });
+
+  if (!existing) {
+    res.status(404).json({ error: "Document link not found" });
+    return;
+  }
+
+  await documentLinkClient.delete({ where: { id: linkId } });
+  res.status(200).json({ deleted: true });
+});
+
+router.get("/entities/:entityType/:entityId/documents", requireAuth, async (req, res) => {
+  const tenantScope = getRequestTenantScope(req);
+  const entityType = normalizeEntityType(req.params.entityType);
+  const entityId = parseRouteId(req.params.entityId);
+  const linkType = normalizeLinkType(req.query.linkType);
+
+  if (!entityType || !entityId) {
+    res.status(400).json({ error: "Invalid entityType or entityId" });
+    return;
+  }
+
+  const documentLinkClient = getDocumentLinkClient();
+  if (!documentLinkClient) {
+    res.status(503).json({ error: "Document links are not available yet. Run the latest migrations." });
+    return;
+  }
+
+  const links = await documentLinkClient.findMany({
+    where: {
+      organizationId: tenantScope.organizationId,
+      programDomain: tenantScope.programDomain,
+      entityType,
+      entityId,
+      linkType,
+    },
+    include: {
+      document: {
+        include: {
+          uploadedBy: {
+            select: {
+              displayName: true,
+              firstName: true,
+              lastName: true,
+              email: true,
+            },
+          },
+        },
+      },
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.json(
+    links.map((link: Record<string, unknown>) => ({
+      link: toApiDocumentLink(link),
+      document: toApiDocumentWithUploaderFallback((link.document ?? {}) as never),
+    })),
+  );
 });
 
 router.get("/documents/:id/preview", requireAuth, async (req, res) => {
@@ -1350,6 +1625,196 @@ router.post("/documents/manual", requireAuth, requireRole("uploader"), async (re
   });
   res.status(201).json(toApiDocumentWithUploaderFallback(created));
 });
+
+router.post(
+  "/entities/:entityType/:entityId/documents/upload",
+  requireAuth,
+  requireRole("uploader"),
+  upload.single("file"),
+  async (req, res) => {
+    if (!req.file) {
+      res.status(400).json({ error: "File is required" });
+      return;
+    }
+
+    const entityType = normalizeEntityType(req.params.entityType);
+    const entityId = parseRouteId(req.params.entityId);
+    const linkType = normalizeLinkType(req.body?.linkType) ?? "attachment";
+    if (!entityType || !entityId) {
+      res.status(400).json({ error: "Invalid entityType or entityId" });
+      return;
+    }
+
+    const documentLinkClient = getDocumentLinkClient();
+    if (!documentLinkClient) {
+      res.status(503).json({ error: "Document links are not available yet. Run the latest migrations." });
+      return;
+    }
+
+    const body = req.body as Record<string, unknown>;
+    const user = getRequestUser(req);
+    const tenantScope = getRequestTenantScope(req);
+
+    let storage;
+    try {
+      storage = await resolveStorageAdapter(tenantScope);
+    } catch (err) {
+      if (err instanceof StorageConfigError) {
+        res.status(422).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
+
+    const uploaderName = await resolveRequestUploaderName(user);
+    const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const safe = req.file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
+    const key = buildPartitionedKey({
+      prefix: storage.prefix,
+      programDomain: tenantScope.programDomain,
+      organizationId: tenantScope.organizationId,
+      userId: user?.userId ?? "unknown",
+      stamp,
+      safeFileName: safe,
+    });
+
+    const { key: storedKey, fileUrl } = await storage.adapter.upload(
+      key,
+      req.file.buffer,
+      req.file.mimetype,
+    );
+
+    const payload = createDocumentPayload({
+      title: typeof body.title === "string" ? body.title : undefined,
+      description: typeof body.description === "string" ? body.description : undefined,
+      author: typeof body.author === "string" ? body.author : undefined,
+      uploaderName,
+      year: parseNumber(body.year),
+      month: parseNumber(body.month),
+      category: typeof body.category === "string" ? body.category : undefined,
+      type: typeof body.type === "string" ? body.type : undefined,
+      financialCategory: typeof body.financialCategory === "string" ? body.financialCategory : undefined,
+      financialDocumentType:
+        typeof body.financialDocumentType === "string" ? body.financialDocumentType : undefined,
+      tags: parseStringArray(body.tags),
+      keywords: parseStringArray(body.keywords),
+      intakeSource: typeof body.intakeSource === "string" ? body.intakeSource : "file_upload",
+      sourceReference: typeof body.sourceReference === "string" ? body.sourceReference : undefined,
+      department: typeof body.department === "string" ? body.department : undefined,
+      fileMeta: {
+        originalFileName: req.file.originalname,
+        mimeType: req.file.mimetype,
+        fileSize: req.file.size,
+        fileUrl,
+        filePath: storedKey,
+      },
+    });
+
+    const created = await prisma.document.create({
+      data: {
+        ...payload,
+        ...getDocumentScope(tenantScope),
+        createdByUserId: user?.userId ?? null,
+        uploadedById: user?.userId ?? null,
+      } as never,
+    });
+
+    try {
+      await documentLinkClient.create({
+        data: {
+          organizationId: tenantScope.organizationId,
+          programDomain: tenantScope.programDomain,
+          documentId: created.id,
+          entityType,
+          entityId,
+          linkType,
+          notes: typeof body.notes === "string" ? body.notes : null,
+          sourceContext: typeof body.sourceContext === "string" ? body.sourceContext : null,
+          createdByUserId: user?.userId ?? null,
+        },
+      });
+    } catch (error) {
+      await prisma.document.delete({ where: { id: created.id } });
+      throw error;
+    }
+
+    await enqueueProcessing(created.id, tenantScope);
+    const links = await documentLinkClient.findMany({
+      where: {
+        organizationId: tenantScope.organizationId,
+        programDomain: tenantScope.programDomain,
+        documentId: created.id,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    res.status(201).json({
+      document: toApiDocumentWithUploaderFallback(created),
+      links: links.map((link: Record<string, unknown>) => toApiDocumentLink(link)),
+    });
+  },
+);
+
+router.post(
+  "/entities/:entityType/:entityId/documents/attach-existing",
+  requireAuth,
+  requireRole("uploader"),
+  async (req, res) => {
+    const tenantScope = getRequestTenantScope(req);
+    const user = getRequestUser(req);
+    const entityType = normalizeEntityType(req.params.entityType);
+    const entityId = parseRouteId(req.params.entityId);
+    const body = req.body as Record<string, unknown>;
+    const documentId = typeof body.documentId === "string" ? body.documentId.trim() : "";
+    const linkType = normalizeLinkType(body.linkType) ?? "attachment";
+
+    if (!entityType || !entityId || !documentId) {
+      res.status(400).json({ error: "entityType, entityId, and documentId are required." });
+      return;
+    }
+
+    const doc = await findScopedDocument(documentId, tenantScope);
+    if (!doc) {
+      res.status(404).json({ error: "Document not found" });
+      return;
+    }
+
+    const documentLinkClient = getDocumentLinkClient();
+    if (!documentLinkClient) {
+      res.status(503).json({ error: "Document links are not available yet. Run the latest migrations." });
+      return;
+    }
+
+    try {
+      const createdLink = await documentLinkClient.create({
+        data: {
+          organizationId: tenantScope.organizationId,
+          programDomain: tenantScope.programDomain,
+          documentId,
+          entityType,
+          entityId,
+          linkType,
+          notes: typeof body.notes === "string" ? body.notes : null,
+          sourceContext: typeof body.sourceContext === "string" ? body.sourceContext : null,
+          createdByUserId: user?.userId ?? null,
+        },
+      });
+      res.status(201).json({
+        link: toApiDocumentLink(createdLink as Record<string, unknown>),
+        document: toApiDocumentWithUploaderFallback(doc),
+      });
+    } catch (error) {
+      const maybeCode = typeof error === "object" && error && "code" in error
+        ? String((error as { code?: unknown }).code)
+        : "";
+      if (maybeCode === "P2002") {
+        res.status(409).json({ error: "This document is already linked to that entity with the same linkType." });
+        return;
+      }
+      throw error;
+    }
+  },
+);
 
 router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.single("file"), async (req, res) => {
   if (!req.file) {
