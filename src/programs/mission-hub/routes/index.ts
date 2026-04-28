@@ -13,7 +13,11 @@ import { prisma } from "../../../core/db/prisma.js";
 import { JWT_SECRET, PLATFORM_LAUNCH_TOKEN_SECRET, FRONTEND_BASE_URL } from "../../../core/config/env.js";
 import { signToken, hashPassword } from "../../../core/auth/auth.service.js";
 import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
-import { sendInviteEmail } from "../../../core/services/email.service.js";
+import {
+  issueMissionHubInvite,
+  resendMissionHubInvite,
+  MissionHubInviteServiceError,
+} from "../../../core/services/missionHubInvite.service.js";
 import { logger } from "../../../logger.js";
 
 const router = express.Router();
@@ -1298,61 +1302,24 @@ router.post("/personnel", requireMissionHubAuth, async (req, res) => {
   });
 
   // Create invite record
-  const { raw, hash } = generateInviteToken();
-  const expiresAt = inviteExpiresAt();
-  const org = await prisma.organization.findUnique({ where: { id: organizationId } });
-
-  const invite = await db.missionHubInvite.create({
-    data: {
-      organizationId,
-      personnelId: person.id as string,
-      recipientEmail: email,
-      recipientName,
-      assignedRole: role,
-      assignedPosition: title,
-      createdByAdminId: userId,
-      tokenHash: hash,
-      expiresAt,
-      status: "pending",
-      emailStatus: "not_sent",
-    },
+  const inviteResult = await issueMissionHubInvite({
+    organizationId,
+    personnelId: person.id as string,
+    recipientEmail: email,
+    recipientName,
+    assignedRole: role,
+    assignedPosition: title,
+    createdByAdminId: userId,
   });
-
-  // Attempt email send
-  let emailSent = false;
-  if (email) {
-    emailSent = await sendInviteEmail({
-      to: email,
-      recipientName,
-      organizationName: org?.name ?? "Your Organization",
-      assignedRole: role,
-      assignedPosition: title,
-      rawToken: raw,
-    });
-  }
-
-  const newInviteStatus = emailSent ? "invite_pending" : "invite_created";
-  const newEmailStatus = emailSent ? "sent" : (email ? "failed" : "not_sent");
-
-  await db.missionHubPersonnel.update({
-    where: { id: person.id as string },
-    data: { inviteStatus: newInviteStatus },
-  });
-  await db.missionHubInvite.update({
-    where: { id: invite.id as string },
-    data: { emailStatus: newEmailStatus },
-  });
-
-  const inviteLink = `${FRONTEND_BASE_URL}/invite/accept?token=${raw}`;
 
   res.status(201).json({
     ...person,
-    inviteStatus: newInviteStatus,
+    inviteStatus: inviteResult.inviteStatus,
     invite: {
-      id: invite.id,
-      emailSent,
-      emailStatus: newEmailStatus,
-      inviteLink,
+      id: inviteResult.inviteId,
+      emailSent: inviteResult.emailSent,
+      emailStatus: inviteResult.emailStatus,
+      inviteLink: inviteResult.inviteLink,
     },
   });
 });
@@ -1419,63 +1386,25 @@ router.get("/invites", requireMissionHubAuth, async (req, res) => {
 
 router.post("/invites/:id/resend", requireMissionHubAuth, async (req, res) => {
   const { organizationId } = getUser(req);
-  const db = getInviteStore();
-
-  const invite = await db.missionHubInvite.findFirst({
-    where: { id: req.params.id, organizationId },
-  });
-  if (!invite) { res.status(404).json({ error: "Invite not found" }); return; }
-  if (invite.status === "accepted") { res.status(409).json({ error: "Invite already accepted" }); return; }
-  if (invite.status === "revoked") { res.status(409).json({ error: "Invite has been revoked" }); return; }
-
-  // Rate-limit: enforce a minimum cooldown between resends.
-  const lastSent = invite.resentAt ?? invite.createdAt;
-  if (lastSent) {
-    const msSinceLast = Date.now() - new Date(lastSent as string | Date).getTime();
-    if (msSinceLast < INVITE_RESEND_COOLDOWN_MS) {
-      const retryAfterSecs = Math.ceil((INVITE_RESEND_COOLDOWN_MS - msSinceLast) / 1000);
-      res.setHeader("Retry-After", String(retryAfterSecs));
-      res.status(429).json({
-        error: "Resend too soon. Please wait before sending another invite.",
-        retryAfterSeconds: retryAfterSecs,
+  try {
+    const inviteId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
+    const result = await resendMissionHubInvite(organizationId, inviteId, INVITE_RESEND_COOLDOWN_MS);
+    res.json(result);
+  } catch (error) {
+    if (error instanceof MissionHubInviteServiceError) {
+      if (typeof error.retryAfterSeconds === "number") {
+        res.setHeader("Retry-After", String(error.retryAfterSeconds));
+      }
+      res.status(error.status).json({
+        error: error.message,
+        code: error.code,
+        ...(typeof error.retryAfterSeconds === "number" ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
       });
       return;
     }
+    logger.error("[invite] resend failed unexpectedly", { error });
+    res.status(500).json({ error: "Failed to resend invite" });
   }
-
-  const { raw, hash } = generateInviteToken();
-  const expiresAt = inviteExpiresAt();
-  const org = await prisma.organization.findUnique({ where: { id: organizationId } });
-
-  const emailSent = await sendInviteEmail({
-    to: invite.recipientEmail as string,
-    recipientName: invite.recipientName as string,
-    organizationName: org?.name ?? "Your Organization",
-    assignedRole: invite.assignedRole as string,
-    assignedPosition: invite.assignedPosition as string,
-    rawToken: raw,
-  });
-
-  await db.missionHubInvite.update({
-    where: { id: req.params.id },
-    data: {
-      tokenHash: hash,
-      expiresAt,
-      status: "pending",
-      emailStatus: emailSent ? "sent" : "failed",
-      resentAt: new Date(),
-    },
-  });
-
-  if (emailSent) {
-    await db.missionHubPersonnel.update({
-      where: { id: invite.personnelId as string },
-      data: { inviteStatus: "invite_pending" },
-    });
-  }
-
-  const inviteLink = `${FRONTEND_BASE_URL}/invite/accept?token=${raw}`;
-  res.json({ emailSent, inviteLink });
 });
 
 router.delete("/invites/:id", requireMissionHubAuth, async (req, res) => {
