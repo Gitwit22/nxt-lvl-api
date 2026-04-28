@@ -2393,15 +2393,17 @@ router.post("/events", requireMissionHubAuth, async (req, res) => {
   if (typeof body.name !== "string" || !body.name.trim()) {
     res.status(400).json({ error: "name is required" }); return;
   }
-  if (!isValidDateTime(body.startDateTime)) {
-    res.status(400).json({ error: "startDateTime is required and must be a valid ISO datetime" }); return;
-  }
-  if (!isValidDateTime(body.endDateTime)) {
-    res.status(400).json({ error: "endDateTime is required and must be a valid ISO datetime" }); return;
-  }
-  if (new Date(body.endDateTime as string) <= new Date(body.startDateTime as string)) {
-    res.status(400).json({ error: "endDateTime must be after startDateTime" }); return;
-  }
+
+  // Default start to now, end to 1 hour later when not provided
+  const now = new Date();
+  const defaultStart = now.toISOString();
+  const defaultEnd = new Date(now.getTime() + 3600_000).toISOString();
+  const rawStart = isValidDateTime(body.startDateTime) ? (body.startDateTime as string) : defaultStart;
+  const rawEnd = isValidDateTime(body.endDateTime) ? (body.endDateTime as string) : defaultEnd;
+  // Ensure end is after start
+  const resolvedEnd = new Date(rawEnd) <= new Date(rawStart)
+    ? new Date(new Date(rawStart).getTime() + 3600_000).toISOString()
+    : rawEnd;
 
   const normalizedStatus = normalizeEventStatus(body.status ?? "planned");
   if (!normalizedStatus) {
@@ -2470,8 +2472,8 @@ router.post("/events", requireMissionHubAuth, async (req, res) => {
       description: typeof body.description === "string" ? body.description : "",
       eventType: typeof body.eventType === "string" && body.eventType.trim() ? body.eventType.trim() : null,
       status: normalizedStatus,
-      startDateTime: body.startDateTime as string,
-      endDateTime: body.endDateTime as string,
+      startDateTime: rawStart,
+      endDateTime: resolvedEnd,
       location: typeof body.location === "string" && body.location.trim() ? body.location.trim() : null,
       isVirtual: body.isVirtual === true,
       meetingUrl: typeof body.meetingUrl === "string" && body.meetingUrl.trim() ? body.meetingUrl.trim() : null,
