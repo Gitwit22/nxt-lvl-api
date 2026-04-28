@@ -1003,8 +1003,8 @@ model DocumentLink {
 
   @@unique([organizationId, programDomain, documentId, entityType, entityId, linkType])
   @@index([organizationId, programDomain, documentId])
-  @@index([organizationId, programDomain, entityType, entityId])
-  @@index([organizationId, programDomain, entityType, entityId, linkType])
+  @@index([organizationId, programDomain, entityType, entityId], map: "DocumentLink_orgId_domain_entityType_entityId_idx")
+  @@index([organizationId, programDomain, entityType, entityId, linkType], map: "DocumentLink_orgId_domain_entityType_entityId_linkType_idx")
 }
 
 // ── Community Chronicle: document type registry ───────────────────────────────
