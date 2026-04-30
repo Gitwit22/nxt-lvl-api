@@ -1015,12 +1015,16 @@ router.put("/expenses/:id", requireMissionHubAuth, async (req, res) => {
     "linkedSponsorId", "linkedSponsor", "linkedFundraisingCampaignId", "linkedFundraisingCampaign",
     "linkedCampaign", "fundingSourceType", "fundingSourceId", "customFundingSource", "fundingSource",
     "receiptFileId", "receiptUrl", "receiptName",
+    "rejectReason", "reviewerNote",
   ] as const;
   for (const f of nullableStrFields) { if (f in body) data[f] = typeof body[f] === "string" ? body[f] : null; }
   if ("receiptFileMeta" in body) {
     data.receiptFileMeta = body.receiptFileMeta && typeof body.receiptFileMeta === "object" && !Array.isArray(body.receiptFileMeta)
       ? body.receiptFileMeta
       : null;
+  }
+  if ("reviewedAt" in body) {
+    data.reviewedAt = typeof body.reviewedAt === "string" && body.reviewedAt ? new Date(body.reviewedAt) : null;
   }
 
   const updated = await store.missionHubExpense.update({ where: { id: req.params.id }, data });
@@ -2809,7 +2813,7 @@ router.get("/organization-settings", requireMissionHubAuth, async (req, res) => 
   const settings = await store.missionHubOrganizationSettings.findUnique({ where: { organizationId } });
   if (!settings) {
     // Return defaults for org with no settings yet — do not 404.
-    res.json({ organizationId, orgDisplayName: "", fiscalYearStart: "01-01", defaultTimezone: "America/New_York" });
+    res.json({ organizationId, orgDisplayName: "", fiscalYearStart: "01-01", defaultTimezone: "America/New_York", expenseCategories: [] });
     return;
   }
   res.json(settings);
@@ -2827,6 +2831,7 @@ router.put("/organization-settings", requireMissionHubAuth, async (req, res) => 
   if (typeof body.orgDisplayName === "string") data.orgDisplayName = body.orgDisplayName.trim();
   if (typeof body.fiscalYearStart === "string") data.fiscalYearStart = body.fiscalYearStart.trim();
   if (typeof body.defaultTimezone === "string") data.defaultTimezone = body.defaultTimezone.trim();
+  if (Array.isArray(body.expenseCategories)) data.expenseCategories = body.expenseCategories.filter((c: unknown) => typeof c === "string");
   const settings = await store.missionHubOrganizationSettings.upsert({
     where: { organizationId },
     update: data,

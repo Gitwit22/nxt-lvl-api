@@ -526,6 +526,9 @@ model MissionHubExpense {
   receiptUrl      String?
   receiptName     String?
   receiptFileMeta Json?
+  reviewedAt      DateTime?
+  rejectReason    String?
+  reviewerNote    String?
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -855,13 +858,14 @@ model MissionHubStorageEndpoint {
 }
 
 model MissionHubOrganizationSettings {
-  id              String   @id @default(cuid())
-  organizationId  String   @unique
-  orgDisplayName  String   @default("")
-  fiscalYearStart String   @default("01-01") // MM-DD format
-  defaultTimezone String   @default("America/New_York")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                String   @id @default(cuid())
+  organizationId    String   @unique
+  orgDisplayName    String   @default("")
+  fiscalYearStart   String   @default("01-01") // MM-DD format
+  defaultTimezone   String   @default("America/New_York")
+  expenseCategories Json     @default("[]")   // string[] of custom category names
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@index([organizationId])
 }
