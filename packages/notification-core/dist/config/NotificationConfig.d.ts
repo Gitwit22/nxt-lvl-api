@@ -32,8 +32,8 @@ export interface NotificationConfig {
  * Reads notification configuration from environment variables.
  * Call this once at server startup to obtain a validated config object.
  *
- * Throws a descriptive Error (not a silent undefined) when RESEND_API_KEY is
- * missing and EMAIL_SEND_ENABLED is not explicitly "false".
+ * Throws a descriptive Error when required variables are missing or invalid
+ * and EMAIL_SEND_ENABLED is not explicitly "false".
  */
 export declare function loadNotificationConfig(): NotificationConfig;
 //# sourceMappingURL=NotificationConfig.d.ts.map

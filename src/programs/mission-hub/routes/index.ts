@@ -325,6 +325,22 @@ router.post("/invites/accept", async (req, res) => {
   const existing = await db.user.findUnique({ where: { email } });
   if (existing) {
     userId = existing.id as string;
+    const [firstName, ...rest] = (invite.recipientName as string).trim().split(" ");
+    const lastName = rest.join(" ");
+    await db.user.update({
+      where: { id: userId },
+      data: {
+        passwordHash,
+        role: userRole,
+        organizationId,
+        firstName: firstName ?? "",
+        lastName: lastName ?? "",
+        displayName: invite.recipientName as string,
+        mustChangePassword: false,
+        isActive: true,
+        passwordSetAt: new Date(),
+      },
+    });
   } else {
     const [firstName, ...rest] = (invite.recipientName as string).trim().split(" ");
     const lastName = rest.join(" ");

@@ -27,6 +27,10 @@ export const SYSTEM_DOCUMENT_TYPES = [
   "form",
   "invoice",
   "statement",
+  "bank_statement",
+  "credit_card_statement",
+  "billing_statement",
+  "bank_receipt",
   "voucher",
   "reimbursement_request",
   "receipt",
@@ -56,6 +60,10 @@ export const DOCUMENT_TYPE_LABELS: Record<SystemDocumentType, string> = {
   form:                    "Form / Application",
   invoice:                 "Invoice",
   statement:               "Statement / Billing Summary",
+  bank_statement:          "Bank Statement (Periodic Account Activity)",
+  credit_card_statement:   "Credit Card Statement (Billing Cycle Summary)",
+  billing_statement:       "Billing Statement (Vendor / Utility / Service)",
+  bank_receipt:            "Bank Receipt (Transaction / Deposit / Payment Confirmation)",
   voucher:                 "Voucher / Payment Approval",
   reimbursement_request:   "Reimbursement Request",
   receipt:                 "Receipt / Acknowledgment",
@@ -326,12 +334,34 @@ export interface DocumentTypeClassification {
 
 const CONFIDENCE_THRESHOLD = 0.25;
 
+const CREDIT_CARD_STATEMENT_SIGNALS = [
+  "company statement",
+  "new balance total",
+  "minimum payment due",
+  "payment due date",
+  "late payment warning",
+  "billing inquiries",
+  "mail payments to",
+  "statement closing date",
+];
+
 export function classifyDocumentType(
   text: string,
   filename?: string | null,
   fingerprintTypes?: Array<{ key: string; phrases: string[]; companies: string[] }>,
 ): DocumentTypeClassification {
   const corpus = `${filename ?? ""}\n${text}`.toLowerCase();
+
+  // Credit card statement early detection — strong financial signals take priority
+  const ccSignalMatches = CREDIT_CARD_STATEMENT_SIGNALS.filter((s) => corpus.includes(s));
+  if (ccSignalMatches.length >= 3) {
+    return {
+      documentType: "credit_card_statement",
+      confidence: 0.91,
+      classificationStatus: "known",
+      classificationMatchedBy: "keyword",
+    };
+  }
 
   // 1. Try fingerprint matching first (learned patterns from reviewed docs)
   if (fingerprintTypes && fingerprintTypes.length > 0) {
