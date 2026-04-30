@@ -258,7 +258,7 @@ function mapPersonnelRoleToMembership(role: string): "owner" | "admin" | "manage
   }
 }
 
-function mapPersonnelRoleToUserRole(role: string): "admin" | "reviewer" | "uploader" | "staff" | "volunteer" {
+function mapPersonnelRoleToUserRole(role: string): "admin" | "reviewer" | "uploader" | "staff" | "volunteer" | "board_member" {
   switch (role) {
     case "Executive Director":
     case "Deputy Director": return "admin";
