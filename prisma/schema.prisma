@@ -529,6 +529,9 @@ model MissionHubExpense {
   receiptUrl      String?
   receiptName     String?
   receiptFileMeta Json?
+  reviewedAt      DateTime?
+  rejectReason    String?
+  reviewerNote    String?
   isActive        Boolean  @default(true)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
@@ -858,13 +861,14 @@ model MissionHubStorageEndpoint {
 }
 
 model MissionHubOrganizationSettings {
-  id              String   @id @default(cuid())
-  organizationId  String   @unique
-  orgDisplayName  String   @default("")
-  fiscalYearStart String   @default("01-01") // MM-DD format
-  defaultTimezone String   @default("America/New_York")
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                String   @id @default(cuid())
+  organizationId    String   @unique
+  orgDisplayName    String   @default("")
+  fiscalYearStart   String   @default("01-01") // MM-DD format
+  defaultTimezone   String   @default("America/New_York")
+  expenseCategories Json     @default("[]")   // string[] of custom category names
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@index([organizationId])
 }
@@ -1006,8 +1010,8 @@ model DocumentLink {
 
   @@unique([organizationId, programDomain, documentId, entityType, entityId, linkType])
   @@index([organizationId, programDomain, documentId])
-  @@index([organizationId, programDomain, entityType, entityId])
-  @@index([organizationId, programDomain, entityType, entityId, linkType])
+  @@index([organizationId, programDomain, entityType, entityId], map: "DocumentLink_orgId_domain_entityType_entityId_idx")
+  @@index([organizationId, programDomain, entityType, entityId, linkType], map: "DocumentLink_orgId_domain_entityType_entityId_linkType_idx")
 }
 
 // ── Community Chronicle: document type registry ───────────────────────────────

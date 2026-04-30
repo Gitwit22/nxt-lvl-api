@@ -146,7 +146,7 @@ export async function resendMissionHubInvite(
   const db = getInviteStore();
   const invite = await db.missionHubInvite.findFirst({
     where: { id: inviteId, organizationId },
-  }) as InviteRecord | null;
+  }) as unknown as InviteRecord | null;
 
   if (!invite) {
     throw new MissionHubInviteServiceError("Invite not found", 404, "invite_not_found");
