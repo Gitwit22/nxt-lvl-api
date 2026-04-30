@@ -73,6 +73,92 @@ function buildInviteLink(rawToken: string): string {
   return `${FRONTEND_BASE_URL.replace(/\/$/, "")}/invite/accept?token=${encodeURIComponent(rawToken)}`;
 }
 
+// ─── Password Reset Email ─────────────────────────────────────────────────────
+
+export interface PasswordResetEmailParams {
+  to: string;
+  recipientName: string;
+  rawToken: string;
+}
+
+export async function sendPasswordResetEmail(params: PasswordResetEmailParams): Promise<boolean> {
+  const service = getEmailService();
+  if (!service) {
+    logger.warn("[email] Email service unavailable — skipping password reset email", { to: params.to });
+    return false;
+  }
+
+  const link = `${FRONTEND_BASE_URL.replace(/\/$/, "")}/reset-password?token=${encodeURIComponent(params.rawToken)}`;
+  const subject = "Reset your Mission Hub password";
+  const html = buildPasswordResetHtml({ ...params, link });
+  const text = buildPasswordResetText({ ...params, link });
+
+  const result = await service.execute({ to: params.to, subject, html, text });
+
+  if (result.success) {
+    logger.info("[email] Password reset sent", { to: params.to });
+    return true;
+  }
+
+  logger.warn("[email] Password reset email failed", { to: params.to });
+  return false;
+}
+
+function buildPasswordResetText(params: PasswordResetEmailParams & { link: string }): string {
+  const { recipientName, link } = params;
+  return [
+    `Hi ${recipientName},`,
+    "",
+    "We received a request to reset your Mission Hub password.",
+    "Click the link below to choose a new password. This link expires in 1 hour.",
+    "",
+    link,
+    "",
+    "If you didn't request a password reset, you can safely ignore this email.",
+    "Questions? Email us at support@nxtlvlts.com",
+  ].join("\n");
+}
+
+function buildPasswordResetHtml(params: PasswordResetEmailParams & { link: string }): string {
+  const { recipientName, link } = params;
+  return `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f4f4f5;font-family:sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f4f4f5;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,.08);">
+        <tr><td style="background:#18181b;padding:28px 40px;">
+          <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;">Nxt Lvl — Mission Hub</h1>
+        </td></tr>
+        <tr><td style="padding:36px 40px;">
+          <p style="margin:0 0 16px;font-size:16px;color:#18181b;">Hi ${recipientName},</p>
+          <p style="margin:0 0 24px;font-size:15px;color:#444;line-height:1.6;">
+            We received a request to reset your Mission Hub password.
+          </p>
+          <p style="margin:0 0 24px;font-size:14px;color:#555;line-height:1.6;">
+            Click the button below to choose a new password. This link expires in <strong>1 hour</strong>.
+          </p>
+          <table cellpadding="0" cellspacing="0" style="margin:0 0 28px;">
+            <tr><td style="background:#18181b;border-radius:6px;padding:14px 28px;">
+              <a href="${link}" style="color:#ffffff;font-size:15px;font-weight:600;text-decoration:none;">Reset My Password</a>
+            </td></tr>
+          </table>
+          <p style="margin:0 0 8px;font-size:12px;color:#888;">Or copy this link into your browser:</p>
+          <p style="margin:0 0 32px;font-size:12px;color:#555;word-break:break-all;">${link}</p>
+          <hr style="border:none;border-top:1px solid #e5e7eb;margin:0 0 24px;">
+          <p style="margin:0;font-size:12px;color:#999;line-height:1.6;">
+            If you didn't request a password reset, you can safely ignore this email.<br>
+            Questions? Email us at <a href="mailto:support@nxtlvlts.com" style="color:#18181b;">support@nxtlvlts.com</a>
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
+}
+
 function buildInviteText(params: InviteEmailParams & { link: string }): string {
   const { recipientName, organizationName, assignedRole, assignedPosition, link } = params;
   const positionLine = assignedPosition ? `\nPosition: ${assignedPosition}` : "";

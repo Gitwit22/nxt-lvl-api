@@ -24,6 +24,9 @@ model User {
   mustChangePassword Boolean  @default(false)   // true after admin assigns a temp password
   passwordSetAt      DateTime?                  // set when user first chooses their own password
 
+  passwordResetTokenHash String?   // SHA-256 of the raw reset token (null when no reset pending)
+  passwordResetExpiresAt DateTime? // when the reset token expires
+
   // ── Deprecated / legacy platform-handoff fields ──────────────────────────
   // These were used by the old suite→app JWT handoff flow that has been removed.
   // Keep them nullable so existing rows are not broken; do not write new values.
