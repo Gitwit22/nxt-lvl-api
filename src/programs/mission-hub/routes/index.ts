@@ -11,13 +11,14 @@ import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import { prisma } from "../../../core/db/prisma.js";
 import { JWT_SECRET, PLATFORM_LAUNCH_TOKEN_SECRET, FRONTEND_BASE_URL } from "../../../core/config/env.js";
-import { signToken, hashPassword } from "../../../core/auth/auth.service.js";
+import { signToken, hashPassword, verifyPassword } from "../../../core/auth/auth.service.js";
 import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
 import {
   issueMissionHubInvite,
   resendMissionHubInvite,
   MissionHubInviteServiceError,
 } from "../../../core/services/missionHubInvite.service.js";
+import { sendPasswordResetEmail } from "../../../core/services/email.service.js";
 import { logger } from "../../../logger.js";
 
 const router = express.Router();
@@ -230,7 +231,9 @@ type InviteStore = {
   };
   user: {
     findUnique: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    findFirst: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
     create: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    update: (a: Record<string, unknown>) => Promise<Record<string, unknown>>;
   };
   membership: {
     findFirst: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
@@ -264,6 +267,162 @@ function mapPersonnelRoleToUserRole(role: string): "admin" | "reviewer" | "uploa
     default: return "uploader";
   }
 }
+
+// ─── Public auth routes (no auth required) ────────────────────────────────────
+
+router.post("/auth/login", async (req, res) => {
+  const body = isRecord(req.body) ? req.body : {};
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+
+  if (!email || !password) {
+    res.status(400).json({ error: "Email and password are required" });
+    return;
+  }
+
+  const db = getInviteStore();
+
+  type UserRow = {
+    id: string; email: string; passwordHash: string; role: string; organizationId: string;
+    firstName: string; lastName: string; displayName: string; identitySource: string | null;
+  };
+  const user = await (db as unknown as { user: { findUnique: (a: Record<string, unknown>) => Promise<UserRow | null> } })
+    .user.findUnique({ where: { email } }) as UserRow | null;
+
+  if (!user) {
+    // Constant-time delay to prevent timing attacks
+    await hashPassword("__dummy__");
+    res.status(401).json({ error: "Invalid credentials" });
+    return;
+  }
+
+  const valid = await verifyPassword(password, user.passwordHash);
+  if (!valid) {
+    res.status(401).json({ error: "Invalid credentials" });
+    return;
+  }
+
+  // Find their MissionHubPersonnel record (if any)
+  const personnel = await db.missionHubPersonnel.findFirst({
+    where: { organizationId: user.organizationId, email },
+  }) as Record<string, unknown> | null;
+
+  const token = signToken({
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    organizationId: user.organizationId,
+    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+  });
+
+  logger.info("[mission-hub] User logged in", { userId: user.id, organizationId: user.organizationId });
+
+  res.json({
+    token,
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      displayName: user.displayName,
+      organizationId: user.organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      personnelId: personnel ? String(personnel.id) : undefined,
+    },
+  });
+});
+
+router.post("/auth/forgot-password", async (req, res) => {
+  const body = isRecord(req.body) ? req.body : {};
+  const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
+
+  if (!email) {
+    res.status(400).json({ error: "Email is required" });
+    return;
+  }
+
+  // Always respond with success to prevent user enumeration
+  const db = getInviteStore();
+  type UserRow = { id: string; firstName: string; lastName: string; email: string };
+  const user = await (db as unknown as { user: { findUnique: (a: Record<string, unknown>) => Promise<UserRow | null> } })
+    .user.findUnique({ where: { email } }) as UserRow | null;
+
+  if (user) {
+    const rawToken = crypto.randomBytes(32).toString("hex");
+    const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    await (db as unknown as {
+      user: { update: (a: Record<string, unknown>) => Promise<unknown> }
+    }).user.update({
+      where: { id: user.id },
+      data: { passwordResetTokenHash: tokenHash, passwordResetExpiresAt: expiresAt },
+    });
+
+    const recipientName = [user.firstName, user.lastName].filter(Boolean).join(" ") || email;
+    await sendPasswordResetEmail({ to: email, recipientName, rawToken });
+  }
+
+  // Always return 200 to avoid leaking whether the email exists
+  res.json({ success: true, message: "If that email is registered, a reset link has been sent." });
+});
+
+router.post("/auth/reset-password", async (req, res) => {
+  const body = isRecord(req.body) ? req.body : {};
+  const rawToken = typeof body.token === "string" ? body.token.trim() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+  const confirmPassword = typeof body.confirmPassword === "string" ? body.confirmPassword : "";
+
+  if (!rawToken || !password) {
+    res.status(400).json({ error: "token and password are required" });
+    return;
+  }
+  if (password !== confirmPassword) {
+    res.status(400).json({ error: "Passwords do not match" });
+    return;
+  }
+  if (password.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+
+  const tokenHash = crypto.createHash("sha256").update(rawToken).digest("hex");
+  const db = getInviteStore();
+
+  type UserRow = { id: string; passwordResetTokenHash: string | null; passwordResetExpiresAt: Date | null };
+  const user = await (db as unknown as {
+    user: { findFirst: (a: Record<string, unknown>) => Promise<UserRow | null> }
+  }).user.findFirst({ where: { passwordResetTokenHash: tokenHash } }) as UserRow | null;
+
+  if (!user) {
+    res.status(400).json({ error: "This reset link is invalid or has already been used." });
+    return;
+  }
+  if (!user.passwordResetExpiresAt || new Date(user.passwordResetExpiresAt) < new Date()) {
+    // Clear the expired token
+    await (db as unknown as { user: { update: (a: Record<string, unknown>) => Promise<unknown> } })
+      .user.update({ where: { id: user.id }, data: { passwordResetTokenHash: null, passwordResetExpiresAt: null } });
+    res.status(400).json({ error: "This reset link has expired. Please request a new one." });
+    return;
+  }
+
+  const passwordHash = await hashPassword(password);
+  await (db as unknown as { user: { update: (a: Record<string, unknown>) => Promise<unknown> } })
+    .user.update({
+      where: { id: user.id },
+      data: {
+        passwordHash,
+        mustChangePassword: false,
+        passwordSetAt: new Date(),
+        passwordResetTokenHash: null,
+        passwordResetExpiresAt: null,
+      },
+    });
+
+  logger.info("[mission-hub] Password reset completed", { userId: user.id });
+  res.json({ success: true });
+});
 
 // ─── Public invite routes (no auth required) ──────────────────────────────────
 
