@@ -258,12 +258,14 @@ function mapPersonnelRoleToMembership(role: string): "owner" | "admin" | "manage
   }
 }
 
-function mapPersonnelRoleToUserRole(role: string): "admin" | "reviewer" | "uploader" {
+function mapPersonnelRoleToUserRole(role: string): "admin" | "reviewer" | "uploader" | "staff" | "volunteer" {
   switch (role) {
     case "Executive Director":
     case "Deputy Director": return "admin";
-    case "Finance":
-    case "Board Member": return "reviewer";
+    case "Finance": return "reviewer";
+    case "Board Member": return "board_member";
+    case "Staff": return "staff";
+    case "Volunteer": return "volunteer";
     default: return "uploader";
   }
 }
