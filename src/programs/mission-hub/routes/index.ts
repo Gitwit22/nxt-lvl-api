@@ -101,14 +101,22 @@ const TIME_ENTRY_STATUSES = new Set([
   "draft",
   "submitted",
   "finance_review",
+  "under_review",
   "changes_requested",
   "approved",
+  "finance_ready",
+  "finance_processed",
+  "paid",
+  "billed",
+  "exported",
   "rejected",
   "processed",
   "archived",
 ]);
 
-const FINANCE_APPROVER_ROLES = new Set(["finance", "admin", "executive director", "deputy director"]);
+const TIMESHEET_APPROVER_ROLES = new Set(["finance", "admin", "executive director", "deputy director", "reviewer"]);
+const TIMESHEET_PROCESSOR_ROLES = new Set(["finance", "admin", "executive director", "deputy director"]);
+const TIMESHEET_EXPORTER_ROLES = new Set(["finance", "admin", "executive director", "deputy director"]);
 const ADMIN_ROLES = new Set(["admin", "executive director", "deputy director"]);
 
 // Personnel roles that require the requester to hold an admin role to assign.
@@ -123,7 +131,19 @@ const ELEVATED_PERSONNEL_ROLES = new Set([
 
 // Minimum milliseconds between consecutive resends for the same invite.
 const INVITE_RESEND_COOLDOWN_MS = 60_000;
-const LOCKED_ENTRY_STATUSES = new Set(["submitted", "finance_review", "approved", "processed", "archived"]);
+const LOCKED_ENTRY_STATUSES = new Set([
+  "submitted",
+  "finance_review",
+  "under_review",
+  "approved",
+  "finance_ready",
+  "finance_processed",
+  "processed",
+  "paid",
+  "billed",
+  "exported",
+  "archived",
+]);
 
 function normalizeRoleValue(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -133,12 +153,23 @@ function normalizeRoleValue(value: unknown): string {
 function normalizeTimeEntryStatus(value: unknown): string {
   if (typeof value !== "string") return "draft";
   const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
-  if (normalized === "processed_paid") return "processed";
+  if (normalized === "processed_paid") return "finance_processed";
+  if (normalized === "approved") return "finance_ready";
+  if (normalized === "processed") return "finance_processed";
+  if (normalized === "under_review") return "finance_review";
   return TIME_ENTRY_STATUSES.has(normalized) ? normalized : "draft";
 }
 
-function hasFinanceApprovalAccess(role: unknown): boolean {
-  return FINANCE_APPROVER_ROLES.has(normalizeRoleValue(role));
+function canApproveTimesheets(role: unknown): boolean {
+  return TIMESHEET_APPROVER_ROLES.has(normalizeRoleValue(role));
+}
+
+function canProcessTimesheets(role: unknown): boolean {
+  return TIMESHEET_PROCESSOR_ROLES.has(normalizeRoleValue(role));
+}
+
+function canExportTimesheets(role: unknown): boolean {
+  return TIMESHEET_EXPORTER_ROLES.has(normalizeRoleValue(role));
 }
 
 function isAdminRole(role: unknown): boolean {
@@ -1761,7 +1792,7 @@ router.get("/time-entries", requireMissionHubAuth, async (req, res) => {
     programDomain: MISSION_HUB_PROGRAM_DOMAIN,
     isActive: true,
   };
-  if (!hasFinanceApprovalAccess(role)) {
+  if (!canApproveTimesheets(role)) {
     where.userId = userId;
   }
   if (typeof status === "string") where.status = normalizeTimeEntryStatus(status);
@@ -1829,8 +1860,8 @@ router.post("/time-entries", requireMissionHubAuth, async (req, res) => {
       hourlyRate: typeof body.hourlyRate === "number" ? body.hourlyRate : null,
       laborValue: typeof body.laborValue === "number" ? body.laborValue : null,
       submittedAt: entryStatus === "submitted" ? now : null,
-      approvedAt: entryStatus === "approved" ? now : null,
-      processedAt: entryStatus === "processed" ? now : null,
+      approvedAt: entryStatus === "approved" || entryStatus === "finance_ready" ? now : null,
+      processedAt: entryStatus === "processed" || entryStatus === "finance_processed" ? now : null,
     },
   });
 
@@ -1949,7 +1980,7 @@ router.get("/timesheet-submissions", requireMissionHubAuth, async (req, res) => 
     programDomain: MISSION_HUB_PROGRAM_DOMAIN,
     isActive: true,
   };
-  if (!hasFinanceApprovalAccess(role)) {
+  if (!canApproveTimesheets(role)) {
     where.submittedByUserId = userId;
   }
   if (typeof status === "string") where.status = normalizeTimeEntryStatus(status);
@@ -1978,7 +2009,7 @@ router.get("/timesheet-submissions/:id", requireMissionHubAuth, async (req, res)
     programDomain: MISSION_HUB_PROGRAM_DOMAIN,
     isActive: true,
   };
-  if (!hasFinanceApprovalAccess(role)) {
+  if (!canApproveTimesheets(role)) {
     where.submittedByUserId = userId;
   }
 
@@ -2041,7 +2072,7 @@ router.post("/timesheet-submissions", requireMissionHubAuth, async (req, res) =>
     id: { in: entryIds },
     status: { in: ["draft", "changes_requested"] },
   };
-  if (!hasFinanceApprovalAccess(role)) {
+  if (!canApproveTimesheets(role)) {
     whereEntries.userId = userId;
   }
 
@@ -2153,11 +2184,23 @@ router.post("/timesheet-submissions/:id/submit", requireMissionHubAuth, async (r
 async function handleSubmissionAction(
   req: Request,
   res: Response,
-  action: "approved" | "rejected" | "changes_requested" | "processed" | "reopened",
+  action: "approved" | "rejected" | "changes_requested" | "finance_processed" | "paid" | "billed" | "exported" | "reopened",
 ) {
   const { userId, organizationId, role } = getUser(req);
-  if (!hasFinanceApprovalAccess(role)) {
-    res.status(403).json({ error: "Only finance/admin/authorized approvers can perform this action." });
+  const isApprovalAction = action === "approved" || action === "rejected" || action === "changes_requested" || action === "reopened";
+  const isProcessingAction = action === "finance_processed" || action === "paid" || action === "billed";
+  const isExportAction = action === "exported";
+
+  if (isApprovalAction && !canApproveTimesheets(role)) {
+    res.status(403).json({ error: "Missing capability: canApproveTimesheets." });
+    return;
+  }
+  if (isProcessingAction && !canProcessTimesheets(role)) {
+    res.status(403).json({ error: "Missing capability: canProcessTimesheets." });
+    return;
+  }
+  if (isExportAction && !canExportTimesheets(role)) {
+    res.status(403).json({ error: "Missing capability: canExportTimesheets." });
     return;
   }
 
@@ -2195,9 +2238,22 @@ async function handleSubmissionAction(
     return;
   }
 
-  const nextStatus = action === "processed" ? "processed" : action;
-  if (nextStatus === "processed" && submission.status !== "approved") {
-    res.status(409).json({ error: "Only approved submissions can be marked processed." });
+  const currentStatus = normalizeTimeEntryStatus(submission.status);
+  const nextStatus =
+    action === "approved" ? "finance_ready"
+      : action === "finance_processed" ? "finance_processed"
+        : action;
+
+  if (nextStatus === "finance_processed" && currentStatus !== "finance_ready") {
+    res.status(409).json({ error: "Only Finance Ready submissions can be marked finance processed." });
+    return;
+  }
+  if ((nextStatus === "paid" || nextStatus === "billed") && currentStatus !== "finance_processed") {
+    res.status(409).json({ error: "Only finance processed submissions can be marked paid or billed." });
+    return;
+  }
+  if (nextStatus === "exported" && !["finance_ready", "finance_processed", "paid", "billed"].includes(currentStatus)) {
+    res.status(409).json({ error: "Only finance-ready/processed/paid/billed submissions can be exported." });
     return;
   }
 
@@ -2209,18 +2265,27 @@ async function handleSubmissionAction(
   };
   if (action === "rejected") updateData.rejectionReason = note;
   if (action === "changes_requested") updateData.changeRequestReason = note;
-  if (action === "approved") updateData.financeNotes = note || null;
-  if (action === "processed") {
+  if (action === "approved") {
+    updateData.financeNotes = note || null;
+    updateData.approvedAt = now;
+  }
+  if (action === "finance_processed") {
     updateData.processedAt = now;
+    updateData.financeNotes = note || null;
+  }
+  if (action === "paid" || action === "billed" || action === "exported") {
     updateData.financeNotes = note || null;
   }
 
   const updatedSubmission = await store.missionHubTimesheetSubmission.update({ where: { id: req.params.id }, data: updateData });
 
-  const entryStatus = action === "reopened" ? "finance_review" : nextStatus;
+  const entryStatus =
+    action === "reopened" ? "finance_review"
+      : action === "approved" ? "finance_ready"
+        : nextStatus;
   const entryData: Record<string, unknown> = { status: entryStatus };
   if (action === "approved") entryData.approvedAt = now;
-  if (action === "processed") entryData.processedAt = now;
+  if (action === "finance_processed") entryData.processedAt = now;
   if (action === "changes_requested") {
     entryData.timesheetSubmissionId = null;
   }
@@ -2263,7 +2328,23 @@ router.post("/timesheet-submissions/:id/request-changes", requireMissionHubAuth,
 });
 
 router.post("/timesheet-submissions/:id/mark-processed", requireMissionHubAuth, async (req, res) => {
-  await handleSubmissionAction(req, res, "processed");
+  await handleSubmissionAction(req, res, "finance_processed");
+});
+
+router.post("/timesheet-submissions/:id/mark-reviewed", requireMissionHubAuth, async (req, res) => {
+  await handleSubmissionAction(req, res, "finance_processed");
+});
+
+router.post("/timesheet-submissions/:id/mark-paid", requireMissionHubAuth, async (req, res) => {
+  await handleSubmissionAction(req, res, "paid");
+});
+
+router.post("/timesheet-submissions/:id/mark-billed", requireMissionHubAuth, async (req, res) => {
+  await handleSubmissionAction(req, res, "billed");
+});
+
+router.post("/timesheet-submissions/:id/mark-exported", requireMissionHubAuth, async (req, res) => {
+  await handleSubmissionAction(req, res, "exported");
 });
 
 router.post("/timesheet-submissions/:id/reopen", requireMissionHubAuth, async (req, res) => {
