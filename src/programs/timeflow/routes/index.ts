@@ -223,6 +223,112 @@ router.get("/auth/me", requireTimeflowAuth, async (req, res) => {
   res.json({ user: toAuthUserPayload(user) });
 });
 
+// ─── Viewer invite endpoints ─────────────────────────────────────────────────
+
+const INVITE_SECRET = (process.env.INVITE_SECRET || process.env.JWT_SECRET || "invite-secret-fallback");
+const INVITE_EXPIRES_IN = "7d";
+
+router.post("/auth/invite/generate", requireTimeflowAuth, async (req, res) => {
+  const actor = getUser(req);
+  if (actor.role !== "contractor") {
+    res.status(403).json({ error: "Only contractors can generate viewer invites" });
+    return;
+  }
+
+  const body = isRecord(req.body) ? req.body : {};
+  const clientId = typeof body.clientId === "string" ? body.clientId.trim() : "";
+  if (!clientId) {
+    res.status(400).json({ error: "clientId is required" });
+    return;
+  }
+
+  const code = jwt.sign(
+    {
+      type: "viewer-invite",
+      clientId,
+      createdBy: actor.userId,
+      organizationId: actor.organizationId,
+      programDomain: TIMEFLOW_PROGRAM_DOMAIN,
+    },
+    INVITE_SECRET,
+    { expiresIn: INVITE_EXPIRES_IN } as jwt.SignOptions,
+  );
+
+  res.json({ code, expiresIn: INVITE_EXPIRES_IN });
+});
+
+router.post("/auth/invite/accept", async (req, res) => {
+  const body = isRecord(req.body) ? req.body : {};
+  const code = typeof body.code === "string" ? body.code.trim() : "";
+  const email = normalizeEmail(body.email);
+  const password = typeof body.password === "string" ? body.password : "";
+  const displayName = normalizeDisplayName(body.displayName, email);
+
+  if (!code || !email || !password) {
+    res.status(400).json({ error: "code, email, and password are required" });
+    return;
+  }
+  if (password.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+
+  let payload: { type?: string; clientId?: string; organizationId?: string } | null = null;
+  try {
+    payload = jwt.verify(code, INVITE_SECRET) as typeof payload;
+  } catch {
+    res.status(400).json({ error: "Invite code is invalid or has expired" });
+    return;
+  }
+
+  if (payload?.type !== "viewer-invite" || !payload.clientId) {
+    res.status(400).json({ error: "Invalid invite code format" });
+    return;
+  }
+
+  const existing = await prismaUser.user.findUnique({ where: { email } });
+  if (existing) {
+    res.status(409).json({ error: "An account with that email already exists" });
+    return;
+  }
+
+  const user = await prismaUser.user.create({
+    data: {
+      organizationId: payload.organizationId || DEFAULT_ORGANIZATION_ID,
+      email,
+      passwordHash: await hashPassword(password),
+      role: "client_viewer",
+      displayName,
+      identitySource: "invite",
+    },
+  });
+
+  // Store the clientId association in user metadata if supported, otherwise embed in token.
+  const token = jwt.sign(
+    {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      organizationId: user.organizationId || DEFAULT_ORGANIZATION_ID,
+      programDomain: TIMEFLOW_PROGRAM_DOMAIN,
+      clientId: payload.clientId,
+    },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN } as jwt.SignOptions,
+  );
+
+  writeAuthCookies(res, token);
+  res.setHeader("Authorization", `Bearer ${token}`);
+
+  logger.info("[timeflow] viewer invite accepted", {
+    userId: user.id,
+    clientId: payload.clientId,
+    organizationId: user.organizationId,
+  });
+
+  res.status(201).json({ token, user: { ...toAuthUserPayload(user), clientId: payload.clientId } });
+});
+
 router.post("/auth/logout", (_req, res) => {
   const secureCookie = process.env.NODE_ENV === "production";
   const cookieOptions = {
