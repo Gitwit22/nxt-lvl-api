@@ -347,15 +347,26 @@ router.post("/auth/logout", (_req, res) => {
 function readTokenFromRequest(req: Request): string | undefined {
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
+
   const cookieHeader = req.headers.cookie;
   if (!cookieHeader) return undefined;
+
+  const cookieValues = new Map<string, string>();
   for (const item of cookieHeader.split(";")) {
     const [rawKey, ...rawValue] = item.trim().split("=");
     const key = rawKey?.trim();
-    if (key && ["token", "accessToken", "authToken", "timeflowToken"].includes(key)) {
-      return decodeURIComponent(rawValue.join("=") || "");
-    }
+    if (!key) continue;
+    cookieValues.set(key, decodeURIComponent(rawValue.join("=") || ""));
   }
+
+  // Prefer program-scoped cookies before generic token names to avoid
+  // collisions with other app/session cookies on the same domain.
+  const preferredOrder = ["timeflowToken", "accessToken", "token", "authToken"];
+  for (const key of preferredOrder) {
+    const token = cookieValues.get(key);
+    if (token) return token;
+  }
+
   return undefined;
 }
 
