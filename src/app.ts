@@ -54,6 +54,7 @@ app.use("/api/nxt-lvl-suite", nxtLvlSuiteRouter);
 app.use("/api/timeflow", timeflowRouter);
 app.use("/api/mission-hub", requireProgramSubscription, missionHubRouter);
 app.use("/api/financial-hub", requireProgramSubscription, financialHubRouter);
+app.use("/api/finance-hub", requireProgramSubscription, financialHubRouter);
 
 // Compatibility mount to preserve existing Community Chronicle endpoints.
 app.use(`${API_PREFIX}`, communityChronicleRouter);

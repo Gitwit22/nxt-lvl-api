@@ -1,9 +1,19 @@
 import express, { type NextFunction, type Request, type Response } from "express";
+import { randomBytes } from "crypto";
+import multer from "multer";
 import jwt from "jsonwebtoken";
+import path from "path";
 import type { Prisma } from "@prisma/client";
 import { prisma } from "../../../core/db/prisma.js";
-import { JWT_EXPIRES_IN, JWT_SECRET } from "../../../core/config/env.js";
+import {
+  DEFAULT_ORGANIZATION_ID,
+  FINANCE_HUB_DOCUMENT_MAX_UPLOAD_BYTES,
+  FINANCE_HUB_DOCUMENT_MAX_UPLOAD_MB,
+  JWT_EXPIRES_IN,
+  JWT_SECRET,
+} from "../../../core/config/env.js";
 import { hashPassword, signToken } from "../../../core/auth/auth.service.js";
+import { resolveStorageAdapter } from "../../../core/storage/storageResolver.js";
 
 const router = express.Router();
 
@@ -26,6 +36,40 @@ const SOURCE_RECORD_TYPE_VALUES = new Set([
   "invoice",
   "event",
 ]);
+const FINANCE_HUB_DOCUMENT_FOLDERS = new Set(["general", "test"]);
+const FINANCE_HUB_DOCUMENT_MIME_TYPES = new Set([
+  "application/pdf",
+  "text/plain",
+  "text/csv",
+  "image/png",
+  "image/jpeg",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  "application/vnd.ms-powerpoint",
+]);
+const FINANCE_HUB_ALLOWED_EXTENSIONS = new Set([
+  ".pdf",
+  ".txt",
+  ".csv",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".docx",
+  ".doc",
+  ".xlsx",
+  ".xls",
+  ".pptx",
+  ".ppt",
+]);
+const FINANCE_HUB_SIGNED_URL_TTL_SECONDS = 15 * 60;
+
+const financeHubUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: FINANCE_HUB_DOCUMENT_MAX_UPLOAD_BYTES },
+});
 
 const DEFAULT_CAPABILITIES = {
   canManageFinanceSettings: true,
@@ -61,6 +105,12 @@ type PrismaWithFinancialHub = typeof prisma & {
     groupBy: (args: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
     aggregate: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
   };
+  financeHubDocument: {
+    findMany: (args: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+    findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
 };
 
 const prismaFinancial = prisma as PrismaWithFinancialHub;
@@ -77,6 +127,58 @@ function optionalString(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function parseFinanceFolder(value: unknown, options?: { defaultToGeneral?: boolean }): "general" | "test" | null {
+  const raw = normalizeString(value).toLowerCase();
+  if (!raw) {
+    return options?.defaultToGeneral ? "general" : null;
+  }
+  if (raw === "all") {
+    return null;
+  }
+  if (raw === "general" || raw === "test") {
+    return raw;
+  }
+  return null;
+}
+
+function sanitizeFilename(originalName: string): string {
+  const base = path.basename(originalName || "document");
+  const noControls = base.replace(/[\u0000-\u001f\u007f]/g, "");
+  const noTraversal = noControls.replace(/\.\.+/g, ".").replace(/[\\/]/g, "_");
+  const cleaned = noTraversal
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 180);
+  return cleaned || "document";
+}
+
+function mapFinanceHubDocument(record: Record<string, unknown>) {
+  const createdAt = record.createdAt instanceof Date ? record.createdAt.toISOString() : null;
+  const updatedAt = record.updatedAt instanceof Date ? record.updatedAt.toISOString() : null;
+  const deletedAt = record.deletedAt instanceof Date ? record.deletedAt.toISOString() : null;
+  const folder = typeof record.folder === "string" && record.folder ? record.folder : "general";
+
+  return {
+    id: String(record.id),
+    organizationId: String(record.organizationId || DEFAULT_ORGANIZATION_ID),
+    programDomain: String(record.programDomain || FINANCIAL_HUB_PROGRAM_DOMAIN),
+    folder,
+    originalFilename: typeof record.originalFilename === "string" ? record.originalFilename : "",
+    safeFilename: typeof record.safeFilename === "string" ? record.safeFilename : "",
+    mimeType: typeof record.mimeType === "string" ? record.mimeType : "application/octet-stream",
+    fileSize: typeof record.fileSize === "number" ? record.fileSize : 0,
+    r2Key: typeof record.r2Key === "string" ? record.r2Key : "",
+    storageProvider: typeof record.storageProvider === "string" ? record.storageProvider : "r2",
+    uploadedByUserId: typeof record.uploadedByUserId === "string" ? record.uploadedByUserId : null,
+    deletedByUserId: typeof record.deletedByUserId === "string" ? record.deletedByUserId : null,
+    status: typeof record.status === "string" ? record.status : "uploaded",
+    createdAt,
+    updatedAt,
+    deletedAt,
+    hasOriginal: typeof record.status === "string" ? record.status !== "deleted" : true,
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -476,6 +578,217 @@ router.get("/me", requireFinancialHubAuth, async (req, res) => {
       capabilities: (profile?.capabilities as Record<string, boolean> | undefined) || DEFAULT_CAPABILITIES,
     },
   });
+});
+
+router.post("/documents/upload", requireFinancialHubAuth, financeHubUpload.single("file"), async (req, res) => {
+  const user = getFinancialHubUser(req);
+  const file = req.file;
+  if (!file) {
+    res.status(400).json({ error: "A file is required" });
+    return;
+  }
+
+  const requestedFolder = normalizeString((req.body as Record<string, unknown> | undefined)?.folder).toLowerCase();
+  if (requestedFolder && !FINANCE_HUB_DOCUMENT_FOLDERS.has(requestedFolder)) {
+    res.status(400).json({ error: "Invalid folder. Allowed values are 'general' or 'test'." });
+    return;
+  }
+
+  const folder = parseFinanceFolder(requestedFolder, { defaultToGeneral: true }) || "general";
+  if (!FINANCE_HUB_DOCUMENT_MIME_TYPES.has(file.mimetype)) {
+    res.status(415).json({ error: `Unsupported file MIME type '${file.mimetype}'` });
+    return;
+  }
+
+  if (file.size > FINANCE_HUB_DOCUMENT_MAX_UPLOAD_BYTES) {
+    res.status(413).json({
+      error: `File is larger than the configured ${FINANCE_HUB_DOCUMENT_MAX_UPLOAD_MB}MB limit`,
+    });
+    return;
+  }
+
+  const safeFilename = sanitizeFilename(file.originalname || "document");
+  const ext = path.extname(safeFilename).toLowerCase();
+  if (!ext || !FINANCE_HUB_ALLOWED_EXTENSIONS.has(ext)) {
+    res.status(415).json({ error: `Unsupported file extension '${ext || "(none)"}'` });
+    return;
+  }
+
+  const organizationId = user.organizationId || DEFAULT_ORGANIZATION_ID;
+  const stamp = `${Date.now()}-${randomBytes(3).toString("hex")}`;
+  const r2Key = `finance-hub/documents/${folder}/${stamp}-${safeFilename}`;
+
+  try {
+    const storage = await resolveStorageAdapter({
+      organizationId,
+      programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
+    });
+    const uploaded = await storage.adapter.upload(r2Key, file.buffer, file.mimetype);
+
+    const created = await prismaFinancial.financeHubDocument.create({
+      data: {
+        organizationId,
+        programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
+        folder,
+        originalFilename: file.originalname || safeFilename,
+        safeFilename,
+        mimeType: file.mimetype,
+        fileSize: file.size,
+        r2Key: uploaded.key,
+        storageProvider: storage.adapter.backendId.includes("r2") ? "r2" : storage.adapter.backendId,
+        uploadedByUserId: user.userId || null,
+        status: "uploaded",
+      },
+    });
+
+    res.status(201).json(mapFinanceHubDocument(created));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to upload document";
+    res.status(500).json({ error: message });
+  }
+});
+
+router.get("/documents", requireFinancialHubAuth, async (req, res) => {
+  const user = getFinancialHubUser(req);
+  const folderRaw = normalizeString(req.query.folder).toLowerCase();
+  if (folderRaw && folderRaw !== "all" && !FINANCE_HUB_DOCUMENT_FOLDERS.has(folderRaw)) {
+    res.status(400).json({ error: "Invalid folder filter. Allowed values are 'all', 'general', or 'test'." });
+    return;
+  }
+
+  const folderFilter = parseFinanceFolder(folderRaw);
+  const organizationId = user.organizationId || DEFAULT_ORGANIZATION_ID;
+
+  const rows = await prismaFinancial.financeHubDocument.findMany({
+    where: {
+      organizationId,
+      programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
+      deletedAt: null,
+      status: { not: "deleted" },
+      ...(folderFilter ? { folder: folderFilter } : {}),
+    },
+    orderBy: { createdAt: "desc" },
+    take: 500,
+  });
+
+  res.json({ items: rows.map(mapFinanceHubDocument) });
+});
+
+router.get("/documents/:id", requireFinancialHubAuth, async (req, res) => {
+  const user = getFinancialHubUser(req);
+  const documentId = normalizeString(req.params.id);
+  const organizationId = user.organizationId || DEFAULT_ORGANIZATION_ID;
+
+  const row = await prismaFinancial.financeHubDocument.findFirst({
+    where: {
+      id: documentId,
+      organizationId,
+      programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
+      deletedAt: null,
+      status: { not: "deleted" },
+    },
+  });
+
+  if (!row) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  res.json({ item: mapFinanceHubDocument(row) });
+});
+
+router.get("/documents/:id/url", requireFinancialHubAuth, async (req, res) => {
+  const user = getFinancialHubUser(req);
+  const documentId = normalizeString(req.params.id);
+  const organizationId = user.organizationId || DEFAULT_ORGANIZATION_ID;
+  const dispositionRaw = normalizeString(req.query.disposition).toLowerCase();
+  const disposition = dispositionRaw === "attachment" ? "attachment" : "inline";
+
+  const row = await prismaFinancial.financeHubDocument.findFirst({
+    where: {
+      id: documentId,
+      organizationId,
+      programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
+      deletedAt: null,
+      status: { not: "deleted" },
+    },
+  });
+
+  if (!row) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  try {
+    const storage = await resolveStorageAdapter({
+      organizationId,
+      programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
+    });
+    const url = await storage.adapter.getDownloadUrl(String(row.r2Key), {
+      disposition,
+      filename: String(row.originalFilename || row.safeFilename || "document"),
+      expiresIn: FINANCE_HUB_SIGNED_URL_TTL_SECONDS,
+    });
+
+    res.json({
+      url,
+      expiresAt: new Date(Date.now() + FINANCE_HUB_SIGNED_URL_TTL_SECONDS * 1000).toISOString(),
+      filename: String(row.originalFilename || row.safeFilename || "document"),
+      mimeType: String(row.mimeType || "application/octet-stream"),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to generate signed URL";
+    res.status(500).json({ error: message });
+  }
+});
+
+router.delete("/documents/:id", requireFinancialHubAuth, async (req, res) => {
+  const user = getFinancialHubUser(req);
+  const documentId = normalizeString(req.params.id);
+  const organizationId = user.organizationId || DEFAULT_ORGANIZATION_ID;
+
+  const row = await prismaFinancial.financeHubDocument.findFirst({
+    where: {
+      id: documentId,
+      organizationId,
+      programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
+      deletedAt: null,
+      status: { not: "deleted" },
+    },
+  });
+
+  if (!row) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  try {
+    const storage = await resolveStorageAdapter({
+      organizationId,
+      programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
+    });
+    await storage.adapter.delete(String(row.r2Key));
+
+    const deletedAt = new Date();
+    await prismaFinancial.financeHubDocument.update({
+      where: { id: documentId },
+      data: {
+        status: "deleted",
+        deletedAt,
+        deletedByUserId: user.userId || null,
+      },
+    });
+
+    res.json({
+      deleted: true,
+      id: documentId,
+      status: "deleted",
+      deletedAt: deletedAt.toISOString(),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Failed to delete document";
+    res.status(500).json({ error: message });
+  }
 });
 
 router.get("/intake", requireFinancialHubAuth, async (req, res) => {

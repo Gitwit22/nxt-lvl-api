@@ -965,6 +965,29 @@ model FinanceIntakeRecord {
   @@index([eventId])
 }
 
+model FinanceHubDocument {
+  id               String   @id @default(cuid())
+  organizationId   String   @default("default-org")
+  programDomain    String   @default("financial-hub")
+  folder           String   @default("general")
+  originalFilename String
+  safeFilename     String
+  mimeType         String
+  fileSize         Int
+  r2Key            String   @unique
+  storageProvider  String   @default("r2")
+  uploadedByUserId String?
+  status           String   @default("uploaded")
+  deletedAt        DateTime?
+  deletedByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([organizationId, folder, createdAt])
+  @@index([organizationId, createdAt])
+  @@index([uploadedByUserId, createdAt])
+}
+
 // ─── End Financial Hub ───────────────────────────────────────────────────────
 
 model Document {

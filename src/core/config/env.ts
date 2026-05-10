@@ -132,6 +132,11 @@ export const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || "8h";
 export const PLATFORM_LAUNCH_TOKEN_SECRET: string = requireSecret("PLATFORM_LAUNCH_TOKEN_SECRET");
 
 export const MAX_FILE_SIZE_BYTES = Number(process.env.MAX_FILE_SIZE_BYTES || 50 * 1024 * 1024);
+export const FINANCE_HUB_DOCUMENT_MAX_UPLOAD_MB = Number(
+  process.env.FINANCE_HUB_DOCUMENT_MAX_UPLOAD_MB || 50,
+);
+export const FINANCE_HUB_DOCUMENT_MAX_UPLOAD_BYTES =
+  FINANCE_HUB_DOCUMENT_MAX_UPLOAD_MB * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Storage backend

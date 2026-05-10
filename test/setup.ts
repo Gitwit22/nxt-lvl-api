@@ -7,6 +7,7 @@ import { vi } from "vitest";
 
 // Deterministic JWT secret for tests
 process.env.JWT_SECRET = "test-secret-for-vitest-do-not-use-in-prod";
+process.env.PLATFORM_LAUNCH_TOKEN_SECRET = "test-launch-secret";
 process.env.NODE_ENV = "test";
 
 // Suppress logger output during tests
