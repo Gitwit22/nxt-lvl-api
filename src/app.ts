@@ -16,6 +16,7 @@ import { communityChronicleRouter } from "./programs/community-chronicle/routes/
 import { nxtLvlSuiteRouter } from "./programs/nxt-lvl-suite/routes/index.js";
 import { timeflowRouter } from "./programs/timeflow/routes/index.js";
 import { missionHubRouter } from "./programs/mission-hub/routes/index.js";
+import { financialHubRouter } from "./programs/financial-hub/routes/index.js";
 import { metricsRouter } from "./core/routes/metrics.routes.js";
 
 const app = express();
@@ -52,6 +53,7 @@ app.use("/api/community-chronicle", communityChronicleRouter);
 app.use("/api/nxt-lvl-suite", nxtLvlSuiteRouter);
 app.use("/api/timeflow", timeflowRouter);
 app.use("/api/mission-hub", requireProgramSubscription, missionHubRouter);
+app.use("/api/financial-hub", requireProgramSubscription, financialHubRouter);
 
 // Compatibility mount to preserve existing Community Chronicle endpoints.
 app.use(`${API_PREFIX}`, communityChronicleRouter);

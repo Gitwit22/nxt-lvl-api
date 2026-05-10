@@ -16,7 +16,8 @@
     "prisma:push": "prisma db push",
     "db:backfill:tenant": "node --import tsx src/backfillTenantContext.ts",
     "db:seed:suite-programs": "node --import tsx src/scripts/seedSuitePrograms.ts",
-    "db:seed:community-chronicle": "node scripts/seed-community-chronicle-partition.js"
+    "db:seed:community-chronicle": "node scripts/seed-community-chronicle-partition.js",
+    "db:seed:financial-hub-admin": "node --import tsx src/scripts/seedFinancialHubAdmin.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1029.0",

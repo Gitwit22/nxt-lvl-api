@@ -895,6 +895,78 @@ model MissionHubScheduledReport {
 
 // ─── End Mission Hub ──────────────────────────────────────────────────────────
 
+// ─── Financial Hub ───────────────────────────────────────────────────────────
+
+model FinancialHubUserProfile {
+  id               String   @id @default(cuid())
+  userId           String
+  organizationId   String
+  programDomain    String   @default("financial-hub")
+  phone            String?
+  title            String?
+  defaultTimezone  String   @default("America/New_York")
+  capabilities     Json     @default("{}")
+  isInitialAdmin   Boolean  @default(false)
+  createdByUserId  String
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([organizationId, programDomain, userId])
+  @@index([organizationId, programDomain])
+  @@index([organizationId, programDomain, isInitialAdmin])
+}
+
+model FinanceIntakeRecord {
+  id                        String   @id @default(cuid())
+  organizationId            String
+  programDomain             String   @default("financial-hub")
+  sourceApp                 String
+  sourceRecordId            String
+  sourceRecordType          String
+  sourceStatus              String?
+  financeStatus             String   @default("received")
+  title                     String
+  description               String?  @db.Text
+  amount                    Float    @default(0)
+  currency                  String   @default("USD")
+  transactionDate           DateTime?
+  payPeriodId               String?
+  employeeId                String?
+  volunteerId               String?
+  programId                 String?
+  grantId                   String?
+  eventId                   String?
+  expenseId                 String?
+  timesheetId               String?
+  fundingSourceId           String?
+  submittedByUserId         String?
+  operationallyApprovedByUserId String?
+  financeReviewedByUserId   String?
+  financeReviewedAt         DateTime?
+  exportBatchId             String?
+  postedAt                  DateTime?
+  metadata                  Json     @default("{}")
+  attachments               Json     @default("[]")
+  validationIssues          Json     @default("[]")
+  createdByUserId           String
+  createdAt                 DateTime @default(now())
+  updatedAt                 DateTime @updatedAt
+
+  @@unique([organizationId, sourceApp, sourceRecordId, sourceRecordType])
+  @@index([organizationId, programDomain])
+  @@index([organizationId, financeStatus])
+  @@index([organizationId, sourceApp, sourceRecordType])
+  @@index([organizationId, createdAt])
+  @@index([sourceApp, sourceRecordId])
+  @@index([payPeriodId])
+  @@index([employeeId])
+  @@index([programId])
+  @@index([grantId])
+  @@index([eventId])
+}
+
+// ─── End Financial Hub ───────────────────────────────────────────────────────
+
 model Document {
   id                    String    @id
   organizationId        String
