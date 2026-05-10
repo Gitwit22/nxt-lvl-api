@@ -25,6 +25,46 @@ const router = express.Router();
 
 const MISSION_HUB_PROGRAM_DOMAIN = "mission-hub";
 
+type PrismaWithProgramSubscription = typeof prisma & {
+  organizationProgramSubscription: {
+    upsert: (args: Record<string, unknown>) => Promise<{ id: string; status: string }>;
+  };
+};
+
+const prismaWithProgramSubscription = prisma as PrismaWithProgramSubscription;
+
+async function ensureMissionHubSubscription(organizationId: string): Promise<void> {
+  try {
+    await prismaWithProgramSubscription.organizationProgramSubscription.upsert({
+      where: {
+        organizationId_programId: {
+          organizationId,
+          programId: MISSION_HUB_PROGRAM_DOMAIN,
+        },
+      } as Record<string, unknown>,
+      update: {
+        status: "active",
+        subscriptionSource: "manual",
+        startsAt: new Date(),
+        notes: "Auto-provisioned on Mission Hub login",
+      } as Record<string, unknown>,
+      create: {
+        organizationId,
+        programId: MISSION_HUB_PROGRAM_DOMAIN,
+        status: "active",
+        subscriptionSource: "manual",
+        startsAt: new Date(),
+        notes: "Auto-provisioned on Mission Hub login",
+      } as Record<string, unknown>,
+    });
+  } catch (error) {
+    logger.error("[mission-hub] Failed to auto-provision subscription", {
+      organizationId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 // ─── Auth helpers ─────────────────────────────────────────────────────────────
 
 interface MissionHubTokenPayload {
@@ -347,6 +387,8 @@ router.post("/auth/login", async (req, res) => {
     organizationId: user.organizationId,
     programDomain: MISSION_HUB_PROGRAM_DOMAIN,
   });
+
+  await ensureMissionHubSubscription(user.organizationId);
 
   logger.info("[mission-hub] User logged in", { userId: user.id, organizationId: user.organizationId });
 
