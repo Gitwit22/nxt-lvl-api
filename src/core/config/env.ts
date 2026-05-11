@@ -59,14 +59,14 @@ export const CORS_ORIGIN =
 /**
  * Allowed origin domains for dynamic subdomain matching.
  * Only our own domains and render.com preview deployments are trusted.
- * The *.pages.dev wildcard was deliberately removed — it would trust any
- * Cloudflare Pages tenant, which is too broad for credentialed requests.
- * Add explicit Cloudflare Pages origins to CORS_ORIGIN env var instead.
+ * We intentionally allow only finance-command-center Pages deployments,
+ * not all *.pages.dev tenants.
  */
 const ALLOWED_ORIGIN_PATTERNS = [
   /^https?:\/\/localhost(:\d+)?$/,
   /^https:\/\/([a-z0-9-]+\.)?nltops\.com$/,
   /^https:\/\/([a-z0-9-]+\.)?ntlops\.com$/,
+  /^https:\/\/finance-command-center(-[a-z0-9]+)?\.pages\.dev$/,
   /^https:\/\/[a-z0-9-]+\.onrender\.com$/,
 ];
 
