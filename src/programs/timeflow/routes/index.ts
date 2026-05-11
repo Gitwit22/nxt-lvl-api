@@ -438,16 +438,21 @@ async function resolveEffectiveDataUserId(scope: { organizationId: string; userI
       findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
       findMany: (args: Record<string, unknown>) => Promise<Array<{ userId: string }>>;
     };
+    timeflowProjectBill: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      findMany: (args: Record<string, unknown>) => Promise<Array<{ userId: string }>>;
+    };
   };
 
-  const [ownClient, ownProject, ownEntry, ownInvoice] = await Promise.all([
+  const [ownClient, ownProject, ownEntry, ownInvoice, ownProjectBill] = await Promise.all([
     store.timeflowClient.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
     store.timeflowProject.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
     store.timeflowTimeEntry.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
     store.timeflowInvoice.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
+    store.timeflowProjectBill.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
   ]);
 
-  if (ownClient || ownProject || ownEntry || ownInvoice) {
+  if (ownClient || ownProject || ownEntry || ownInvoice || ownProjectBill) {
     return scope.userId;
   }
 
@@ -460,17 +465,19 @@ async function resolveEffectiveDataUserId(scope: { organizationId: string; userI
     }
   };
 
-  const [clientOwners, projectOwners, entryOwners, invoiceOwners] = await Promise.all([
+  const [clientOwners, projectOwners, entryOwners, invoiceOwners, projectBillOwners] = await Promise.all([
     store.timeflowClient.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
     store.timeflowProject.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
     store.timeflowTimeEntry.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
     store.timeflowInvoice.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    store.timeflowProjectBill.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
   ]);
 
   addOwnerIds(clientOwners);
   addOwnerIds(projectOwners);
   addOwnerIds(entryOwners);
   addOwnerIds(invoiceOwners);
+  addOwnerIds(projectBillOwners);
 
   if (ownerIds.size !== 1) {
     return scope.userId;
@@ -647,27 +654,33 @@ router.get("/debug/context", async (req, res) => {
     tokenProjectCount,
     tokenEntryCount,
     tokenInvoiceCount,
+    tokenProjectBillCount,
     effectiveClientCount,
     effectiveProjectCount,
     effectiveEntryCount,
     effectiveInvoiceCount,
+    effectiveProjectBillCount,
     orgClientOwners,
     orgProjectOwners,
     orgEntryOwners,
     orgInvoiceOwners,
+    orgProjectBillOwners,
   ] = await Promise.all([
     prisma.timeflowClient.count({ where: { organizationId, userId: tokenUserId } }),
     prisma.timeflowProject.count({ where: { organizationId, userId: tokenUserId } }),
     prisma.timeflowTimeEntry.count({ where: { organizationId, userId: tokenUserId } }),
     prisma.timeflowInvoice.count({ where: { organizationId, userId: tokenUserId } }),
+    prisma.timeflowProjectBill.count({ where: { organizationId, userId: tokenUserId } }),
     prisma.timeflowClient.count({ where: { organizationId, userId: effectiveUserId } }),
     prisma.timeflowProject.count({ where: { organizationId, userId: effectiveUserId } }),
     prisma.timeflowTimeEntry.count({ where: { organizationId, userId: effectiveUserId } }),
     prisma.timeflowInvoice.count({ where: { organizationId, userId: effectiveUserId } }),
+    prisma.timeflowProjectBill.count({ where: { organizationId, userId: effectiveUserId } }),
     prisma.timeflowClient.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
     prisma.timeflowProject.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
     prisma.timeflowTimeEntry.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
     prisma.timeflowInvoice.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    prisma.timeflowProjectBill.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
   ]);
 
   res.json({
@@ -681,12 +694,14 @@ router.get("/debug/context", async (req, res) => {
         projects: tokenProjectCount,
         timeEntries: tokenEntryCount,
         invoices: tokenInvoiceCount,
+        projectBills: tokenProjectBillCount,
       },
       effectiveUser: {
         clients: effectiveClientCount,
         projects: effectiveProjectCount,
         timeEntries: effectiveEntryCount,
         invoices: effectiveInvoiceCount,
+        projectBills: effectiveProjectBillCount,
       },
     },
     ownersInOrganization: {
@@ -694,6 +709,7 @@ router.get("/debug/context", async (req, res) => {
       projects: orgProjectOwners.map((row) => row.userId),
       timeEntries: orgEntryOwners.map((row) => row.userId),
       invoices: orgInvoiceOwners.map((row) => row.userId),
+      projectBills: orgProjectBillOwners.map((row) => row.userId),
     },
   });
 });
@@ -707,35 +723,43 @@ router.get("/debug/presence", async (req, res) => {
     globalProjectCount,
     globalEntryCount,
     globalInvoiceCount,
+    globalProjectBillCount,
     orgClientCount,
     orgProjectCount,
     orgEntryCount,
     orgInvoiceCount,
+    orgProjectBillCount,
     userClientOrgs,
     userProjectOrgs,
     userEntryOrgs,
     userInvoiceOrgs,
+    userProjectBillOrgs,
     orgClientOwners,
     orgProjectOwners,
     orgEntryOwners,
     orgInvoiceOwners,
+    orgProjectBillOwners,
   ] = await Promise.all([
     prisma.timeflowClient.count(),
     prisma.timeflowProject.count(),
     prisma.timeflowTimeEntry.count(),
     prisma.timeflowInvoice.count(),
+    prisma.timeflowProjectBill.count(),
     prisma.timeflowClient.count({ where: { organizationId } }),
     prisma.timeflowProject.count({ where: { organizationId } }),
     prisma.timeflowTimeEntry.count({ where: { organizationId } }),
     prisma.timeflowInvoice.count({ where: { organizationId } }),
+    prisma.timeflowProjectBill.count({ where: { organizationId } }),
     prisma.timeflowClient.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
     prisma.timeflowProject.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
     prisma.timeflowTimeEntry.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
     prisma.timeflowInvoice.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowProjectBill.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
     prisma.timeflowClient.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
     prisma.timeflowProject.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
     prisma.timeflowTimeEntry.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
     prisma.timeflowInvoice.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    prisma.timeflowProjectBill.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
   ]);
 
   const userOrgSet = new Set<string>();
@@ -743,18 +767,20 @@ router.get("/debug/presence", async (req, res) => {
   for (const row of userProjectOrgs) userOrgSet.add(row.organizationId);
   for (const row of userEntryOrgs) userOrgSet.add(row.organizationId);
   for (const row of userInvoiceOrgs) userOrgSet.add(row.organizationId);
+  for (const row of userProjectBillOrgs) userOrgSet.add(row.organizationId);
 
   const userOrgIds = Array.from(userOrgSet);
 
   const userOrgBreakdown = await Promise.all(
     userOrgIds.map(async (orgId) => {
-      const [clients, projects, timeEntries, invoices] = await Promise.all([
+      const [clients, projects, timeEntries, invoices, projectBills] = await Promise.all([
         prisma.timeflowClient.count({ where: { organizationId: orgId, userId } }),
         prisma.timeflowProject.count({ where: { organizationId: orgId, userId } }),
         prisma.timeflowTimeEntry.count({ where: { organizationId: orgId, userId } }),
         prisma.timeflowInvoice.count({ where: { organizationId: orgId, userId } }),
+        prisma.timeflowProjectBill.count({ where: { organizationId: orgId, userId } }),
       ]);
-      return { organizationId: orgId, clients, projects, timeEntries, invoices };
+      return { organizationId: orgId, clients, projects, timeEntries, invoices, projectBills };
     }),
   );
 
@@ -767,12 +793,14 @@ router.get("/debug/presence", async (req, res) => {
       projects: globalProjectCount,
       timeEntries: globalEntryCount,
       invoices: globalInvoiceCount,
+      projectBills: globalProjectBillCount,
     },
     currentOrgTotals: {
       clients: orgClientCount,
       projects: orgProjectCount,
       timeEntries: orgEntryCount,
       invoices: orgInvoiceCount,
+      projectBills: orgProjectBillCount,
     },
     userOrgBreakdown,
     ownersInCurrentOrg: {
@@ -780,6 +808,7 @@ router.get("/debug/presence", async (req, res) => {
       projects: orgProjectOwners.map((row) => row.userId),
       timeEntries: orgEntryOwners.map((row) => row.userId),
       invoices: orgInvoiceOwners.map((row) => row.userId),
+      projectBills: orgProjectBillOwners.map((row) => row.userId),
     },
   });
 });
@@ -789,14 +818,15 @@ router.get("/debug/presence", async (req, res) => {
 router.post("/debug/relink-current-org", async (req, res) => {
   const { organizationId: currentOrgId, userId, email } = getUser(req);
 
-  const [currentClients, currentProjects, currentEntries, currentInvoices] = await Promise.all([
+  const [currentClients, currentProjects, currentEntries, currentInvoices, currentProjectBills] = await Promise.all([
     prisma.timeflowClient.count({ where: { organizationId: currentOrgId, userId } }),
     prisma.timeflowProject.count({ where: { organizationId: currentOrgId, userId } }),
     prisma.timeflowTimeEntry.count({ where: { organizationId: currentOrgId, userId } }),
     prisma.timeflowInvoice.count({ where: { organizationId: currentOrgId, userId } }),
+    prisma.timeflowProjectBill.count({ where: { organizationId: currentOrgId, userId } }),
   ]);
 
-  const currentTotal = currentClients + currentProjects + currentEntries + currentInvoices;
+  const currentTotal = currentClients + currentProjects + currentEntries + currentInvoices + currentProjectBills;
   if (currentTotal > 0) {
     res.status(409).json({
       error: "Current organization already has Timeflow rows for this user. Relink aborted.",
@@ -807,16 +837,18 @@ router.post("/debug/relink-current-org", async (req, res) => {
         projects: currentProjects,
         timeEntries: currentEntries,
         invoices: currentInvoices,
+        projectBills: currentProjectBills,
       },
     });
     return;
   }
 
-  const [legacyClientOrgs, legacyProjectOrgs, legacyEntryOrgs, legacyInvoiceOrgs] = await Promise.all([
+  const [legacyClientOrgs, legacyProjectOrgs, legacyEntryOrgs, legacyInvoiceOrgs, legacyProjectBillOrgs] = await Promise.all([
     prisma.timeflowClient.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
     prisma.timeflowProject.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
     prisma.timeflowTimeEntry.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
     prisma.timeflowInvoice.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowProjectBill.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
   ]);
 
   const legacyOrgSet = new Set<string>();
@@ -824,6 +856,7 @@ router.post("/debug/relink-current-org", async (req, res) => {
   for (const row of legacyProjectOrgs) legacyOrgSet.add(row.organizationId);
   for (const row of legacyEntryOrgs) legacyOrgSet.add(row.organizationId);
   for (const row of legacyInvoiceOrgs) legacyOrgSet.add(row.organizationId);
+  for (const row of legacyProjectBillOrgs) legacyOrgSet.add(row.organizationId);
 
   if (legacyOrgSet.size === 0) {
     res.status(404).json({
@@ -854,11 +887,12 @@ router.post("/debug/relink-current-org", async (req, res) => {
   });
 
   const result = await prisma.$transaction(async (tx) => {
-    const [clientsMoved, projectsMoved, entriesMoved, invoicesMoved, documentsMoved] = await Promise.all([
+    const [clientsMoved, projectsMoved, entriesMoved, invoicesMoved, projectBillsMoved, documentsMoved] = await Promise.all([
       tx.timeflowClient.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
       tx.timeflowProject.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
       tx.timeflowTimeEntry.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
       tx.timeflowInvoice.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
+      tx.timeflowProjectBill.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
       tx.document.updateMany({
         where: {
           organizationId: sourceOrgId,
@@ -907,6 +941,7 @@ router.post("/debug/relink-current-org", async (req, res) => {
       projectsMoved: projectsMoved.count,
       timeEntriesMoved: entriesMoved.count,
       invoicesMoved: invoicesMoved.count,
+      projectBillsMoved: projectBillsMoved.count,
       documentsMoved: documentsMoved.count,
       settingsAction,
     };
@@ -1491,6 +1526,46 @@ router.delete("/clients/:id", requireTimeflowAuth, async (req, res) => {
   res.status(204).send();
 });
 
+router.patch("/clients/:id/archive", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowClient: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowClient.findFirst({ where: { id, organizationId, userId } });
+  if (!existing) {
+    res.status(404).json({ error: "Client not found" });
+    return;
+  }
+
+  const updated = await store.timeflowClient.update({ where: { id }, data: { isActive: false } });
+  res.json(updated);
+});
+
+router.patch("/clients/:id/restore", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowClient: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowClient.findFirst({ where: { id, organizationId, userId } });
+  if (!existing) {
+    res.status(404).json({ error: "Client not found" });
+    return;
+  }
+
+  const updated = await store.timeflowClient.update({ where: { id }, data: { isActive: true } });
+  res.json(updated);
+});
+
 // ─── Projects ─────────────────────────────────────────────────────────────────
 
 router.get("/projects", requireTimeflowAuth, async (req, res) => {
@@ -1606,6 +1681,46 @@ router.delete("/projects/:id", requireTimeflowAuth, async (req, res) => {
 
   await store.timeflowProject.update({ where: { id }, data: { isActive: false } });
   res.status(204).send();
+});
+
+router.patch("/projects/:id/archive", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowProject: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowProject.findFirst({ where: { id, organizationId, userId } });
+  if (!existing) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const updated = await store.timeflowProject.update({ where: { id }, data: { isActive: false } });
+  res.json(updated);
+});
+
+router.patch("/projects/:id/restore", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowProject: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowProject.findFirst({ where: { id, organizationId, userId } });
+  if (!existing) {
+    res.status(404).json({ error: "Project not found" });
+    return;
+  }
+
+  const updated = await store.timeflowProject.update({ where: { id }, data: { isActive: true } });
+  res.json(updated);
 });
 
 // ─── Time Entries ─────────────────────────────────────────────────────────────
@@ -1888,6 +2003,155 @@ router.delete("/invoices/:id", requireTimeflowAuth, async (req, res) => {
   }
 
   await store.timeflowInvoice.delete({ where: { id } });
+  res.status(204).send();
+});
+
+// ─── Project Bills ────────────────────────────────────────────────────────────
+
+router.get("/project-bills", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { clientId, projectId, status } = req.query;
+  const store = prisma as unknown as {
+    timeflowProjectBill: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+  };
+
+  const where: Record<string, unknown> = { organizationId, userId };
+  if (typeof clientId === "string") where.clientId = clientId;
+  if (typeof projectId === "string") where.projectId = projectId;
+  if (typeof status === "string") where.status = status;
+
+  const projectBills = await store.timeflowProjectBill.findMany({
+    where,
+    orderBy: [{ issueDate: "desc" }, { createdAt: "desc" }],
+  });
+
+  res.json(projectBills);
+});
+
+router.get("/project-bills/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowProjectBill: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  };
+
+  const projectBill = await store.timeflowProjectBill.findFirst({ where: { id, organizationId, userId } });
+  if (!projectBill) {
+    res.status(404).json({ error: "Project bill not found" });
+    return;
+  }
+
+  res.json(projectBill);
+});
+
+router.post("/project-bills", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    timeflowClient: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+    timeflowProject: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+    timeflowProjectBill: { create: (args: Record<string, unknown>) => Promise<Record<string, unknown>> };
+  };
+
+  if (typeof body.clientId !== "string") {
+    res.status(400).json({ error: "clientId is required" });
+    return;
+  }
+  if (typeof body.projectId !== "string") {
+    res.status(400).json({ error: "projectId is required" });
+    return;
+  }
+  if (typeof body.title !== "string" || !body.title.trim()) {
+    res.status(400).json({ error: "title is required" });
+    return;
+  }
+
+  const [client, project] = await Promise.all([
+    store.timeflowClient.findFirst({ where: { id: body.clientId, organizationId, userId } }),
+    store.timeflowProject.findFirst({ where: { id: body.projectId, organizationId, userId } }),
+  ]);
+  if (!client) {
+    res.status(400).json({ error: "Client not found" });
+    return;
+  }
+  if (!project) {
+    res.status(400).json({ error: "Project not found" });
+    return;
+  }
+
+  const projectBill = await store.timeflowProjectBill.create({
+    data: {
+      ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
+      organizationId,
+      userId,
+      clientId: body.clientId,
+      projectId: body.projectId,
+      title: body.title.trim(),
+      amount: typeof body.amount === "number" ? body.amount : 0,
+      issueDate: typeof body.issueDate === "string" ? body.issueDate : new Date().toISOString().split("T")[0],
+      dueDate: typeof body.dueDate === "string" ? body.dueDate : null,
+      notes: typeof body.notes === "string" ? body.notes : "",
+      status: typeof body.status === "string" ? body.status : "issued",
+      paidAt: body.status === "paid" ? new Date() : null,
+      voidedAt: body.status === "void" ? new Date() : null,
+    },
+  });
+
+  res.status(201).json(projectBill);
+});
+
+router.put("/project-bills/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    timeflowProjectBill: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowProjectBill.findFirst({ where: { id, organizationId, userId } });
+  if (!existing) {
+    res.status(404).json({ error: "Project bill not found" });
+    return;
+  }
+
+  const data: Record<string, unknown> = {};
+  if (typeof body.title === "string") data.title = body.title.trim();
+  if (typeof body.amount === "number") data.amount = body.amount;
+  if (typeof body.issueDate === "string") data.issueDate = body.issueDate;
+  if ("dueDate" in body) data.dueDate = typeof body.dueDate === "string" ? body.dueDate : null;
+  if ("notes" in body) data.notes = typeof body.notes === "string" ? body.notes : "";
+  if ("status" in body && typeof body.status === "string") {
+    data.status = body.status;
+    data.paidAt = body.status === "paid" ? new Date() : null;
+    data.voidedAt = body.status === "void" ? new Date() : null;
+  }
+  if ("paidAt" in body) data.paidAt = typeof body.paidAt === "string" ? new Date(body.paidAt) : null;
+  if ("voidedAt" in body) data.voidedAt = typeof body.voidedAt === "string" ? new Date(body.voidedAt) : null;
+
+  const updated = await store.timeflowProjectBill.update({ where: { id }, data });
+  res.json(updated);
+});
+
+router.delete("/project-bills/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowProjectBill: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      delete: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowProjectBill.findFirst({ where: { id, organizationId, userId } });
+  if (!existing) {
+    res.status(404).json({ error: "Project bill not found" });
+    return;
+  }
+
+  await store.timeflowProjectBill.delete({ where: { id } });
   res.status(204).send();
 });
 

@@ -363,6 +363,30 @@ model TimeflowInvoice {
   @@index([organizationId, userId, status])
 }
 
+model TimeflowProjectBill {
+  id             String   @id @default(cuid())
+  organizationId String
+  userId         String
+  projectId      String
+  clientId       String
+  title          String
+  amount         Float    @default(0)
+  issueDate      String
+  dueDate        String?
+  notes          String   @default("") @db.Text
+  status         String   @default("issued") // draft|issued|paid|void
+  paidAt         DateTime?
+  voidedAt       DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, projectId])
+  @@index([organizationId, userId, clientId])
+  @@index([organizationId, userId, status])
+  @@index([organizationId, userId, issueDate])
+}
+
 // ─── End Timeflow ──────────────────────────────────────────────────────────────
 
 // ─── Mission Hub ──────────────────────────────────────────────────────────────
