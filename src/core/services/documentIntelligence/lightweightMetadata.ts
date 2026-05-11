@@ -23,6 +23,7 @@
 // -----------------------------------------------------------------------------
 
 export const SYSTEM_DOCUMENT_TYPES = [
+  "employee_record",
   "business_card",
   "form",
   "invoice",
@@ -56,6 +57,7 @@ export const SYSTEM_DOCUMENT_TYPES = [
 export type SystemDocumentType = typeof SYSTEM_DOCUMENT_TYPES[number];
 
 export const DOCUMENT_TYPE_LABELS: Record<SystemDocumentType, string> = {
+  employee_record:         "Employee Record",
   business_card:           "Business Card",
   form:                    "Form / Application",
   invoice:                 "Invoice",

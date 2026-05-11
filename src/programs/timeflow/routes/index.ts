@@ -399,6 +399,91 @@ function getUser(req: Request): TimeflowTokenPayload {
   return (req as Request & { timeflowUser: TimeflowTokenPayload }).timeflowUser;
 }
 
+/**
+ * Resolve the effective Timeflow data owner for the current authenticated user.
+ *
+ * Why this exists:
+ * - Timeflow records are scoped by organizationId + userId.
+ * - Some tenants have legacy records under a prior userId after auth migrations.
+ * - If the current user has no owned records and there is exactly one distinct
+ *   owner with data in this org, use that owner id for data access.
+ *
+ * Safety:
+ * - Only falls back when current user has zero data records.
+ * - Only falls back when exactly one legacy owner is detected.
+ * - Does not use settings rows for ownership detection, since settings can be
+ *   auto-created and would mask legacy data.
+ */
+async function resolveEffectiveDataUserId(scope: { organizationId: string; userId: string }): Promise<string> {
+  const store = prisma as unknown as {
+    timeflowClient: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      findMany: (args: Record<string, unknown>) => Promise<Array<{ userId: string }>>;
+    };
+    timeflowProject: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      findMany: (args: Record<string, unknown>) => Promise<Array<{ userId: string }>>;
+    };
+    timeflowTimeEntry: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      findMany: (args: Record<string, unknown>) => Promise<Array<{ userId: string }>>;
+    };
+    timeflowInvoice: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      findMany: (args: Record<string, unknown>) => Promise<Array<{ userId: string }>>;
+    };
+  };
+
+  const [ownClient, ownProject, ownEntry, ownInvoice] = await Promise.all([
+    store.timeflowClient.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId, isActive: true }, select: { id: true } }),
+    store.timeflowProject.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId, isActive: true }, select: { id: true } }),
+    store.timeflowTimeEntry.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
+    store.timeflowInvoice.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
+  ]);
+
+  if (ownClient || ownProject || ownEntry || ownInvoice) {
+    return scope.userId;
+  }
+
+  const ownerIds = new Set<string>();
+  const addOwnerIds = (rows: Array<{ userId: string }>) => {
+    for (const row of rows) {
+      if (typeof row.userId === "string" && row.userId.trim()) {
+        ownerIds.add(row.userId);
+      }
+    }
+  };
+
+  const [clientOwners, projectOwners, entryOwners, invoiceOwners] = await Promise.all([
+    store.timeflowClient.findMany({ where: { organizationId: scope.organizationId, isActive: true }, select: { userId: true }, distinct: ["userId"] }),
+    store.timeflowProject.findMany({ where: { organizationId: scope.organizationId, isActive: true }, select: { userId: true }, distinct: ["userId"] }),
+    store.timeflowTimeEntry.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    store.timeflowInvoice.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
+  ]);
+
+  addOwnerIds(clientOwners);
+  addOwnerIds(projectOwners);
+  addOwnerIds(entryOwners);
+  addOwnerIds(invoiceOwners);
+
+  if (ownerIds.size !== 1) {
+    return scope.userId;
+  }
+
+  const [legacyOwnerId] = Array.from(ownerIds);
+  if (!legacyOwnerId || legacyOwnerId === scope.userId) {
+    return scope.userId;
+  }
+
+  logger.warn("[timeflow] using legacy data owner fallback", {
+    organizationId: scope.organizationId,
+    userId: scope.userId,
+    legacyOwnerId,
+  });
+
+  return legacyOwnerId;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -517,6 +602,21 @@ function toTimeflowDocumentRecord(doc: {
 
 // All routes below require a valid Timeflow JWT.
 router.use(requireTimeflowAuth);
+
+// Normalize data scope for migrated/legacy tenants before all Timeflow handlers.
+router.use(async (req, _res, next) => {
+  try {
+    const payload = getUser(req);
+    const effectiveUserId = await resolveEffectiveDataUserId({
+      organizationId: payload.organizationId,
+      userId: payload.userId,
+    });
+    payload.userId = effectiveUserId;
+    next();
+  } catch (error) {
+    next(error as Error);
+  }
+});
 
 // ─── Documents (centralized attachment metadata) ────────────────────────────
 

@@ -29,6 +29,7 @@ import {
   resolveStorageAdapter,
   StorageConfigError,
 } from "../../../core/storage/storageResolver.js";
+import { deriveEmployeeRecordIntake } from "../utils/employeeRecordIntake.js";
 
 const router = express.Router();
 
@@ -57,6 +58,44 @@ function parseNumber(value: unknown): number | undefined {
   if (value == null || value === "") return undefined;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function parseBoolean(value: unknown): boolean | undefined {
+  if (typeof value === "boolean") return value;
+  if (typeof value !== "string") return undefined;
+  const lowered = value.trim().toLowerCase();
+  if (lowered === "true" || lowered === "1" || lowered === "yes") return true;
+  if (lowered === "false" || lowered === "0" || lowered === "no") return false;
+  return undefined;
+}
+
+function parseSourceReferences(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item));
+  }
+  if (typeof value !== "string" || !value.trim()) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item));
+    }
+  } catch {
+    // no-op
+  }
+  return [];
+}
+
+function isEmployeeRecordAutoLabelRequest(body: Record<string, unknown>): boolean {
+  const documentType = typeof body.documentType === "string" ? body.documentType.trim().toLowerCase() : "";
+  const processingBehavior = typeof body.processingBehavior === "string"
+    ? body.processingBehavior.trim().toLowerCase()
+    : "";
+  const autoLabelFromFilename = parseBoolean(body.autoLabelFromFilename);
+
+  if (documentType !== "employee_record") return false;
+  if (autoLabelFromFilename === false) return false;
+  if (!processingBehavior || processingBehavior === "auto_label_filename_skip_full_parsing") return true;
+  return processingBehavior.includes("auto-label") || processingBehavior.includes("filename");
 }
 
 function parseRouteId(value: string | string[] | undefined): string | null {
@@ -1825,6 +1864,7 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
   const body = req.body as Record<string, unknown>;
   const user = getRequestUser(req);
   const tenantScope = getRequestTenantScope(req);
+  const isEmployeeAutoLabel = isEmployeeRecordAutoLabelRequest(body);
 
   let storage;
   try {
@@ -1881,15 +1921,119 @@ router.post("/documents/upload", requireAuth, requireRole("uploader"), upload.si
     },
   });
 
-  const created = await prisma.document.create({
-    data: {
-      ...payload,
-      ...getDocumentScope(tenantScope),
-      createdByUserId: user?.userId ?? null,
-      uploadedById: user?.userId ?? null,
-    } as never,
-  });
-  await enqueueProcessing(created.id, tenantScope);
+  const relativePath = typeof body.relativePath === "string"
+    ? body.relativePath
+    : typeof body.sourceReference === "string"
+      ? body.sourceReference
+      : undefined;
+
+  let createData: Record<string, unknown> = {
+    ...payload,
+    ...getDocumentScope(tenantScope),
+    createdByUserId: user?.userId ?? null,
+    uploadedById: user?.userId ?? null,
+  };
+
+  if (isEmployeeAutoLabel) {
+    const derived = deriveEmployeeRecordIntake({
+      originalFilename: req.file.originalname,
+      relativePath,
+    });
+
+    const explicitPersonName = typeof body.personName === "string" && body.personName.trim()
+      ? body.personName.trim()
+      : null;
+    const explicitYear = parseNumber(body.year);
+    const explicitDate = typeof body.date === "string" && body.date.trim() ? body.date.trim() : null;
+    const explicitNeedsReview = parseBoolean(body.needsReview);
+    const customTags = parseStringArray(body.tags);
+
+    const personName = explicitPersonName ?? derived.personName;
+    const year = explicitYear ?? derived.year ?? payload.year;
+    const date = explicitDate ?? derived.date;
+    const needsReview = explicitNeedsReview ?? (personName ? false : derived.needsReview);
+    const behavior = typeof body.processingBehavior === "string" && body.processingBehavior.trim()
+      ? body.processingBehavior.trim()
+      : "auto_label_filename_skip_full_parsing";
+
+    const tags = [...new Set([...customTags, ...derived.tags, ...(year ? [String(year)] : [])])];
+    const existingExtraction =
+      payload.extraction && typeof payload.extraction === "object"
+        ? (payload.extraction as Record<string, unknown>)
+        : {};
+
+    createData = {
+      ...createData,
+      year,
+      type: "employee_record",
+      documentType: "employee_record",
+      sourceReference: relativePath ?? payload.sourceReference,
+      processingStatus: "designated_complete",
+      ocrStatus: "not_needed",
+      status: "archived",
+      statusUpdatedAt: new Date(),
+      reviewRequired: needsReview,
+      needsReview,
+      tags,
+      metaPeople: personName ? [personName] : [],
+      documentDate: date,
+      classificationStatus: "user_designated",
+      classificationMatchedBy: "manual",
+      classificationConfidence: personName ? 1 : 0.2,
+      review: needsReview
+        ? {
+            required: true,
+            reason: ["Employee name could not be derived from filename/folder path"],
+            priority: "medium",
+          }
+        : { required: false },
+      extractedMetadata: {
+        employeeRecordIntake: {
+          intakeSource: typeof body.intakeSource === "string" ? body.intakeSource : "file_upload",
+          processingBehavior: behavior,
+          skipOcr: true,
+          skipClassification: true,
+          autoLabelFromFilename: true,
+          originalFilename: req.file.originalname,
+          relativePath: relativePath ?? null,
+          personName,
+          year,
+          date,
+          tags,
+          needsReview,
+        },
+      },
+      extraction: {
+        ...existingExtraction,
+        status: "complete",
+        method: "manual",
+        confidence: 1,
+        routeDecision: "manual_override",
+        processingBehavior: behavior,
+        skipOcr: true,
+        skipClassification: true,
+        autoLabelFromFilename: true,
+        preserveUserDesignatedMetadata: true,
+        userDesignatedMetadata: {
+          personName,
+          year,
+          date,
+          tags,
+        },
+      },
+      processingHistory: appendProcessingHistory(payload.processingHistory, {
+        timestamp: new Date().toISOString(),
+        action: "employee_record_auto_labeled",
+        status: "designated_complete",
+        details: "Employee record auto-labeled from filename/path and marked complete without full OCR/classification.",
+      }),
+    };
+  }
+
+  const created = await prisma.document.create({ data: createData as never });
+  if (!isEmployeeAutoLabel) {
+    await enqueueProcessing(created.id, tenantScope);
+  }
   logger.info("File uploaded", {
     docId: created.id,
     file: req.file.originalname,
@@ -1910,6 +2054,9 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
   }
 
   const intakeSource = typeof req.body.intakeSource === "string" ? req.body.intakeSource : "multi_upload";
+  const body = req.body as Record<string, unknown>;
+  const isEmployeeAutoLabel = isEmployeeRecordAutoLabelRequest(body);
+  const sourceReferences = parseSourceReferences(body.sourceReferences);
   const user = getRequestUser(req);
   const tenantScope = getRequestTenantScope(req);
 
@@ -1927,7 +2074,8 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
   const uploaderName = await resolveRequestUploaderName(user);
   const created = [];
 
-  for (const file of files) {
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
     const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const safe = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "_");
     const key = buildPartitionedKey({
@@ -1948,6 +2096,19 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
     const payload = createDocumentPayload({
       intakeSource,
       uploaderName,
+      title: typeof body.title === "string" ? body.title : undefined,
+      description: typeof body.description === "string" ? body.description : undefined,
+      author: typeof body.author === "string" ? body.author : undefined,
+      year: parseNumber(body.year),
+      month: parseNumber(body.month),
+      category: typeof body.category === "string" ? body.category : undefined,
+      type: typeof body.type === "string" ? body.type : undefined,
+      financialCategory: typeof body.financialCategory === "string" ? body.financialCategory : undefined,
+      financialDocumentType: typeof body.financialDocumentType === "string" ? body.financialDocumentType : undefined,
+      tags: parseStringArray(body.tags),
+      keywords: parseStringArray(body.keywords),
+      sourceReference: sourceReferences[index],
+      department: typeof body.department === "string" ? body.department : undefined,
       fileMeta: {
         originalFileName: file.originalname,
         mimeType: file.mimetype,
@@ -1957,15 +2118,112 @@ router.post("/documents/upload/batch", requireAuth, requireRole("uploader"), upl
       },
     });
 
-    const doc = await prisma.document.create({
-      data: {
-        ...payload,
-        ...getDocumentScope(tenantScope),
-        createdByUserId: user?.userId ?? null,
-        uploadedById: user?.userId ?? null,
-      } as never,
-    });
-    await enqueueProcessing(doc.id, tenantScope);
+    let createData: Record<string, unknown> = {
+      ...payload,
+      ...getDocumentScope(tenantScope),
+      createdByUserId: user?.userId ?? null,
+      uploadedById: user?.userId ?? null,
+    };
+
+    if (isEmployeeAutoLabel) {
+      const relativePath = sourceReferences[index] ?? null;
+      const derived = deriveEmployeeRecordIntake({
+        originalFilename: file.originalname,
+        relativePath,
+      });
+
+      const explicitPersonName = typeof body.personName === "string" && body.personName.trim()
+        ? body.personName.trim()
+        : null;
+      const explicitYear = parseNumber(body.year);
+      const explicitDate = typeof body.date === "string" && body.date.trim() ? body.date.trim() : null;
+      const explicitNeedsReview = parseBoolean(body.needsReview);
+      const customTags = parseStringArray(body.tags);
+      const personName = explicitPersonName ?? derived.personName;
+      const year = explicitYear ?? derived.year ?? payload.year;
+      const date = explicitDate ?? derived.date;
+      const needsReview = explicitNeedsReview ?? (personName ? false : derived.needsReview);
+      const behavior = typeof body.processingBehavior === "string" && body.processingBehavior.trim()
+        ? body.processingBehavior.trim()
+        : "auto_label_filename_skip_full_parsing";
+      const tags = [...new Set([...customTags, ...derived.tags, ...(year ? [String(year)] : [])])];
+      const existingExtraction =
+        payload.extraction && typeof payload.extraction === "object"
+          ? (payload.extraction as Record<string, unknown>)
+          : {};
+
+      createData = {
+        ...createData,
+        year,
+        type: "employee_record",
+        documentType: "employee_record",
+        sourceReference: relativePath ?? payload.sourceReference,
+        processingStatus: "designated_complete",
+        ocrStatus: "not_needed",
+        status: "archived",
+        statusUpdatedAt: new Date(),
+        reviewRequired: needsReview,
+        needsReview,
+        tags,
+        metaPeople: personName ? [personName] : [],
+        documentDate: date,
+        classificationStatus: "user_designated",
+        classificationMatchedBy: "manual",
+        classificationConfidence: personName ? 1 : 0.2,
+        review: needsReview
+          ? {
+              required: true,
+              reason: ["Employee name could not be derived from filename/folder path"],
+              priority: "medium",
+            }
+          : { required: false },
+        extractedMetadata: {
+          employeeRecordIntake: {
+            intakeSource,
+            processingBehavior: behavior,
+            skipOcr: true,
+            skipClassification: true,
+            autoLabelFromFilename: true,
+            originalFilename: file.originalname,
+            relativePath,
+            personName,
+            year,
+            date,
+            tags,
+            needsReview,
+          },
+        },
+        extraction: {
+          ...existingExtraction,
+          status: "complete",
+          method: "manual",
+          confidence: 1,
+          routeDecision: "manual_override",
+          processingBehavior: behavior,
+          skipOcr: true,
+          skipClassification: true,
+          autoLabelFromFilename: true,
+          preserveUserDesignatedMetadata: true,
+          userDesignatedMetadata: {
+            personName,
+            year,
+            date,
+            tags,
+          },
+        },
+        processingHistory: appendProcessingHistory(payload.processingHistory, {
+          timestamp: new Date().toISOString(),
+          action: "employee_record_auto_labeled",
+          status: "designated_complete",
+          details: "Employee record auto-labeled from filename/path and marked complete without full OCR/classification.",
+        }),
+      };
+    }
+
+    const doc = await prisma.document.create({ data: createData as never });
+    if (!isEmployeeAutoLabel) {
+      await enqueueProcessing(doc.id, tenantScope);
+    }
     logger.info("File uploaded (batch)", {
       docId: doc.id,
       file: file.originalname,

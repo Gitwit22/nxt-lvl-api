@@ -1527,8 +1527,32 @@ async function processSingleJob(): Promise<void> {
     ].map((value) => value.toLowerCase());
     const baseMergedTags = [...new Set([...existingTags, ...topicTags, ...taxSpecificTags, ...entityTags])].slice(0, 60);
 
+    const preserveUserDesignatedMetadata = existingExtractionMeta.preserveUserDesignatedMetadata === true;
+    const userDesignatedMetadata =
+      preserveUserDesignatedMetadata &&
+      existingExtractionMeta.userDesignatedMetadata &&
+      typeof existingExtractionMeta.userDesignatedMetadata === "object"
+        ? (existingExtractionMeta.userDesignatedMetadata as Record<string, unknown>)
+        : null;
+    const designatedPersonName =
+      userDesignatedMetadata && typeof userDesignatedMetadata.personName === "string" && userDesignatedMetadata.personName.trim().length > 0
+        ? userDesignatedMetadata.personName.trim()
+        : null;
+    const designatedYear =
+      userDesignatedMetadata && typeof userDesignatedMetadata.year === "number" && Number.isFinite(userDesignatedMetadata.year)
+        ? userDesignatedMetadata.year
+        : null;
+    const designatedDate =
+      userDesignatedMetadata && typeof userDesignatedMetadata.date === "string" && userDesignatedMetadata.date.trim().length > 0
+        ? userDesignatedMetadata.date.trim()
+        : null;
+    const designatedTags =
+      userDesignatedMetadata && Array.isArray(userDesignatedMetadata.tags)
+        ? userDesignatedMetadata.tags.map((tag) => String(tag)).filter(Boolean)
+        : [];
+
     const suggestedYear = autoLabels.timeLabel.approximateYear;
-    const finalYear = suggestedYear ?? job.document.year;
+    const finalYear = designatedYear ?? suggestedYear ?? job.document.year;
     const finalMonth = job.document.month;
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1736,7 +1760,11 @@ async function processSingleJob(): Promise<void> {
       referenceNumbers: lightMeta.referenceNumbers,
     });
 
-    const mergedTags = [...new Set([...baseMergedTags, ...enrichment.tags])].slice(0, 60);
+    const mergedTags = [...new Set([...baseMergedTags, ...enrichment.tags, ...designatedTags])].slice(0, 60);
+    const finalDocumentDate = designatedDate ?? stepOneMetadata.documentDate.exactDate ?? lightMeta.documentDate;
+    const finalMetaPeople = designatedPersonName
+      ? [designatedPersonName]
+      : stepOneMetadata.people.map((p) => p.name);
 
     // Determine whether this document needs review based on new classification
     const lightReviewRequired =
@@ -1944,8 +1972,8 @@ async function processSingleJob(): Promise<void> {
         }),
         // ── Lightweight metadata fields (search-first model) ─────────────
         sourceName: stepOneMetadata.organization.name ?? lightMeta.sourceName,
-        documentDate: stepOneMetadata.documentDate.exactDate ?? lightMeta.documentDate,
-        metaPeople: toPrismaJson(stepOneMetadata.people.map((p) => p.name)),
+        documentDate: finalDocumentDate,
+        metaPeople: toPrismaJson(finalMetaPeople),
         metaCompanies: toPrismaJson(lightMeta.companies),
         metaLocations: toPrismaJson(lightMeta.locations),
         metaReferenceNumbers: toPrismaJson(lightMeta.referenceNumbers),
