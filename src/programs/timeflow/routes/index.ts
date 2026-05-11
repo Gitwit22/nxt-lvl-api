@@ -435,8 +435,8 @@ async function resolveEffectiveDataUserId(scope: { organizationId: string; userI
   };
 
   const [ownClient, ownProject, ownEntry, ownInvoice] = await Promise.all([
-    store.timeflowClient.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId, isActive: true }, select: { id: true } }),
-    store.timeflowProject.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId, isActive: true }, select: { id: true } }),
+    store.timeflowClient.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
+    store.timeflowProject.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
     store.timeflowTimeEntry.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
     store.timeflowInvoice.findFirst({ where: { organizationId: scope.organizationId, userId: scope.userId }, select: { id: true } }),
   ]);
@@ -455,8 +455,8 @@ async function resolveEffectiveDataUserId(scope: { organizationId: string; userI
   };
 
   const [clientOwners, projectOwners, entryOwners, invoiceOwners] = await Promise.all([
-    store.timeflowClient.findMany({ where: { organizationId: scope.organizationId, isActive: true }, select: { userId: true }, distinct: ["userId"] }),
-    store.timeflowProject.findMany({ where: { organizationId: scope.organizationId, isActive: true }, select: { userId: true }, distinct: ["userId"] }),
+    store.timeflowClient.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    store.timeflowProject.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
     store.timeflowTimeEntry.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
     store.timeflowInvoice.findMany({ where: { organizationId: scope.organizationId }, select: { userId: true }, distinct: ["userId"] }),
   ]);
@@ -1094,7 +1094,7 @@ router.get("/clients", requireTimeflowAuth, async (req, res) => {
   };
 
   const clients = await store.timeflowClient.findMany({
-    where: { organizationId, userId, isActive: true },
+    where: { organizationId, userId },
     orderBy: { name: "asc" },
   });
   res.json(clients);
@@ -1188,7 +1188,7 @@ router.get("/projects", requireTimeflowAuth, async (req, res) => {
     timeflowProject: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
 
-  const where: Record<string, unknown> = { organizationId, userId, isActive: true };
+  const where: Record<string, unknown> = { organizationId, userId };
   if (typeof clientId === "string") where.clientId = clientId;
 
   const projects = await store.timeflowProject.findMany({
