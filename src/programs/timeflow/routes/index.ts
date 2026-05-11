@@ -399,6 +399,12 @@ function getUser(req: Request): TimeflowTokenPayload {
   return (req as Request & { timeflowUser: TimeflowTokenPayload }).timeflowUser;
 }
 
+function getScopeDebug(req: Request): { tokenUserId: string; effectiveUserId: string } | null {
+  const payload = (req as Request & { timeflowScopeDebug?: { tokenUserId: string; effectiveUserId: string } }).timeflowScopeDebug;
+  if (!payload) return null;
+  return payload;
+}
+
 /**
  * Resolve the effective Timeflow data owner for the current authenticated user.
  *
@@ -604,18 +610,92 @@ function toTimeflowDocumentRecord(doc: {
 router.use(requireTimeflowAuth);
 
 // Normalize data scope for migrated/legacy tenants before all Timeflow handlers.
-router.use(async (req, _res, next) => {
+router.use(async (req, res, next) => {
   try {
     const payload = getUser(req);
+    const tokenUserId = payload.userId;
     const effectiveUserId = await resolveEffectiveDataUserId({
       organizationId: payload.organizationId,
       userId: payload.userId,
     });
+
+    (req as Request & { timeflowScopeDebug?: { tokenUserId: string; effectiveUserId: string } }).timeflowScopeDebug = {
+      tokenUserId,
+      effectiveUserId,
+    };
+
+    res.setHeader("x-timeflow-org-id", payload.organizationId);
+    res.setHeader("x-timeflow-token-user-id", tokenUserId);
+    res.setHeader("x-timeflow-effective-user-id", effectiveUserId);
+
     payload.userId = effectiveUserId;
     next();
   } catch (error) {
     next(error as Error);
   }
+});
+
+// Debug endpoint for live tenant/user scope diagnostics.
+router.get("/debug/context", async (req, res) => {
+  const { organizationId, userId, email } = getUser(req);
+  const scopeDebug = getScopeDebug(req);
+  const tokenUserId = scopeDebug?.tokenUserId ?? userId;
+  const effectiveUserId = scopeDebug?.effectiveUserId ?? userId;
+
+  const [
+    tokenClientCount,
+    tokenProjectCount,
+    tokenEntryCount,
+    tokenInvoiceCount,
+    effectiveClientCount,
+    effectiveProjectCount,
+    effectiveEntryCount,
+    effectiveInvoiceCount,
+    orgClientOwners,
+    orgProjectOwners,
+    orgEntryOwners,
+    orgInvoiceOwners,
+  ] = await Promise.all([
+    prisma.timeflowClient.count({ where: { organizationId, userId: tokenUserId } }),
+    prisma.timeflowProject.count({ where: { organizationId, userId: tokenUserId } }),
+    prisma.timeflowTimeEntry.count({ where: { organizationId, userId: tokenUserId } }),
+    prisma.timeflowInvoice.count({ where: { organizationId, userId: tokenUserId } }),
+    prisma.timeflowClient.count({ where: { organizationId, userId: effectiveUserId } }),
+    prisma.timeflowProject.count({ where: { organizationId, userId: effectiveUserId } }),
+    prisma.timeflowTimeEntry.count({ where: { organizationId, userId: effectiveUserId } }),
+    prisma.timeflowInvoice.count({ where: { organizationId, userId: effectiveUserId } }),
+    prisma.timeflowClient.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    prisma.timeflowProject.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    prisma.timeflowTimeEntry.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    prisma.timeflowInvoice.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+  ]);
+
+  res.json({
+    email,
+    organizationId,
+    tokenUserId,
+    effectiveUserId,
+    counts: {
+      tokenUser: {
+        clients: tokenClientCount,
+        projects: tokenProjectCount,
+        timeEntries: tokenEntryCount,
+        invoices: tokenInvoiceCount,
+      },
+      effectiveUser: {
+        clients: effectiveClientCount,
+        projects: effectiveProjectCount,
+        timeEntries: effectiveEntryCount,
+        invoices: effectiveInvoiceCount,
+      },
+    },
+    ownersInOrganization: {
+      clients: orgClientOwners.map((row) => row.userId),
+      projects: orgProjectOwners.map((row) => row.userId),
+      timeEntries: orgEntryOwners.map((row) => row.userId),
+      invoices: orgInvoiceOwners.map((row) => row.userId),
+    },
+  });
 });
 
 // ─── Documents (centralized attachment metadata) ────────────────────────────
