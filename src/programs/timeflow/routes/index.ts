@@ -784,6 +784,152 @@ router.get("/debug/presence", async (req, res) => {
   });
 });
 
+// One-time recovery endpoint: move this user's Timeflow data from a legacy org
+// to the current token org when the current org has no Timeflow rows.
+router.post("/debug/relink-current-org", async (req, res) => {
+  const { organizationId: currentOrgId, userId, email } = getUser(req);
+
+  const [currentClients, currentProjects, currentEntries, currentInvoices] = await Promise.all([
+    prisma.timeflowClient.count({ where: { organizationId: currentOrgId, userId } }),
+    prisma.timeflowProject.count({ where: { organizationId: currentOrgId, userId } }),
+    prisma.timeflowTimeEntry.count({ where: { organizationId: currentOrgId, userId } }),
+    prisma.timeflowInvoice.count({ where: { organizationId: currentOrgId, userId } }),
+  ]);
+
+  const currentTotal = currentClients + currentProjects + currentEntries + currentInvoices;
+  if (currentTotal > 0) {
+    res.status(409).json({
+      error: "Current organization already has Timeflow rows for this user. Relink aborted.",
+      currentOrgId,
+      userId,
+      counts: {
+        clients: currentClients,
+        projects: currentProjects,
+        timeEntries: currentEntries,
+        invoices: currentInvoices,
+      },
+    });
+    return;
+  }
+
+  const [legacyClientOrgs, legacyProjectOrgs, legacyEntryOrgs, legacyInvoiceOrgs] = await Promise.all([
+    prisma.timeflowClient.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowProject.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowTimeEntry.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowInvoice.findMany({ where: { userId, organizationId: { not: currentOrgId } }, select: { organizationId: true }, distinct: ["organizationId"] }),
+  ]);
+
+  const legacyOrgSet = new Set<string>();
+  for (const row of legacyClientOrgs) legacyOrgSet.add(row.organizationId);
+  for (const row of legacyProjectOrgs) legacyOrgSet.add(row.organizationId);
+  for (const row of legacyEntryOrgs) legacyOrgSet.add(row.organizationId);
+  for (const row of legacyInvoiceOrgs) legacyOrgSet.add(row.organizationId);
+
+  if (legacyOrgSet.size === 0) {
+    res.status(404).json({
+      error: "No legacy Timeflow data found for this user outside the current organization.",
+      currentOrgId,
+      userId,
+    });
+    return;
+  }
+
+  if (legacyOrgSet.size > 1) {
+    res.status(409).json({
+      error: "Multiple legacy organizations found. Manual relink required.",
+      currentOrgId,
+      userId,
+      legacyOrgIds: Array.from(legacyOrgSet),
+    });
+    return;
+  }
+
+  const [sourceOrgId] = Array.from(legacyOrgSet);
+
+  const sourceSettings = await prisma.timeflowSettings.findUnique({
+    where: { organizationId_userId: { organizationId: sourceOrgId, userId } },
+  });
+  const targetSettings = await prisma.timeflowSettings.findUnique({
+    where: { organizationId_userId: { organizationId: currentOrgId, userId } },
+  });
+
+  const result = await prisma.$transaction(async (tx) => {
+    const [clientsMoved, projectsMoved, entriesMoved, invoicesMoved, documentsMoved] = await Promise.all([
+      tx.timeflowClient.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
+      tx.timeflowProject.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
+      tx.timeflowTimeEntry.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
+      tx.timeflowInvoice.updateMany({ where: { organizationId: sourceOrgId, userId }, data: { organizationId: currentOrgId } }),
+      tx.document.updateMany({
+        where: {
+          organizationId: sourceOrgId,
+          programDomain: TIMEFLOW_PROGRAM_DOMAIN,
+          intakeSource: "timeflow_attachment",
+          createdByUserId: userId,
+        },
+        data: { organizationId: currentOrgId },
+      }),
+    ]);
+
+    let settingsAction: "none" | "moved" | "merged" = "none";
+
+    if (sourceSettings && !targetSettings) {
+      await tx.timeflowSettings.update({
+        where: { organizationId_userId: { organizationId: sourceOrgId, userId } },
+        data: { organizationId: currentOrgId },
+      });
+      settingsAction = "moved";
+    } else if (sourceSettings && targetSettings) {
+      await tx.timeflowSettings.update({
+        where: { organizationId_userId: { organizationId: currentOrgId, userId } },
+        data: {
+          businessName: sourceSettings.businessName || targetSettings.businessName,
+          defaultClientId: sourceSettings.defaultClientId || targetSettings.defaultClientId,
+          invoiceFrequency: sourceSettings.invoiceFrequency || targetSettings.invoiceFrequency,
+          invoiceNotes: sourceSettings.invoiceNotes || targetSettings.invoiceNotes,
+          paymentInstructions: sourceSettings.paymentInstructions || targetSettings.paymentInstructions,
+          invoiceLogoDataUrl: sourceSettings.invoiceLogoDataUrl || targetSettings.invoiceLogoDataUrl,
+          invoiceBannerDataUrl: sourceSettings.invoiceBannerDataUrl || targetSettings.invoiceBannerDataUrl,
+          companyViewerAccess: sourceSettings.companyViewerAccess || targetSettings.companyViewerAccess,
+          emailTemplate: sourceSettings.emailTemplate || targetSettings.emailTemplate,
+          periodWeekStartsOn: sourceSettings.periodWeekStartsOn || targetSettings.periodWeekStartsOn,
+          periodTargetHours: sourceSettings.periodTargetHours || targetSettings.periodTargetHours,
+          periodTargetEarnings: sourceSettings.periodTargetEarnings || targetSettings.periodTargetEarnings,
+        },
+      });
+      await tx.timeflowSettings.delete({
+        where: { organizationId_userId: { organizationId: sourceOrgId, userId } },
+      });
+      settingsAction = "merged";
+    }
+
+    return {
+      clientsMoved: clientsMoved.count,
+      projectsMoved: projectsMoved.count,
+      timeEntriesMoved: entriesMoved.count,
+      invoicesMoved: invoicesMoved.count,
+      documentsMoved: documentsMoved.count,
+      settingsAction,
+    };
+  });
+
+  logger.warn("[timeflow] org relink executed", {
+    email,
+    userId,
+    sourceOrgId,
+    targetOrgId: currentOrgId,
+    ...result,
+  });
+
+  res.json({
+    ok: true,
+    email,
+    userId,
+    sourceOrgId,
+    targetOrgId: currentOrgId,
+    ...result,
+  });
+});
+
 // ─── Documents (centralized attachment metadata) ────────────────────────────
 
 router.get("/documents", async (req, res) => {
