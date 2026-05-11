@@ -698,6 +698,92 @@ router.get("/debug/context", async (req, res) => {
   });
 });
 
+// Deeper diagnostics to determine whether data exists in another org/user scope.
+router.get("/debug/presence", async (req, res) => {
+  const { organizationId, userId, email } = getUser(req);
+
+  const [
+    globalClientCount,
+    globalProjectCount,
+    globalEntryCount,
+    globalInvoiceCount,
+    orgClientCount,
+    orgProjectCount,
+    orgEntryCount,
+    orgInvoiceCount,
+    userClientOrgs,
+    userProjectOrgs,
+    userEntryOrgs,
+    userInvoiceOrgs,
+    orgClientOwners,
+    orgProjectOwners,
+    orgEntryOwners,
+    orgInvoiceOwners,
+  ] = await Promise.all([
+    prisma.timeflowClient.count(),
+    prisma.timeflowProject.count(),
+    prisma.timeflowTimeEntry.count(),
+    prisma.timeflowInvoice.count(),
+    prisma.timeflowClient.count({ where: { organizationId } }),
+    prisma.timeflowProject.count({ where: { organizationId } }),
+    prisma.timeflowTimeEntry.count({ where: { organizationId } }),
+    prisma.timeflowInvoice.count({ where: { organizationId } }),
+    prisma.timeflowClient.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowProject.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowTimeEntry.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowInvoice.findMany({ where: { userId }, select: { organizationId: true }, distinct: ["organizationId"] }),
+    prisma.timeflowClient.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    prisma.timeflowProject.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    prisma.timeflowTimeEntry.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+    prisma.timeflowInvoice.findMany({ where: { organizationId }, select: { userId: true }, distinct: ["userId"] }),
+  ]);
+
+  const userOrgSet = new Set<string>();
+  for (const row of userClientOrgs) userOrgSet.add(row.organizationId);
+  for (const row of userProjectOrgs) userOrgSet.add(row.organizationId);
+  for (const row of userEntryOrgs) userOrgSet.add(row.organizationId);
+  for (const row of userInvoiceOrgs) userOrgSet.add(row.organizationId);
+
+  const userOrgIds = Array.from(userOrgSet);
+
+  const userOrgBreakdown = await Promise.all(
+    userOrgIds.map(async (orgId) => {
+      const [clients, projects, timeEntries, invoices] = await Promise.all([
+        prisma.timeflowClient.count({ where: { organizationId: orgId, userId } }),
+        prisma.timeflowProject.count({ where: { organizationId: orgId, userId } }),
+        prisma.timeflowTimeEntry.count({ where: { organizationId: orgId, userId } }),
+        prisma.timeflowInvoice.count({ where: { organizationId: orgId, userId } }),
+      ]);
+      return { organizationId: orgId, clients, projects, timeEntries, invoices };
+    }),
+  );
+
+  res.json({
+    email,
+    organizationId,
+    userId,
+    globalTotals: {
+      clients: globalClientCount,
+      projects: globalProjectCount,
+      timeEntries: globalEntryCount,
+      invoices: globalInvoiceCount,
+    },
+    currentOrgTotals: {
+      clients: orgClientCount,
+      projects: orgProjectCount,
+      timeEntries: orgEntryCount,
+      invoices: orgInvoiceCount,
+    },
+    userOrgBreakdown,
+    ownersInCurrentOrg: {
+      clients: orgClientOwners.map((row) => row.userId),
+      projects: orgProjectOwners.map((row) => row.userId),
+      timeEntries: orgEntryOwners.map((row) => row.userId),
+      invoices: orgInvoiceOwners.map((row) => row.userId),
+    },
+  });
+});
+
 // ─── Documents (centralized attachment metadata) ────────────────────────────
 
 router.get("/documents", async (req, res) => {
