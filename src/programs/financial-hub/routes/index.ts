@@ -43,6 +43,7 @@ const FINANCE_HUB_DOCUMENT_MIME_TYPES = new Set([
   "text/csv",
   "image/png",
   "image/jpeg",
+  "image/webp",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   "application/msword",
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -57,6 +58,7 @@ const FINANCE_HUB_ALLOWED_EXTENSIONS = new Set([
   ".png",
   ".jpg",
   ".jpeg",
+  ".webp",
   ".docx",
   ".doc",
   ".xlsx",
@@ -65,6 +67,13 @@ const FINANCE_HUB_ALLOWED_EXTENSIONS = new Set([
   ".ppt",
 ]);
 const FINANCE_HUB_SIGNED_URL_TTL_SECONDS = 15 * 60;
+const RECEIPT_ANALYZE_MIME_TYPES = new Set([
+  "application/pdf",
+  "image/jpeg",
+  "image/png",
+  "image/webp",
+]);
+const RECEIPT_ANALYZE_ALLOWED_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png", ".webp"]);
 
 const financeHubUpload = multer({
   storage: multer.memoryStorage(),
@@ -152,6 +161,83 @@ function sanitizeFilename(originalName: string): string {
     .replace(/^_+|_+$/g, "")
     .slice(0, 180);
   return cleaned || "document";
+}
+
+function clampConfidence(value: number): number {
+  if (!Number.isFinite(value)) return 0;
+  if (value < 0) return 0;
+  if (value > 1) return 1;
+  return Number(value.toFixed(2));
+}
+
+function inferCategoryFromName(filename: string): string | null {
+  const lower = filename.toLowerCase();
+  if (/(office|depot|staples|suppl)/.test(lower)) return "Office Supplies";
+  if (/(uber|lyft|airline|delta|flight|hotel|travel)/.test(lower)) return "Travel";
+  if (/(meal|restaurant|cafe|coffee)/.test(lower)) return "Meals";
+  if (/(fuel|gas|shell|exxon)/.test(lower)) return "Transportation";
+  if (/(utility|electric|water|internet)/.test(lower)) return "Utilities";
+  return null;
+}
+
+function inferMerchantFromName(filename: string): string | null {
+  const base = filename
+    .replace(/\.[a-z0-9]+$/i, "")
+    .replace(/^transaction_receipt-\d+-/i, "")
+    .replace(/[_-]+/g, " ")
+    .trim();
+  if (!base) return null;
+  const cleaned = base.replace(/\b(receipt|invoice|photo|scan|img)\b/gi, "").trim();
+  if (!cleaned) return null;
+  return cleaned
+    .split(/\s+/)
+    .slice(0, 4)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function inferReceiptExtraction(fileName: string, transactionType: string | null) {
+  const lower = fileName.toLowerCase();
+  const amountMatch = lower.match(/(?:total|amt|amount|\$)\s*([0-9]+(?:\.[0-9]{1,2})?)/i)
+    || lower.match(/\$([0-9]+(?:\.[0-9]{1,2})?)/);
+  const dateMatch = lower.match(/(20\d{2})[-_](\d{2})[-_](\d{2})/);
+  const cardMatch = lower.match(/(?:visa|mastercard|amex|discover)[^\d]*(\d{4})/i);
+  const taxMatch = lower.match(/(?:tax|vat)\s*([0-9]+(?:\.[0-9]{1,2})?)/i);
+
+  const merchant = inferMerchantFromName(fileName);
+  const category = inferCategoryFromName(fileName)
+    || (transactionType?.toLowerCase() === "income" ? "Income" : null);
+
+  const extracted: Record<string, unknown> = {};
+  if (merchant) {
+    extracted.merchantName = { value: merchant, confidence: clampConfidence(0.68) };
+  }
+  if (amountMatch) {
+    extracted.amount = { value: Number(amountMatch[1]), confidence: clampConfidence(0.81) };
+  }
+  if (dateMatch) {
+    extracted.transactionDate = {
+      value: `${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`,
+      confidence: clampConfidence(0.78),
+    };
+  }
+  if (taxMatch) {
+    extracted.taxAmount = { value: Number(taxMatch[1]), confidence: clampConfidence(0.62) };
+  }
+  if (cardMatch) {
+    extracted.paymentMethod = {
+      value: `Card ending ${cardMatch[1]}`,
+      confidence: clampConfidence(0.61),
+    };
+  }
+  if (category) {
+    extracted.suggestedCategory = {
+      value: category,
+      confidence: clampConfidence(0.66),
+    };
+  }
+
+  return extracted;
 }
 
 function mapFinanceHubDocument(record: Record<string, unknown>) {
@@ -646,6 +732,57 @@ router.post("/documents/upload", requireFinancialHubAuth, financeHubUpload.singl
     const message = error instanceof Error ? error.message : "Failed to upload document";
     res.status(500).json({ error: message });
   }
+});
+
+router.post("/finance/receipts/analyze", requireFinancialHubAuth, financeHubUpload.single("file"), async (req, res) => {
+  const user = getFinancialHubUser(req);
+  const file = req.file;
+  if (!file) {
+    res.status(400).json({ error: "A file is required" });
+    return;
+  }
+
+  const body = (req.body as Record<string, unknown> | undefined) || {};
+  const requestedOrganizationId = normalizeString(body.organizationId);
+  const transactionType = optionalString(body.transactionType);
+  const organizationId = user.organizationId || DEFAULT_ORGANIZATION_ID;
+
+  if (requestedOrganizationId && requestedOrganizationId !== organizationId) {
+    res.status(403).json({ error: "Organization scope mismatch" });
+    return;
+  }
+
+  if (!RECEIPT_ANALYZE_MIME_TYPES.has(file.mimetype)) {
+    res.status(415).json({ error: `Unsupported receipt MIME type '${file.mimetype}'` });
+    return;
+  }
+
+  if (file.size > FINANCE_HUB_DOCUMENT_MAX_UPLOAD_BYTES) {
+    res.status(413).json({
+      error: `File is larger than the configured ${FINANCE_HUB_DOCUMENT_MAX_UPLOAD_MB}MB limit`,
+    });
+    return;
+  }
+
+  const safeFilename = sanitizeFilename(file.originalname || "receipt");
+  const ext = path.extname(safeFilename).toLowerCase();
+  if (!ext || !RECEIPT_ANALYZE_ALLOWED_EXTENSIONS.has(ext)) {
+    res.status(415).json({ error: `Unsupported file extension '${ext || "(none)"}'` });
+    return;
+  }
+
+  const extracted = inferReceiptExtraction(safeFilename, transactionType);
+  const hasExtraction = Object.keys(extracted).length > 0;
+  const warnings = hasExtraction
+    ? []
+    : ["We could not confidently extract receipt details from this file."];
+
+  res.json({
+    success: true,
+    extracted,
+    warnings,
+    rawTextPreview: `Filename hint: ${safeFilename.slice(0, 120)}`,
+  });
 });
 
 router.get("/documents", requireFinancialHubAuth, async (req, res) => {
