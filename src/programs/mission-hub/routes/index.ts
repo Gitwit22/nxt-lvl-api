@@ -2393,6 +2393,429 @@ router.post("/timesheet-submissions/:id/reopen", requireMissionHubAuth, async (r
   await handleSubmissionAction(req, res, "reopened");
 });
 
+// ─── Contacts ────────────────────────────────────────────────────────────────
+
+type SqlStore = {
+  $executeRawUnsafe: (query: string, ...params: unknown[]) => Promise<number>;
+  $queryRawUnsafe: <T = Record<string, unknown>>(query: string, ...params: unknown[]) => Promise<T[]>;
+};
+
+let contactsTablesReadyPromise: Promise<void> | null = null;
+
+async function ensureContactsTables(store: SqlStore): Promise<void> {
+  if (!contactsTablesReadyPromise) {
+    contactsTablesReadyPromise = (async () => {
+      await store.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "MissionHubContact" (
+          "id" TEXT NOT NULL,
+          "organizationId" TEXT NOT NULL,
+          "userId" TEXT NOT NULL,
+          "firstName" TEXT NOT NULL DEFAULT '',
+          "lastName" TEXT NOT NULL DEFAULT '',
+          "fullName" TEXT NOT NULL DEFAULT '',
+          "email" TEXT,
+          "phone" TEXT,
+          "organization" TEXT,
+          "title" TEXT,
+          "address" TEXT,
+          "city" TEXT,
+          "state" TEXT,
+          "zip" TEXT,
+          "type" TEXT,
+          "tags" JSONB NOT NULL DEFAULT '[]',
+          "source" TEXT,
+          "notes" TEXT,
+          "linkedEntities" JSONB NOT NULL DEFAULT '[]',
+          "archivedAt" TIMESTAMP(3),
+          "isActive" BOOLEAN NOT NULL DEFAULT true,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "MissionHubContact_pkey" PRIMARY KEY ("id")
+        );
+      `);
+
+      await store.$executeRawUnsafe(`
+        CREATE INDEX IF NOT EXISTS "MissionHubContact_orgUser_idx"
+        ON "MissionHubContact" ("organizationId", "userId", "isActive");
+      `);
+
+      await store.$executeRawUnsafe(`
+        CREATE INDEX IF NOT EXISTS "MissionHubContact_orgUser_email_idx"
+        ON "MissionHubContact" ("organizationId", "userId", "email");
+      `);
+
+      await store.$executeRawUnsafe(`
+        CREATE TABLE IF NOT EXISTS "MissionHubContactList" (
+          "id" TEXT NOT NULL,
+          "organizationId" TEXT NOT NULL,
+          "userId" TEXT NOT NULL,
+          "name" TEXT NOT NULL,
+          "description" TEXT,
+          "type" TEXT,
+          "contactIds" JSONB NOT NULL DEFAULT '[]',
+          "tags" JSONB NOT NULL DEFAULT '[]',
+          "archivedAt" TIMESTAMP(3),
+          "isActive" BOOLEAN NOT NULL DEFAULT true,
+          "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          CONSTRAINT "MissionHubContactList_pkey" PRIMARY KEY ("id")
+        );
+      `);
+
+      await store.$executeRawUnsafe(`
+        CREATE INDEX IF NOT EXISTS "MissionHubContactList_orgUser_idx"
+        ON "MissionHubContactList" ("organizationId", "userId", "isActive");
+      `);
+    })();
+  }
+
+  await contactsTablesReadyPromise;
+}
+
+function normalizeContactText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function normalizeContactTags(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((tag) => (typeof tag === "string" ? tag.trim() : ""))
+    .filter(Boolean);
+}
+
+router.get("/contacts", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const includeArchived = String(req.query.includeArchived || "false").toLowerCase() === "true";
+  const store = prisma as unknown as SqlStore;
+  await ensureContactsTables(store);
+
+  const whereArchived = includeArchived ? "" : `AND "archivedAt" IS NULL`;
+  const rows = await store.$queryRawUnsafe(
+    `
+      SELECT *
+      FROM "MissionHubContact"
+      WHERE "organizationId" = $1
+        AND "userId" = $2
+        AND "isActive" = true
+        ${whereArchived}
+      ORDER BY "createdAt" DESC
+    `,
+    organizationId,
+    userId,
+  );
+
+  res.json(rows);
+});
+
+router.post("/contacts", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as SqlStore;
+  await ensureContactsTables(store);
+
+  const firstName = normalizeContactText(body.firstName) || "";
+  const lastName = normalizeContactText(body.lastName) || "";
+  const incomingFullName = normalizeContactText(body.fullName) || "";
+  const fullName = incomingFullName || [firstName, lastName].filter(Boolean).join(" ").trim();
+  const email = normalizeContactText(body.email)?.toLowerCase() || null;
+  const phone = normalizeContactText(body.phone);
+  const organization = normalizeContactText(body.organization);
+
+  if (!fullName && !email && !phone && !organization) {
+    res.status(400).json({ error: "At least one of name, email, phone, or organization is required" });
+    return;
+  }
+
+  const id = crypto.randomUUID();
+  const tags = normalizeContactTags(body.tags);
+  const linkedEntities = Array.isArray(body.linkedEntities) ? body.linkedEntities : [];
+
+  const createdRows = await store.$queryRawUnsafe(
+    `
+      INSERT INTO "MissionHubContact" (
+        "id", "organizationId", "userId", "firstName", "lastName", "fullName", "email", "phone", "organization",
+        "title", "address", "city", "state", "zip", "type", "tags", "source", "notes", "linkedEntities", "archivedAt", "updatedAt"
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10, $11, $12, $13, $14, $15, $16::jsonb, $17, $18, $19::jsonb, $20::timestamp, NOW()
+      )
+      RETURNING *
+    `,
+    id,
+    organizationId,
+    userId,
+    firstName,
+    lastName,
+    fullName,
+    email,
+    phone,
+    organization,
+    normalizeContactText(body.title),
+    normalizeContactText(body.address),
+    normalizeContactText(body.city),
+    normalizeContactText(body.state),
+    normalizeContactText(body.zip),
+    normalizeContactText(body.type),
+    JSON.stringify(tags),
+    normalizeContactText(body.source),
+    normalizeContactText(body.notes),
+    JSON.stringify(linkedEntities),
+    body.archivedAt ? String(body.archivedAt) : null,
+  );
+
+  res.status(201).json(createdRows[0] || null);
+});
+
+router.put("/contacts/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as SqlStore;
+  await ensureContactsTables(store);
+
+  const existingRows = await store.$queryRawUnsafe(
+    `
+      SELECT *
+      FROM "MissionHubContact"
+      WHERE "id" = $1 AND "organizationId" = $2 AND "userId" = $3 AND "isActive" = true
+      LIMIT 1
+    `,
+    req.params.id,
+    organizationId,
+    userId,
+  );
+
+  if (!existingRows[0]) {
+    res.status(404).json({ error: "Contact not found" });
+    return;
+  }
+
+  const existing = existingRows[0] as Record<string, unknown>;
+  const firstName = "firstName" in body ? (normalizeContactText(body.firstName) || "") : String(existing.firstName || "");
+  const lastName = "lastName" in body ? (normalizeContactText(body.lastName) || "") : String(existing.lastName || "");
+  const nextFullNameRaw = "fullName" in body ? normalizeContactText(body.fullName) : normalizeContactText(existing.fullName);
+  const fullName = nextFullNameRaw || [firstName, lastName].filter(Boolean).join(" ").trim();
+
+  const updatedRows = await store.$queryRawUnsafe(
+    `
+      UPDATE "MissionHubContact"
+      SET
+        "firstName" = $4,
+        "lastName" = $5,
+        "fullName" = $6,
+        "email" = $7,
+        "phone" = $8,
+        "organization" = $9,
+        "title" = $10,
+        "address" = $11,
+        "city" = $12,
+        "state" = $13,
+        "zip" = $14,
+        "type" = $15,
+        "tags" = $16::jsonb,
+        "source" = $17,
+        "notes" = $18,
+        "linkedEntities" = $19::jsonb,
+        "archivedAt" = $20::timestamp,
+        "updatedAt" = NOW()
+      WHERE "id" = $1 AND "organizationId" = $2 AND "userId" = $3
+      RETURNING *
+    `,
+    req.params.id,
+    organizationId,
+    userId,
+    firstName,
+    lastName,
+    fullName,
+    ("email" in body ? normalizeContactText(body.email) : normalizeContactText(existing.email))?.toLowerCase() || null,
+    "phone" in body ? normalizeContactText(body.phone) : normalizeContactText(existing.phone),
+    "organization" in body ? normalizeContactText(body.organization) : normalizeContactText(existing.organization),
+    "title" in body ? normalizeContactText(body.title) : normalizeContactText(existing.title),
+    "address" in body ? normalizeContactText(body.address) : normalizeContactText(existing.address),
+    "city" in body ? normalizeContactText(body.city) : normalizeContactText(existing.city),
+    "state" in body ? normalizeContactText(body.state) : normalizeContactText(existing.state),
+    "zip" in body ? normalizeContactText(body.zip) : normalizeContactText(existing.zip),
+    "type" in body ? normalizeContactText(body.type) : normalizeContactText(existing.type),
+    JSON.stringify("tags" in body ? normalizeContactTags(body.tags) : (Array.isArray(existing.tags) ? existing.tags : [])),
+    "source" in body ? normalizeContactText(body.source) : normalizeContactText(existing.source),
+    "notes" in body ? normalizeContactText(body.notes) : normalizeContactText(existing.notes),
+    JSON.stringify("linkedEntities" in body && Array.isArray(body.linkedEntities) ? body.linkedEntities : (Array.isArray(existing.linkedEntities) ? existing.linkedEntities : [])),
+    "archivedAt" in body ? (body.archivedAt ? String(body.archivedAt) : null) : (existing.archivedAt ? String(existing.archivedAt) : null),
+  );
+
+  res.json(updatedRows[0] || null);
+});
+
+router.delete("/contacts/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const store = prisma as unknown as SqlStore;
+  await ensureContactsTables(store);
+
+  await store.$executeRawUnsafe(
+    `
+      UPDATE "MissionHubContact"
+      SET "isActive" = false, "archivedAt" = COALESCE("archivedAt", NOW()), "updatedAt" = NOW()
+      WHERE "id" = $1 AND "organizationId" = $2 AND "userId" = $3
+    `,
+    req.params.id,
+    organizationId,
+    userId,
+  );
+
+  await store.$executeRawUnsafe(
+    `
+      UPDATE "MissionHubContactList"
+      SET "contactIds" = (
+        SELECT COALESCE(jsonb_agg(item), '[]'::jsonb)
+        FROM jsonb_array_elements_text("contactIds") AS item
+        WHERE item <> $1
+      ),
+      "updatedAt" = NOW()
+      WHERE "organizationId" = $2 AND "userId" = $3 AND "isActive" = true
+    `,
+    req.params.id,
+    organizationId,
+    userId,
+  );
+
+  res.status(204).send();
+});
+
+router.get("/contact-lists", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const includeArchived = String(req.query.includeArchived || "false").toLowerCase() === "true";
+  const store = prisma as unknown as SqlStore;
+  await ensureContactsTables(store);
+
+  const whereArchived = includeArchived ? "" : `AND "archivedAt" IS NULL`;
+  const rows = await store.$queryRawUnsafe(
+    `
+      SELECT *
+      FROM "MissionHubContactList"
+      WHERE "organizationId" = $1
+        AND "userId" = $2
+        AND "isActive" = true
+        ${whereArchived}
+      ORDER BY "createdAt" DESC
+    `,
+    organizationId,
+    userId,
+  );
+
+  res.json(rows);
+});
+
+router.post("/contact-lists", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as SqlStore;
+  await ensureContactsTables(store);
+
+  const name = normalizeContactText(body.name);
+  if (!name) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+
+  const id = crypto.randomUUID();
+  const contactIds = normalizeContactTags(body.contactIds);
+  const tags = normalizeContactTags(body.tags);
+
+  const createdRows = await store.$queryRawUnsafe(
+    `
+      INSERT INTO "MissionHubContactList" (
+        "id", "organizationId", "userId", "name", "description", "type", "contactIds", "tags", "archivedAt", "updatedAt"
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::jsonb, $9::timestamp, NOW())
+      RETURNING *
+    `,
+    id,
+    organizationId,
+    userId,
+    name,
+    normalizeContactText(body.description),
+    normalizeContactText(body.type),
+    JSON.stringify(contactIds),
+    JSON.stringify(tags),
+    body.archivedAt ? String(body.archivedAt) : null,
+  );
+
+  res.status(201).json(createdRows[0] || null);
+});
+
+router.put("/contact-lists/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as SqlStore;
+  await ensureContactsTables(store);
+
+  const existingRows = await store.$queryRawUnsafe(
+    `
+      SELECT *
+      FROM "MissionHubContactList"
+      WHERE "id" = $1 AND "organizationId" = $2 AND "userId" = $3 AND "isActive" = true
+      LIMIT 1
+    `,
+    req.params.id,
+    organizationId,
+    userId,
+  );
+
+  if (!existingRows[0]) {
+    res.status(404).json({ error: "Contact list not found" });
+    return;
+  }
+
+  const existing = existingRows[0] as Record<string, unknown>;
+  const updatedRows = await store.$queryRawUnsafe(
+    `
+      UPDATE "MissionHubContactList"
+      SET
+        "name" = $4,
+        "description" = $5,
+        "type" = $6,
+        "contactIds" = $7::jsonb,
+        "tags" = $8::jsonb,
+        "archivedAt" = $9::timestamp,
+        "updatedAt" = NOW()
+      WHERE "id" = $1 AND "organizationId" = $2 AND "userId" = $3
+      RETURNING *
+    `,
+    req.params.id,
+    organizationId,
+    userId,
+    normalizeContactText(body.name) || String(existing.name || ""),
+    "description" in body ? normalizeContactText(body.description) : normalizeContactText(existing.description),
+    "type" in body ? normalizeContactText(body.type) : normalizeContactText(existing.type),
+    JSON.stringify("contactIds" in body ? normalizeContactTags(body.contactIds) : (Array.isArray(existing.contactIds) ? existing.contactIds : [])),
+    JSON.stringify("tags" in body ? normalizeContactTags(body.tags) : (Array.isArray(existing.tags) ? existing.tags : [])),
+    "archivedAt" in body ? (body.archivedAt ? String(body.archivedAt) : null) : (existing.archivedAt ? String(existing.archivedAt) : null),
+  );
+
+  res.json(updatedRows[0] || null);
+});
+
+router.delete("/contact-lists/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const store = prisma as unknown as SqlStore;
+  await ensureContactsTables(store);
+
+  await store.$executeRawUnsafe(
+    `
+      UPDATE "MissionHubContactList"
+      SET "isActive" = false, "archivedAt" = COALESCE("archivedAt", NOW()), "updatedAt" = NOW()
+      WHERE "id" = $1 AND "organizationId" = $2 AND "userId" = $3
+    `,
+    req.params.id,
+    organizationId,
+    userId,
+  );
+
+  res.status(204).send();
+});
+
 // ─── Calendar Entries ─────────────────────────────────────────────────────────
 
 router.get("/calendar", requireMissionHubAuth, async (req, res) => {
