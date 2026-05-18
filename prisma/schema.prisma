@@ -931,6 +931,26 @@ model MissionHubScheduledReport {
   @@index([nextRunAt])
 }
 
+model MissionHubAuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorUserId    String
+  actorRole      String   @default("")
+  action         String
+  resourceType   String   @default("")
+  resourceId     String?
+  oldValue       Json?
+  newValue       Json?
+  ipAddress      String?
+  userAgent      String?
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action])
+  @@index([organizationId, resourceType, resourceId])
+}
+
 // ─── End Mission Hub ──────────────────────────────────────────────────────────
 
 // ─── Financial Hub ───────────────────────────────────────────────────────────
@@ -1009,12 +1029,15 @@ model FinanceHubDocument {
   programDomain    String   @default("financial-hub")
   folder           String   @default("general")
   originalFilename String
+  documentType     String   @default("")
   safeFilename     String
   mimeType         String
   fileSize         Int
   r2Key            String   @unique
   storageProvider  String   @default("r2")
   uploadedByUserId String?
+  sensitivityLevel String   @default("confidential")
+  retentionCategory String   @default("")
   status           String   @default("uploaded")
   deletedAt        DateTime?
   deletedByUserId  String?

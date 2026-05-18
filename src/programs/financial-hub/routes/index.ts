@@ -14,6 +14,7 @@ import {
 } from "../../../core/config/env.js";
 import { hashPassword, signToken } from "../../../core/auth/auth.service.js";
 import { resolveStorageAdapter } from "../../../core/storage/storageResolver.js";
+import { logger } from "../../../logger.js";
 
 const router = express.Router();
 
@@ -67,6 +68,7 @@ const FINANCE_HUB_ALLOWED_EXTENSIONS = new Set([
   ".ppt",
 ]);
 const FINANCE_HUB_SIGNED_URL_TTL_SECONDS = 15 * 60;
+const FINANCE_HUB_RESTRICTED_SIGNED_URL_TTL_SECONDS = 5 * 60;
 const RECEIPT_ANALYZE_MIME_TYPES = new Set([
   "application/pdf",
   "image/jpeg",
@@ -74,6 +76,16 @@ const RECEIPT_ANALYZE_MIME_TYPES = new Set([
   "image/webp",
 ]);
 const RECEIPT_ANALYZE_ALLOWED_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png", ".webp"]);
+const DATA_CLASSIFICATIONS = new Set(["public", "internal", "confidential", "restricted"]);
+
+type DataClassification = "public" | "internal" | "confidential" | "restricted";
+type FinanceHubNormalizedRole =
+  | "owner_admin"
+  | "finance_manager"
+  | "bookkeeper_data_entry"
+  | "reviewer_auditor"
+  | "staff_uploader"
+  | "external_accountant";
 
 const financeHubUpload = multer({
   storage: multer.memoryStorage(),
@@ -95,6 +107,7 @@ type FinancialHubTokenPayload = {
   email: string;
   role: string;
   platformRole?: string;
+  mfaVerified?: boolean;
   organizationId: string;
   programDomain: string;
 };
@@ -150,6 +163,203 @@ function parseFinanceFolder(value: unknown, options?: { defaultToGeneral?: boole
     return raw;
   }
   return null;
+}
+
+function normalizeClassification(value: unknown, defaultValue: DataClassification): DataClassification {
+  const normalized = normalizeString(value).toLowerCase();
+  if (DATA_CLASSIFICATIONS.has(normalized)) {
+    return normalized as DataClassification;
+  }
+  return defaultValue;
+}
+
+function parseClassificationFromR2Key(r2Key: unknown): DataClassification {
+  if (typeof r2Key !== "string") return "confidential";
+  const parts = r2Key.split("/").filter(Boolean);
+  const maybeClassification = parts[3]?.toLowerCase();
+  if (maybeClassification && DATA_CLASSIFICATIONS.has(maybeClassification)) {
+    return maybeClassification as DataClassification;
+  }
+  return "confidential";
+}
+
+function normalizeFinanceHubRole(rawRole: string): FinanceHubNormalizedRole {
+  const normalized = rawRole.trim().toLowerCase();
+
+  if (["admin", "owner", "finance admin", "owner/admin"].includes(normalized)) {
+    return "owner_admin";
+  }
+  if (["finance manager", "finance coordinator"].includes(normalized)) {
+    return "finance_manager";
+  }
+  if (["bookkeeper", "data entry", "bookkeeper/data entry"].includes(normalized)) {
+    return "bookkeeper_data_entry";
+  }
+  if (["external accountant"].includes(normalized)) {
+    return "external_accountant";
+  }
+  if (["staff", "staff/uploader", "uploader"].includes(normalized)) {
+    return "staff_uploader";
+  }
+  if (
+    ["reviewer", "auditor", "reviewer/auditor", "executive reviewer", "cpa reviewer", "read only leadership"].includes(normalized)
+  ) {
+    return "reviewer_auditor";
+  }
+
+  return "staff_uploader";
+}
+
+function roleCanAccessRestricted(role: FinanceHubNormalizedRole): boolean {
+  return ["owner_admin", "finance_manager", "reviewer_auditor", "external_accountant"].includes(role);
+}
+
+function hasFinancePermission(
+  role: FinanceHubNormalizedRole,
+  permission:
+    | "manage_security"
+    | "manage_settings"
+    | "upload_documents"
+    | "view_documents"
+    | "delete_documents"
+    | "create_intake"
+    | "review_intake"
+    | "approve_intake"
+    | "view_reports"
+    | "view_exports",
+): boolean {
+  switch (permission) {
+    case "manage_security":
+    case "manage_settings":
+      return role === "owner_admin";
+    case "upload_documents":
+      return ["owner_admin", "finance_manager", "bookkeeper_data_entry", "staff_uploader"].includes(role);
+    case "view_documents":
+      return ["owner_admin", "finance_manager", "bookkeeper_data_entry", "reviewer_auditor", "external_accountant"].includes(role);
+    case "delete_documents":
+      return ["owner_admin", "finance_manager"].includes(role);
+    case "create_intake":
+      return ["owner_admin", "finance_manager", "bookkeeper_data_entry"].includes(role);
+    case "review_intake":
+      return ["owner_admin", "finance_manager", "reviewer_auditor", "external_accountant"].includes(role);
+    case "approve_intake":
+      return ["owner_admin", "finance_manager"].includes(role);
+    case "view_reports":
+      return ["owner_admin", "finance_manager", "reviewer_auditor", "external_accountant"].includes(role);
+    case "view_exports":
+      return ["owner_admin", "external_accountant"].includes(role);
+    default:
+      return false;
+  }
+}
+
+function requiresMfaForRestricted(): boolean {
+  return process.env.FINANCE_HUB_REQUIRE_MFA_FOR_RESTRICTED !== "false";
+}
+
+function isMfaVerified(req: Request, user: FinancialHubTokenPayload): boolean {
+  if (user.mfaVerified === true) return true;
+  const header = normalizeString(req.headers["x-mfa-verified"]);
+  return ["1", "true", "yes"].includes(header.toLowerCase());
+}
+
+function ensureAuthorized(
+  req: Request,
+  res: Response,
+  user: FinancialHubTokenPayload,
+  permission:
+    | "manage_security"
+    | "manage_settings"
+    | "upload_documents"
+    | "view_documents"
+    | "delete_documents"
+    | "create_intake"
+    | "review_intake"
+    | "approve_intake"
+    | "view_reports"
+    | "view_exports",
+  options?: { classification?: DataClassification; action?: string },
+): boolean {
+  const normalizedRole = normalizeFinanceHubRole(user.role);
+  if (!hasFinancePermission(normalizedRole, permission)) {
+    res.status(403).json({ error: "You are not authorized for this action" });
+    return false;
+  }
+
+  if (options?.classification === "restricted") {
+    if (!roleCanAccessRestricted(normalizedRole)) {
+      res.status(403).json({ error: "Restricted data access is limited to approved roles" });
+      return false;
+    }
+    if (requiresMfaForRestricted() && !isMfaVerified(req, user)) {
+      res.status(403).json({ error: "MFA is required for Restricted data access" });
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function auditFinanceHubEvent(
+  action: string,
+  user: FinancialHubTokenPayload,
+  meta?: Record<string, unknown>,
+): void {
+  logger.info("[finance-hub-audit] action", {
+    action,
+    userId: user.userId,
+    role: user.role,
+    normalizedRole: normalizeFinanceHubRole(user.role),
+    organizationId: user.organizationId,
+    programDomain: user.programDomain,
+    ...meta,
+  });
+}
+
+function inferIntakeClassification(record: Record<string, unknown>): DataClassification {
+  const metadata = isRecord(record.metadata) ? record.metadata : {};
+  const explicit = normalizeClassification(metadata.classification, "internal");
+  if (explicit !== "internal") return explicit;
+
+  const hasRestrictedIds = Boolean(record.employeeId || record.payPeriodId);
+  const markerString = JSON.stringify(metadata).toLowerCase();
+  const hasRestrictedMarkers = /(ssn|w-9|w9|ein|payroll|bank[_\s-]*account)/.test(markerString);
+  if (hasRestrictedIds || hasRestrictedMarkers) {
+    return "restricted";
+  }
+
+  return "internal";
+}
+
+function redactSensitiveJson(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => redactSensitiveJson(item));
+  }
+
+  if (isRecord(value)) {
+    const redacted: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      const normalizedKey = key.toLowerCase();
+      const shouldRedact = /(?:ssn|ein|w-?9|tax|bank|routing|account|payroll|employee|donor)/.test(normalizedKey);
+
+      if (shouldRedact) {
+        redacted[key] = "[REDACTED]";
+        continue;
+      }
+
+      redacted[key] = redactSensitiveJson(child);
+    }
+    return redacted;
+  }
+
+  if (typeof value === "string") {
+    if (/(?:\b\d{3}-\d{2}-\d{4}\b|\b\d{2}-\d{7}\b|\b\d{9}\b|\b\d{12,19}\b)/.test(value)) {
+      return "[REDACTED]";
+    }
+    return value;
+  }
+
+  return value;
 }
 
 function sanitizeFilename(originalName: string): string {
@@ -245,6 +455,7 @@ function mapFinanceHubDocument(record: Record<string, unknown>) {
   const updatedAt = record.updatedAt instanceof Date ? record.updatedAt.toISOString() : null;
   const deletedAt = record.deletedAt instanceof Date ? record.deletedAt.toISOString() : null;
   const folder = typeof record.folder === "string" && record.folder ? record.folder : "general";
+  const classification = parseClassificationFromR2Key(record.r2Key);
 
   return {
     id: String(record.id),
@@ -257,6 +468,7 @@ function mapFinanceHubDocument(record: Record<string, unknown>) {
     fileSize: typeof record.fileSize === "number" ? record.fileSize : 0,
     r2Key: typeof record.r2Key === "string" ? record.r2Key : "",
     storageProvider: typeof record.storageProvider === "string" ? record.storageProvider : "r2",
+    classification,
     uploadedByUserId: typeof record.uploadedByUserId === "string" ? record.uploadedByUserId : null,
     deletedByUserId: typeof record.deletedByUserId === "string" ? record.deletedByUserId : null,
     status: typeof record.status === "string" ? record.status : "uploaded",
@@ -381,6 +593,8 @@ async function getSetupStatus() {
 }
 
 function mapIntakeRecord(record: Record<string, unknown>) {
+  const classification = inferIntakeClassification(record);
+  const isRestricted = classification === "restricted";
   return {
     id: String(record.id),
     organizationId: String(record.organizationId),
@@ -412,9 +626,10 @@ function mapIntakeRecord(record: Record<string, unknown>) {
     financeReviewedAt: record.financeReviewedAt instanceof Date ? record.financeReviewedAt.toISOString() : null,
     exportBatchId: typeof record.exportBatchId === "string" ? record.exportBatchId : null,
     postedAt: record.postedAt instanceof Date ? record.postedAt.toISOString() : null,
-    metadata: record.metadata ?? {},
-    attachments: record.attachments ?? [],
-    validationIssues: record.validationIssues ?? [],
+    metadata: isRestricted ? redactSensitiveJson(record.metadata ?? {}) : (record.metadata ?? {}),
+    attachments: isRestricted ? redactSensitiveJson(record.attachments ?? []) : (record.attachments ?? []),
+    validationIssues: isRestricted ? redactSensitiveJson(record.validationIssues ?? []) : (record.validationIssues ?? []),
+    classification,
     createdByUserId: typeof record.createdByUserId === "string" ? record.createdByUserId : null,
     createdAt: record.createdAt instanceof Date ? record.createdAt.toISOString() : null,
     updatedAt: record.updatedAt instanceof Date ? record.updatedAt.toISOString() : null,
@@ -668,6 +883,11 @@ router.get("/me", requireFinancialHubAuth, async (req, res) => {
 
 router.post("/documents/upload", requireFinancialHubAuth, financeHubUpload.single("file"), async (req, res) => {
   const user = getFinancialHubUser(req);
+  const classification = normalizeClassification((req.body as Record<string, unknown> | undefined)?.classification, "confidential");
+  if (!ensureAuthorized(req, res, user, "upload_documents", { classification, action: "documents.upload" })) {
+    return;
+  }
+
   const file = req.file;
   if (!file) {
     res.status(400).json({ error: "A file is required" });
@@ -702,7 +922,7 @@ router.post("/documents/upload", requireFinancialHubAuth, financeHubUpload.singl
 
   const organizationId = user.organizationId || DEFAULT_ORGANIZATION_ID;
   const stamp = `${Date.now()}-${randomBytes(3).toString("hex")}`;
-  const r2Key = `finance-hub/documents/${folder}/${stamp}-${safeFilename}`;
+  const r2Key = `finance-hub/documents/${folder}/${classification}/${stamp}-${safeFilename}`;
 
   try {
     const storage = await resolveStorageAdapter({
@@ -727,6 +947,14 @@ router.post("/documents/upload", requireFinancialHubAuth, financeHubUpload.singl
       },
     });
 
+    auditFinanceHubEvent("documents.upload", user, {
+      documentId: String(created.id),
+      folder,
+      classification,
+      fileSize: file.size,
+      mimeType: file.mimetype,
+    });
+
     res.status(201).json(mapFinanceHubDocument(created));
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to upload document";
@@ -736,6 +964,10 @@ router.post("/documents/upload", requireFinancialHubAuth, financeHubUpload.singl
 
 router.post("/finance/receipts/analyze", requireFinancialHubAuth, financeHubUpload.single("file"), async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "upload_documents", { classification: "confidential", action: "receipts.analyze" })) {
+    return;
+  }
+
   const file = req.file;
   if (!file) {
     res.status(400).json({ error: "A file is required" });
@@ -787,6 +1019,10 @@ router.post("/finance/receipts/analyze", requireFinancialHubAuth, financeHubUplo
 
 router.get("/documents", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "view_documents", { action: "documents.list" })) {
+    return;
+  }
+
   const folderRaw = normalizeString(req.query.folder).toLowerCase();
   if (folderRaw && folderRaw !== "all" && !FINANCE_HUB_DOCUMENT_FOLDERS.has(folderRaw)) {
     res.status(400).json({ error: "Invalid folder filter. Allowed values are 'all', 'general', or 'test'." });
@@ -807,8 +1043,18 @@ router.get("/documents", requireFinancialHubAuth, async (req, res) => {
     orderBy: { createdAt: "desc" },
     take: 500,
   });
+  const mapped = rows.map(mapFinanceHubDocument);
+  const filtered = mapped.filter((doc) => {
+    if (doc.classification !== "restricted") return true;
+    return roleCanAccessRestricted(normalizeFinanceHubRole(user.role));
+  });
 
-  res.json({ items: rows.map(mapFinanceHubDocument) });
+  auditFinanceHubEvent("documents.list", user, {
+    returned: filtered.length,
+    requestedFolder: folderFilter || "all",
+  });
+
+  res.json({ items: filtered });
 });
 
 router.get("/documents/:id", requireFinancialHubAuth, async (req, res) => {
@@ -831,7 +1077,17 @@ router.get("/documents/:id", requireFinancialHubAuth, async (req, res) => {
     return;
   }
 
-  res.json({ item: mapFinanceHubDocument(row) });
+  const mapped = mapFinanceHubDocument(row);
+  if (!ensureAuthorized(req, res, user, "view_documents", { classification: mapped.classification, action: "documents.get" })) {
+    return;
+  }
+
+  auditFinanceHubEvent("documents.get", user, {
+    documentId,
+    classification: mapped.classification,
+  });
+
+  res.json({ item: mapped });
 });
 
 router.get("/documents/:id/url", requireFinancialHubAuth, async (req, res) => {
@@ -856,22 +1112,38 @@ router.get("/documents/:id/url", requireFinancialHubAuth, async (req, res) => {
     return;
   }
 
+  const mapped = mapFinanceHubDocument(row);
+  if (!ensureAuthorized(req, res, user, "view_documents", { classification: mapped.classification, action: "documents.url" })) {
+    return;
+  }
+
   try {
     const storage = await resolveStorageAdapter({
       organizationId,
       programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
     });
+    const expiresIn = mapped.classification === "restricted"
+      ? FINANCE_HUB_RESTRICTED_SIGNED_URL_TTL_SECONDS
+      : FINANCE_HUB_SIGNED_URL_TTL_SECONDS;
     const url = await storage.adapter.getDownloadUrl(String(row.r2Key), {
       disposition,
       filename: String(row.originalFilename || row.safeFilename || "document"),
-      expiresIn: FINANCE_HUB_SIGNED_URL_TTL_SECONDS,
+      expiresIn,
+    });
+
+    auditFinanceHubEvent("documents.url", user, {
+      documentId,
+      classification: mapped.classification,
+      disposition,
+      expiresIn,
     });
 
     res.json({
       url,
-      expiresAt: new Date(Date.now() + FINANCE_HUB_SIGNED_URL_TTL_SECONDS * 1000).toISOString(),
+      expiresAt: new Date(Date.now() + expiresIn * 1000).toISOString(),
       filename: String(row.originalFilename || row.safeFilename || "document"),
       mimeType: String(row.mimeType || "application/octet-stream"),
+      classification: mapped.classification,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "Failed to generate signed URL";
@@ -881,6 +1153,10 @@ router.get("/documents/:id/url", requireFinancialHubAuth, async (req, res) => {
 
 router.delete("/documents/:id", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "delete_documents", { action: "documents.delete" })) {
+    return;
+  }
+
   const documentId = normalizeString(req.params.id);
   const organizationId = user.organizationId || DEFAULT_ORGANIZATION_ID;
 
@@ -896,6 +1172,11 @@ router.delete("/documents/:id", requireFinancialHubAuth, async (req, res) => {
 
   if (!row) {
     res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const mapped = mapFinanceHubDocument(row);
+  if (!ensureAuthorized(req, res, user, "delete_documents", { classification: mapped.classification, action: "documents.delete" })) {
     return;
   }
 
@@ -916,6 +1197,11 @@ router.delete("/documents/:id", requireFinancialHubAuth, async (req, res) => {
       },
     });
 
+    auditFinanceHubEvent("documents.delete", user, {
+      documentId,
+      classification: mapped.classification,
+    });
+
     res.json({
       deleted: true,
       id: documentId,
@@ -930,6 +1216,10 @@ router.delete("/documents/:id", requireFinancialHubAuth, async (req, res) => {
 
 router.get("/intake", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "review_intake", { action: "intake.list" })) {
+    return;
+  }
+
   const financeStatus = optionalString(req.query.financeStatus);
 
   const rows = await prismaFinancial.financeIntakeRecord.findMany({
@@ -941,13 +1231,31 @@ router.get("/intake", requireFinancialHubAuth, async (req, res) => {
     orderBy: { createdAt: "desc" },
     take: 200,
   });
+  const mapped = rows.map(mapIntakeRecord);
+  const filtered = mapped.filter((record) => {
+    if (record.classification !== "restricted") return true;
+    return roleCanAccessRestricted(normalizeFinanceHubRole(user.role));
+  });
 
-  res.json({ items: rows.map(mapIntakeRecord) });
+  auditFinanceHubEvent("intake.list", user, {
+    returned: filtered.length,
+    financeStatus: financeStatus || "all",
+  });
+
+  res.json({ items: filtered });
 });
 
 router.post("/intake", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "create_intake", { action: "intake.create" })) {
+    return;
+  }
+
   const body = isRecord(req.body) ? req.body : {};
+  const requestedClassification = normalizeClassification(body.classification, "internal");
+  if (!ensureAuthorized(req, res, user, "create_intake", { classification: requestedClassification, action: "intake.create" })) {
+    return;
+  }
 
   const sourceApp = normalizeString(body.sourceApp);
   const sourceRecordId = normalizeString(body.sourceRecordId);
@@ -979,6 +1287,9 @@ router.post("/intake", requireFinancialHubAuth, async (req, res) => {
   }
 
   try {
+    const metadata = isRecord(body.metadata) ? { ...body.metadata } : {};
+    metadata.classification = requestedClassification;
+
     const created = await prismaFinancial.financeIntakeRecord.create({
       data: {
         organizationId: user.organizationId,
@@ -1004,11 +1315,18 @@ router.post("/intake", requireFinancialHubAuth, async (req, res) => {
         fundingSourceId: optionalString(body.fundingSourceId),
         submittedByUserId: optionalString(body.submittedByUserId) || user.userId,
         operationallyApprovedByUserId: optionalString(body.operationallyApprovedByUserId),
-        metadata: isRecord(body.metadata) ? body.metadata : {},
+        metadata,
         attachments: Array.isArray(body.attachments) ? body.attachments : [],
         validationIssues: Array.isArray(body.validationIssues) ? body.validationIssues : [],
         createdByUserId: user.userId,
       },
+    });
+
+    auditFinanceHubEvent("intake.create", user, {
+      intakeId: String(created.id),
+      sourceApp,
+      sourceRecordType,
+      classification: requestedClassification,
     });
 
     res.status(201).json({ item: mapIntakeRecord(created) });
@@ -1024,6 +1342,10 @@ router.post("/intake", requireFinancialHubAuth, async (req, res) => {
 
 router.patch("/intake/:id/status", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "approve_intake", { action: "intake.status.update" })) {
+    return;
+  }
+
   const recordId = normalizeString(req.params.id);
   const body = isRecord(req.body) ? req.body : {};
   const financeStatus = normalizeString(body.financeStatus);
@@ -1045,6 +1367,11 @@ router.patch("/intake/:id/status", requireFinancialHubAuth, async (req, res) => 
     return;
   }
 
+  const existingClassification = inferIntakeClassification(existing);
+  if (!ensureAuthorized(req, res, user, "approve_intake", { classification: existingClassification, action: "intake.status.update" })) {
+    return;
+  }
+
   const reviewed = ["needs_correction", "finance_ready", "exported", "posted", "archived"].includes(financeStatus);
   const updated = await prismaFinancial.financeIntakeRecord.update({
     where: { id: recordId },
@@ -1058,10 +1385,19 @@ router.patch("/intake/:id/status", requireFinancialHubAuth, async (req, res) => 
   });
 
   res.json({ item: mapIntakeRecord(updated) });
+  auditFinanceHubEvent("intake.status.update", user, {
+    intakeId: recordId,
+    financeStatus,
+    classification: existingClassification,
+  });
 });
 
 router.get("/review-queue", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "review_intake", { action: "review-queue.list" })) {
+    return;
+  }
+
   const rows = await prismaFinancial.financeIntakeRecord.findMany({
     where: {
       organizationId: user.organizationId,
@@ -1071,12 +1407,20 @@ router.get("/review-queue", requireFinancialHubAuth, async (req, res) => {
     orderBy: { createdAt: "asc" },
     take: 200,
   });
+  const mapped = rows.map(mapIntakeRecord);
+  const filtered = mapped.filter((record) => {
+    if (record.classification !== "restricted") return true;
+    return roleCanAccessRestricted(normalizeFinanceHubRole(user.role));
+  });
 
-  res.json({ items: rows.map(mapIntakeRecord) });
+  res.json({ items: filtered });
 });
 
 router.get("/reports", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "view_reports", { action: "reports.view" })) {
+    return;
+  }
 
   const [statusCounts, totals] = await Promise.all([
     prismaFinancial.financeIntakeRecord.groupBy({
@@ -1111,6 +1455,31 @@ router.get("/reports", requireFinancialHubAuth, async (req, res) => {
 
 router.get("/exports", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "view_exports", { action: "exports.view" })) {
+    return;
+  }
+
+  const includeRestricted = normalizeString(req.query.includeRestricted).toLowerCase() === "true";
+  const approvalTicket = normalizeString(req.query.approvalTicket);
+  const justification = normalizeString(req.query.justification);
+
+  if (includeRestricted) {
+    if (!roleCanAccessRestricted(normalizeFinanceHubRole(user.role))) {
+      res.status(403).json({ error: "Restricted export access is limited to approved roles" });
+      return;
+    }
+    if (requiresMfaForRestricted() && !isMfaVerified(req, user)) {
+      res.status(403).json({ error: "MFA is required for Restricted data exports" });
+      return;
+    }
+    if (!approvalTicket || !justification || justification.length < 10) {
+      res.status(400).json({
+        error: "Restricted exports require approvalTicket and a business justification",
+      });
+      return;
+    }
+  }
+
   const rows = await prismaFinancial.financeIntakeRecord.findMany({
     where: {
       organizationId: user.organizationId,
@@ -1121,11 +1490,23 @@ router.get("/exports", requireFinancialHubAuth, async (req, res) => {
     take: 200,
   });
 
-  res.json({ items: rows.map(mapIntakeRecord) });
+  const mapped = rows.map(mapIntakeRecord);
+  const filtered = mapped.filter((record) => includeRestricted || record.classification !== "restricted");
+
+  auditFinanceHubEvent("exports.view", user, {
+    includeRestricted,
+    approvalTicket: approvalTicket || null,
+    returned: filtered.length,
+  });
+
+  res.json({ items: filtered });
 });
 
 router.get("/settings", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "manage_settings", { action: "settings.get" })) {
+    return;
+  }
 
   const settings = await prisma.programStorageSettings.findUnique({
     where: {
@@ -1145,6 +1526,9 @@ router.get("/settings", requireFinancialHubAuth, async (req, res) => {
 
 router.patch("/settings", requireFinancialHubAuth, async (req, res) => {
   const user = getFinancialHubUser(req);
+  if (!ensureAuthorized(req, res, user, "manage_settings", { action: "settings.patch" })) {
+    return;
+  }
   const body = isRecord(req.body) ? req.body : {};
   const normalizedSettings = body as Prisma.InputJsonValue;
 

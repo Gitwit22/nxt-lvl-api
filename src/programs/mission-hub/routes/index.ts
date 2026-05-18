@@ -9,6 +9,8 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
+import path from "path";
+import rateLimit from "express-rate-limit";
 import { prisma } from "../../../core/db/prisma.js";
 import { JWT_SECRET, PLATFORM_LAUNCH_TOKEN_SECRET, FRONTEND_BASE_URL } from "../../../core/config/env.js";
 import { signToken, hashPassword, verifyPassword } from "../../../core/auth/auth.service.js";
@@ -24,6 +26,116 @@ import { logger } from "../../../logger.js";
 const router = express.Router();
 
 const MISSION_HUB_PROGRAM_DOMAIN = "mission-hub";
+const LOGIN_RATE_LIMIT = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many login attempts. Please try again later." },
+});
+const UPLOAD_RATE_LIMIT = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many upload attempts. Please try again later." },
+});
+const EXPORT_RATE_LIMIT = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many export requests. Please try again later." },
+});
+const INVITE_RATE_LIMIT = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  limit: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: "Too many invite requests. Please try again later." },
+});
+const MISSION_HUB_DOCUMENT_MAX_BYTES = 50 * 1024 * 1024;
+const MISSION_HUB_ALLOWED_DOCUMENT_MIME_TYPES = new Set([
+  "application/pdf",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  "text/csv",
+  "text/plain",
+  "image/jpeg",
+  "image/png",
+  "image/heic",
+  "image/heif",
+]);
+const MISSION_HUB_ALLOWED_DOCUMENT_EXTENSIONS = new Set([
+  ".pdf",
+  ".docx",
+  ".xlsx",
+  ".csv",
+  ".txt",
+  ".jpg",
+  ".jpeg",
+  ".png",
+  ".heic",
+  ".heif",
+]);
+const MISSION_HUB_ALLOWED_SENSITIVITY = new Set(["public", "internal", "confidential", "restricted"]);
+
+const EXPENSE_APPROVER_ROLES = new Set(["admin", "reviewer", "finance", "executive director", "deputy director"]);
+
+type MissionHubAuditStore = typeof prisma & {
+  missionHubAuditLog: {
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+};
+
+const missionHubAuditStore = prisma as MissionHubAuditStore;
+
+function canApproveExpenses(role: unknown): boolean {
+  return EXPENSE_APPROVER_ROLES.has(normalizeRoleValue(role));
+}
+
+function sanitizeMissionHubFilename(filename: string): string {
+  const base = path.basename(filename || "document");
+  const noControls = base.replace(/[\u0000-\u001f\u007f]/g, "");
+  const safe = noControls.replace(/[^a-zA-Z0-9._ -]/g, "_").trim();
+  return safe || "document";
+}
+
+async function auditMissionHubEvent(
+  req: Request,
+  action: string,
+  actor: MissionHubTokenPayload | undefined,
+  meta?: {
+    resourceType?: string;
+    resourceId?: string | null;
+    oldValue?: unknown;
+    newValue?: unknown;
+    metadata?: Record<string, unknown>;
+  },
+): Promise<void> {
+  const resolvedActor = actor || (req as Request & { missionHubUser?: MissionHubTokenPayload }).missionHubUser;
+  if (!resolvedActor?.organizationId || !resolvedActor?.userId) return;
+
+  try {
+    await missionHubAuditStore.missionHubAuditLog.create({
+      data: {
+        organizationId: resolvedActor.organizationId,
+        actorUserId: resolvedActor.userId,
+        actorRole: resolvedActor.role,
+        action,
+        resourceType: meta?.resourceType || "",
+        resourceId: meta?.resourceId ?? null,
+        oldValue: meta?.oldValue as never,
+        newValue: meta?.newValue as never,
+        ipAddress: req.ip || null,
+        userAgent: typeof req.headers["user-agent"] === "string" ? req.headers["user-agent"] : null,
+        metadata: meta?.metadata || {},
+      },
+    } as Record<string, unknown>);
+  } catch {
+    // Audit logging must never block the primary request.
+  }
+}
 
 type PrismaWithProgramSubscription = typeof prisma & {
   organizationProgramSubscription: {
@@ -265,6 +377,11 @@ function normalizeRoleValue(value: unknown): string {
   return value.trim().toLowerCase().replace(/[\s_-]+/g, " ");
 }
 
+function normalizeApprovalStatus(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value.trim().toLowerCase().replace(/[\s_-]+/g, " ");
+}
+
 function normalizeTimeEntryStatus(value: unknown): string {
   if (typeof value !== "string") return "draft";
   const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
@@ -418,7 +535,7 @@ function mapPersonnelRoleToUserRole(role: string): "admin" | "reviewer" | "uploa
 
 // ─── Public auth routes (no auth required) ────────────────────────────────────
 
-router.post("/auth/login", async (req, res) => {
+router.post("/auth/login", LOGIN_RATE_LIMIT, async (req, res) => {
   const body = isRecord(req.body) ? req.body : {};
   const email = typeof body.email === "string" ? body.email.trim().toLowerCase() : "";
   const password = typeof body.password === "string" ? body.password : "";
@@ -440,12 +557,27 @@ router.post("/auth/login", async (req, res) => {
   if (!user) {
     // Constant-time delay to prevent timing attacks
     await hashPassword("__dummy__");
+    void auditMissionHubEvent(req, "auth.login.failed", undefined, {
+      resourceType: "auth",
+      metadata: { email, reason: "unknown_email" },
+    });
     res.status(401).json({ error: "Invalid credentials" });
     return;
   }
 
   const valid = await verifyPassword(password, user.passwordHash);
   if (!valid) {
+    void auditMissionHubEvent(req, "auth.login.failed", {
+      userId: user.id,
+      email: user.email,
+      role: user.role,
+      organizationId: user.organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    }, {
+      resourceType: "auth",
+      resourceId: user.id,
+      metadata: { email, reason: "bad_password" },
+    });
     res.status(401).json({ error: "Invalid credentials" });
     return;
   }
@@ -479,6 +611,16 @@ router.post("/auth/login", async (req, res) => {
   await ensureMissionHubSubscription(user.organizationId);
 
   logger.info("[mission-hub] User logged in", { userId: user.id, organizationId: user.organizationId });
+  void auditMissionHubEvent(req, "auth.login", {
+    userId: user.id,
+    email: user.email,
+    role: user.role,
+    organizationId: user.organizationId,
+    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+  }, {
+    resourceType: "auth",
+    resourceId: user.id,
+  });
 
   // Return user info without the token (session is managed via secure cookie)
   res.json({
@@ -678,7 +820,7 @@ router.post("/auth/reset-password", async (req, res) => {
 
 // ─── Public invite routes (no auth required) ──────────────────────────────────
 
-router.get("/invites/validate", async (req, res) => {
+router.get("/invites/validate", INVITE_RATE_LIMIT, async (req, res) => {
   const raw = typeof req.query.token === "string" ? req.query.token.trim() : "";
   if (!raw) { res.status(400).json({ error: "token is required" }); return; }
 
@@ -704,7 +846,7 @@ router.get("/invites/validate", async (req, res) => {
   });
 });
 
-router.post("/invites/accept", async (req, res) => {
+router.post("/invites/accept", INVITE_RATE_LIMIT, async (req, res) => {
   const body = isRecord(req.body) ? req.body : {};
   const raw = typeof body.token === "string" ? body.token.trim() : "";
   const password = typeof body.password === "string" ? body.password : "";
@@ -1434,6 +1576,11 @@ router.post("/expenses", requireMissionHubAuth, async (req, res) => {
         : undefined,
     },
   });
+  void auditMissionHubEvent(req, "expense.create", getUser(req), {
+    resourceType: "expense",
+    resourceId: String(expense.id || ""),
+    newValue: expense,
+  });
   res.status(201).json(expense);
 });
 
@@ -1448,6 +1595,22 @@ router.put("/expenses/:id", requireMissionHubAuth, async (req, res) => {
   };
   const existing = await store.missionHubExpense.findFirst({ where: { id: req.params.id, organizationId, userId } });
   if (!existing) { res.status(404).json({ error: "Expense not found" }); return; }
+
+  const nextApprovalStatus = typeof body.approvalStatus === "string" ? body.approvalStatus.trim() : "";
+  const currentApprovalStatus = typeof (existing as Record<string, unknown>).approvalStatus === "string"
+    ? String((existing as Record<string, unknown>).approvalStatus)
+    : "";
+  const isApprovalChange = Boolean(nextApprovalStatus) && nextApprovalStatus !== currentApprovalStatus;
+  if (isApprovalChange) {
+    if (!canApproveExpenses(getUser(req).role)) {
+      res.status(403).json({ error: "You are not allowed to change approval status" });
+      return;
+    }
+    if (normalizeApprovalStatus(nextApprovalStatus) === "approved" && String((existing as Record<string, unknown>).userId || "") === userId && normalizeRoleValue(getUser(req).role) !== "admin") {
+      res.status(403).json({ error: "You cannot approve your own expense" });
+      return;
+    }
+  }
 
   const data: Record<string, unknown> = {};
   const strFields = ["expenseName", "date", "category", "type", "notes", "approvalStatus",
@@ -1476,6 +1639,90 @@ router.put("/expenses/:id", requireMissionHubAuth, async (req, res) => {
   }
 
   const updated = await store.missionHubExpense.update({ where: { id: req.params.id }, data });
+  if (isApprovalChange) {
+    void auditMissionHubEvent(req, "expense.approval.changed", getUser(req), {
+      resourceType: "expense",
+      resourceId: req.params.id,
+      oldValue: { approvalStatus: currentApprovalStatus },
+      newValue: { approvalStatus: nextApprovalStatus },
+      metadata: { source: "expenses.put" },
+    });
+  }
+  res.json(updated);
+});
+
+router.post("/expenses/:id/approve", requireMissionHubAuth, async (req, res) => {
+  const user = getUser(req);
+  if (!canApproveExpenses(user.role)) {
+    res.status(403).json({ error: "You are not allowed to approve expenses" });
+    return;
+  }
+
+  const store = prisma as unknown as {
+    missionHubExpense: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.missionHubExpense.findFirst({ where: { id: req.params.id, organizationId: user.organizationId, isActive: true } });
+  if (!existing) { res.status(404).json({ error: "Expense not found" }); return; }
+  if (String((existing as Record<string, unknown>).userId || "") === user.userId && normalizeRoleValue(user.role) !== "admin") {
+    res.status(403).json({ error: "You cannot approve your own expense" });
+    return;
+  }
+
+  const updated = await store.missionHubExpense.update({
+    where: { id: req.params.id },
+    data: { approvalStatus: "Approved", reviewedAt: new Date() },
+  });
+
+  void auditMissionHubEvent(req, "expense.approve", user, {
+    resourceType: "expense",
+    resourceId: req.params.id,
+    oldValue: { approvalStatus: (existing as Record<string, unknown>).approvalStatus },
+    newValue: { approvalStatus: "Approved" },
+  });
+
+  res.json(updated);
+});
+
+router.post("/expenses/:id/reject", requireMissionHubAuth, async (req, res) => {
+  const user = getUser(req);
+  if (!canApproveExpenses(user.role)) {
+    res.status(403).json({ error: "You are not allowed to reject expenses" });
+    return;
+  }
+
+  const body = isRecord(req.body) ? req.body : {};
+  const reviewerNote = typeof body.reviewerNote === "string" ? body.reviewerNote.trim() : "";
+  const store = prisma as unknown as {
+    missionHubExpense: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.missionHubExpense.findFirst({ where: { id: req.params.id, organizationId: user.organizationId, isActive: true } });
+  if (!existing) { res.status(404).json({ error: "Expense not found" }); return; }
+
+  const updated = await store.missionHubExpense.update({
+    where: { id: req.params.id },
+    data: {
+      approvalStatus: "Rejected",
+      reviewedAt: new Date(),
+      reviewerNote: reviewerNote || null,
+      rejectReason: reviewerNote || null,
+    },
+  });
+
+  void auditMissionHubEvent(req, "expense.reject", user, {
+    resourceType: "expense",
+    resourceId: req.params.id,
+    oldValue: { approvalStatus: (existing as Record<string, unknown>).approvalStatus },
+    newValue: { approvalStatus: "Rejected", reviewerNote: reviewerNote || null },
+  });
+
   res.json(updated);
 });
 
@@ -1490,6 +1737,12 @@ router.delete("/expenses/:id", requireMissionHubAuth, async (req, res) => {
   const existing = await store.missionHubExpense.findFirst({ where: { id: req.params.id, organizationId, userId } });
   if (!existing) { res.status(404).json({ error: "Expense not found" }); return; }
   await store.missionHubExpense.update({ where: { id: req.params.id }, data: { isActive: false } });
+  void auditMissionHubEvent(req, "expense.delete", getUser(req), {
+    resourceType: "expense",
+    resourceId: req.params.id,
+    oldValue: existing,
+    newValue: { isActive: false },
+  });
   res.status(204).send();
 });
 
@@ -1705,7 +1958,7 @@ router.get("/personnel/:id", requireMissionHubAuth, async (req, res) => {
   res.json(person);
 });
 
-router.post("/personnel", requireMissionHubAuth, async (req, res) => {
+router.post("/personnel", requireMissionHubAuth, INVITE_RATE_LIMIT, async (req, res) => {
   const { userId, organizationId, role: requesterRole } = getUser(req);
   const body = isRecord(req.body) ? req.body : {};
   if (typeof body.firstName !== "string" || !body.firstName.trim()) {
@@ -1836,7 +2089,7 @@ router.get("/invites", requireMissionHubAuth, async (req, res) => {
   res.json(invites);
 });
 
-router.post("/invites/:id/resend", requireMissionHubAuth, async (req, res) => {
+router.post("/invites/:id/resend", requireMissionHubAuth, INVITE_RATE_LIMIT, async (req, res) => {
   const { organizationId } = getUser(req);
   try {
     const inviteId = Array.isArray(req.params.id) ? req.params.id[0] : req.params.id;
@@ -2583,7 +2836,7 @@ router.post("/timesheet-submissions/:id/mark-billed", requireMissionHubAuth, asy
   await handleSubmissionAction(req, res, "billed");
 });
 
-router.post("/timesheet-submissions/:id/mark-exported", requireMissionHubAuth, async (req, res) => {
+router.post("/timesheet-submissions/:id/mark-exported", requireMissionHubAuth, EXPORT_RATE_LIMIT, async (req, res) => {
   await handleSubmissionAction(req, res, "exported");
 });
 
@@ -3568,7 +3821,7 @@ router.get("/documents", requireMissionHubAuth, async (req, res) => {
   const { organizationId } = getUser(req);
   const { linkedEntityType, linkedEntityId } = req.query;
   const store = prisma as unknown as DocStore;
-  const where: Record<string, unknown> = { organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, isActive: true };
+  const where: Record<string, unknown> = { organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, isActive: true, deletedAt: null };
   if (typeof linkedEntityType === "string") where.linkedEntityType = linkedEntityType;
   if (typeof linkedEntityId === "string") where.linkedEntityId = linkedEntityId;
   const docs = await store.missionHubDocument.findMany({ where, orderBy: { createdAt: "desc" } });
@@ -3578,17 +3831,44 @@ router.get("/documents", requireMissionHubAuth, async (req, res) => {
 router.get("/documents/:id", requireMissionHubAuth, async (req, res) => {
   const { organizationId } = getUser(req);
   const store = prisma as unknown as DocStore;
-  const doc = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
+  const doc = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true, deletedAt: null } });
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+  void auditMissionHubEvent(req, "document.view", getUser(req), {
+    resourceType: "document",
+    resourceId: req.params.id,
+    metadata: { linkedEntityType: typeof doc.linkedEntityType === "string" ? doc.linkedEntityType : null },
+  });
   res.json(doc);
 });
 
-router.post("/documents", requireMissionHubAuth, async (req, res) => {
+router.post("/documents", requireMissionHubAuth, UPLOAD_RATE_LIMIT, async (req, res) => {
   const { userId, organizationId } = getUser(req);
   const body = isRecord(req.body) ? req.body : {};
   const store = prisma as unknown as DocStore;
   if (typeof body.title !== "string" || !body.title.trim()) {
     res.status(400).json({ error: "title is required" }); return;
+  }
+  const mimeType = typeof body.mimeType === "string" ? body.mimeType : "";
+  if (mimeType && !MISSION_HUB_ALLOWED_DOCUMENT_MIME_TYPES.has(mimeType)) {
+    res.status(415).json({ error: "Unsupported file type" });
+    return;
+  }
+  const originalFilename = typeof body.originalFilename === "string" ? body.originalFilename : "";
+  const safeOriginalFilename = sanitizeMissionHubFilename(originalFilename);
+  const fileExtension = path.extname(safeOriginalFilename).toLowerCase();
+  if (fileExtension && !MISSION_HUB_ALLOWED_DOCUMENT_EXTENSIONS.has(fileExtension)) {
+    res.status(415).json({ error: "Unsupported file extension" });
+    return;
+  }
+  const sizeBytes = typeof body.sizeBytes === "number" ? body.sizeBytes : 0;
+  if (sizeBytes > MISSION_HUB_DOCUMENT_MAX_BYTES) {
+    res.status(413).json({ error: "File exceeds maximum allowed size" });
+    return;
+  }
+  const sensitivityLevel = typeof body.sensitivityLevel === "string" ? body.sensitivityLevel.toLowerCase() : "confidential";
+  if (!MISSION_HUB_ALLOWED_SENSITIVITY.has(sensitivityLevel)) {
+    res.status(400).json({ error: "Invalid sensitivityLevel" });
+    return;
   }
   const doc = await store.missionHubDocument.create({
     data: {
@@ -3596,17 +3876,25 @@ router.post("/documents", requireMissionHubAuth, async (req, res) => {
       programDomain: MISSION_HUB_PROGRAM_DOMAIN,
       uploaderUserId: userId,
       title: (body.title as string).trim(),
-      originalFilename: typeof body.originalFilename === "string" ? body.originalFilename : "",
-      mimeType: typeof body.mimeType === "string" ? body.mimeType : "",
-      sizeBytes: typeof body.sizeBytes === "number" ? body.sizeBytes : 0,
+      documentType: typeof body.documentType === "string" ? body.documentType : "",
+      originalFilename: safeOriginalFilename,
+      mimeType,
+      sizeBytes,
       storageKey: typeof body.storageKey === "string" ? body.storageKey : "",
       storageBucket: typeof body.storageBucket === "string" ? body.storageBucket : "",
       storageProvider: typeof body.storageProvider === "string" ? body.storageProvider : "r2",
+      sensitivityLevel,
+      retentionCategory: typeof body.retentionCategory === "string" ? body.retentionCategory : "",
       linkedEntityType: typeof body.linkedEntityType === "string" ? body.linkedEntityType : null,
       linkedEntityId: typeof body.linkedEntityId === "string" ? body.linkedEntityId : null,
       tags: Array.isArray(body.tags) ? body.tags : [],
       metadata: isRecord(body.metadata) ? body.metadata : {},
     },
+  });
+  void auditMissionHubEvent(req, "document.upload", getUser(req), {
+    resourceType: "document",
+    resourceId: String(doc.id || ""),
+    newValue: { mimeType, sizeBytes, sensitivityLevel, retentionCategory: typeof body.retentionCategory === "string" ? body.retentionCategory : "" },
   });
   res.status(201).json(doc);
 });
@@ -3615,23 +3903,38 @@ router.put("/documents/:id", requireMissionHubAuth, async (req, res) => {
   const { organizationId } = getUser(req);
   const body = isRecord(req.body) ? req.body : {};
   const store = prisma as unknown as DocStore;
-  const existing = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
+  const existing = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true, deletedAt: null } });
   if (!existing) { res.status(404).json({ error: "Document not found" }); return; }
   const data: Record<string, unknown> = {};
   const strFields = ["title", "linkedEntityType", "linkedEntityId", "storageKey", "storageBucket", "storageProvider"] as const;
   for (const f of strFields) { if (typeof body[f] === "string") data[f] = body[f]; }
+  if (typeof body.documentType === "string") data.documentType = body.documentType;
+  if (typeof body.sensitivityLevel === "string") data.sensitivityLevel = body.sensitivityLevel;
+  if (typeof body.retentionCategory === "string") data.retentionCategory = body.retentionCategory;
   if ("tags" in body && Array.isArray(body.tags)) data.tags = body.tags;
   if ("metadata" in body && isRecord(body.metadata)) data.metadata = body.metadata;
   const updated = await store.missionHubDocument.update({ where: { id: req.params.id }, data });
+  void auditMissionHubEvent(req, "document.update", getUser(req), {
+    resourceType: "document",
+    resourceId: req.params.id,
+    oldValue: existing,
+    newValue: updated,
+  });
   res.json(updated);
 });
 
 router.delete("/documents/:id", requireMissionHubAuth, async (req, res) => {
   const { organizationId } = getUser(req);
   const store = prisma as unknown as DocStore;
-  const existing = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true } });
+  const existing = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true, deletedAt: null } });
   if (!existing) { res.status(404).json({ error: "Document not found" }); return; }
-  await store.missionHubDocument.update({ where: { id: req.params.id }, data: { isActive: false } });
+  await store.missionHubDocument.update({ where: { id: req.params.id }, data: { isActive: false, deletedAt: new Date(), deletedByUserId: getUser(req).userId } });
+  void auditMissionHubEvent(req, "document.delete", getUser(req), {
+    resourceType: "document",
+    resourceId: req.params.id,
+    oldValue: existing,
+    newValue: { isActive: false, deletedAt: new Date().toISOString() },
+  });
   res.status(204).send();
 });
 
