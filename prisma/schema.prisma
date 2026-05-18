@@ -931,6 +931,52 @@ model MissionHubScheduledReport {
   @@index([nextRunAt])
 }
 
+model MissionHubContact {
+  id              String   @id
+  organizationId  String
+  userId          String
+  firstName       String   @default("")
+  lastName        String   @default("")
+  fullName        String   @default("")
+  email           String?
+  phone           String?
+  organization    String?
+  title           String?
+  address         String?
+  city            String?
+  state           String?
+  zip             String?
+  type            String?
+  tags            Json     @default("[]")
+  source          String?
+  notes           String?
+  linkedEntities  Json     @default("[]")
+  archivedAt      DateTime?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now())
+
+  @@index([organizationId, userId, isActive], map: "MissionHubContact_orgUser_idx")
+  @@index([organizationId, userId, email], map: "MissionHubContact_orgUser_email_idx")
+}
+
+model MissionHubContactList {
+  id              String   @id
+  organizationId  String
+  userId          String
+  name            String
+  description     String?
+  type            String?
+  contactIds      Json     @default("[]")
+  tags            Json     @default("[]")
+  archivedAt      DateTime?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @default(now())
+
+  @@index([organizationId, userId, isActive], map: "MissionHubContactList_orgUser_idx")
+}
+
 // ─── End Mission Hub ──────────────────────────────────────────────────────────
 
 // ─── Financial Hub ───────────────────────────────────────────────────────────
