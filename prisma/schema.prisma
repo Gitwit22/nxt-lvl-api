@@ -890,11 +890,25 @@ model MissionHubOrganizationSettings {
   orgDisplayName    String   @default("")
   fiscalYearStart   String   @default("01-01") // MM-DD format
   defaultTimezone   String   @default("America/New_York")
+  selectedStorageEndpointId String?
   expenseCategories Json     @default("[]")   // string[] of custom category names
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
   @@index([organizationId])
+}
+
+model MissionHubSession {
+  id            String   @id @default(cuid())
+  userId        String
+  organizationId String
+  expiresAt     DateTime
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([userId])
+  @@index([organizationId])
+  @@index([expiresAt])
 }
 
 model MissionHubScheduledReport {

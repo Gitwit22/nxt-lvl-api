@@ -100,18 +100,93 @@ function decodeMissionHubToken(token: string): MissionHubTokenPayload | undefine
   }
 }
 
-function requireMissionHubAuth(req: Request, res: Response, next: NextFunction): void {
+function readMissionHubSessionId(req: Request): string | undefined {
+  const fromParsedCookies = req.cookies?.missionHubSessionId;
+  if (typeof fromParsedCookies === "string" && fromParsedCookies.trim()) {
+    return fromParsedCookies;
+  }
+
+  const cookieHeader = req.headers.cookie;
+  if (!cookieHeader) return undefined;
+  for (const item of cookieHeader.split(";")) {
+    const [rawKey, ...rawValue] = item.trim().split("=");
+    if (rawKey?.trim() === "missionHubSessionId") {
+      return decodeURIComponent(rawValue.join("=") || "");
+    }
+  }
+  return undefined;
+}
+
+async function requireMissionHubAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const token = readTokenFromRequest(req);
-  if (!token) {
+  if (token) {
+    const payload = decodeMissionHubToken(token);
+    if (payload) {
+      (req as Request & { missionHubUser: MissionHubTokenPayload }).missionHubUser = payload;
+      next();
+      return;
+    }
+  }
+
+  const sessionId = readMissionHubSessionId(req);
+  if (!sessionId) {
     res.status(401).json({ error: "Authentication required" });
     return;
   }
-  const payload = decodeMissionHubToken(token);
-  if (!payload) {
-    res.status(401).json({ error: "Invalid or expired token" });
+
+  const db = getInviteStore();
+  const session = await (db as unknown as {
+    missionHubSession: {
+      findUnique: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      delete: (args: Record<string, unknown>) => Promise<unknown>;
+    };
+  }).missionHubSession.findUnique({
+    where: { id: sessionId },
+  } as Record<string, unknown>) as Record<string, unknown> | null;
+
+  if (!session) {
+    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    res.status(401).json({ error: "Invalid session" });
     return;
   }
-  (req as Request & { missionHubUser: MissionHubTokenPayload }).missionHubUser = payload;
+
+  const expiresAt = session.expiresAt instanceof Date
+    ? session.expiresAt
+    : new Date(String(session.expiresAt));
+  if (Number.isNaN(expiresAt.getTime()) || expiresAt < new Date()) {
+    try {
+      await (db as unknown as {
+        missionHubSession: { delete: (args: Record<string, unknown>) => Promise<unknown> };
+      }).missionHubSession.delete({
+        where: { id: sessionId },
+      } as Record<string, unknown>);
+    } catch {
+      // Session can already be deleted. Continue clearing cookie.
+    }
+    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    res.status(401).json({ error: "Session expired" });
+    return;
+  }
+
+  const user = await (db as unknown as {
+    user: { findUnique: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  }).user.findUnique({
+    where: { id: session.userId as string },
+  } as Record<string, unknown>) as Record<string, unknown> | null;
+
+  if (!user) {
+    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    res.status(401).json({ error: "User not found" });
+    return;
+  }
+
+  (req as Request & { missionHubUser: MissionHubTokenPayload }).missionHubUser = {
+    userId: String(user.id || ""),
+    email: String(user.email || ""),
+    role: String(user.role || "member"),
+    organizationId: String(session.organizationId || ""),
+    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+  };
   next();
 }
 
@@ -380,20 +455,33 @@ router.post("/auth/login", async (req, res) => {
     where: { organizationId: user.organizationId, email },
   }) as Record<string, unknown> | null;
 
-  const token = signToken({
-    userId: user.id,
-    email: user.email,
-    role: user.role,
-    organizationId: user.organizationId,
-    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+  // Create a server-backed session (valid for 30 days)
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const session = await (db as unknown as {
+    missionHubSession: { create: (a: Record<string, unknown>) => Promise<{ id: string }> }
+  }).missionHubSession.create({
+    data: {
+      userId: user.id,
+      organizationId: user.organizationId,
+      expiresAt,
+    },
+  } as Record<string, unknown>) as { id: string };
+
+  // Set HTTP-only cookie with session ID (not the full token)
+  res.cookie("missionHubSessionId", session.id, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days in milliseconds
+    path: "/",
   });
 
   await ensureMissionHubSubscription(user.organizationId);
 
   logger.info("[mission-hub] User logged in", { userId: user.id, organizationId: user.organizationId });
 
+  // Return user info without the token (session is managed via secure cookie)
   res.json({
-    token,
     user: {
       id: user.id,
       email: user.email,
@@ -406,6 +494,95 @@ router.post("/auth/login", async (req, res) => {
       personnelId: personnel ? String(personnel.id) : undefined,
     },
   });
+});
+
+// Check if user has a valid session cookie and return their user info
+router.get("/session", async (req, res) => {
+  const sessionId = req.cookies?.missionHubSessionId || req.cookies?.["missionHubSessionId"];
+  if (!sessionId) {
+    res.status(401).json({ error: "No session" });
+    return;
+  }
+
+  const db = getInviteStore();
+
+  // Find and validate the session
+  const session = await (db as unknown as {
+    missionHubSession: { findUnique: (a: Record<string, unknown>) => Promise<Record<string, unknown> | null> }
+  }).missionHubSession.findUnique({
+    where: { id: sessionId },
+  } as Record<string, unknown>) as Record<string, unknown> | null;
+
+  const sessionExpiresAt = session
+    ? (session.expiresAt instanceof Date ? session.expiresAt : new Date(String(session.expiresAt)))
+    : null;
+
+  if (!session || !sessionExpiresAt || Number.isNaN(sessionExpiresAt.getTime()) || sessionExpiresAt < new Date()) {
+    // Session expired or invalid
+    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    res.status(401).json({ error: "Session expired" });
+    return;
+  }
+
+  const userId = session.userId as string;
+  const organizationId = session.organizationId as string;
+
+  // Fetch user data
+  type UserRow = {
+    id: string; email: string; role: string;
+    firstName: string; lastName: string; displayName: string;
+  };
+  const user = await (db as unknown as { user: { findUnique: (a: Record<string, unknown>) => Promise<UserRow | null> } })
+    .user.findUnique({ where: { id: userId } }) as UserRow | null;
+
+  if (!user) {
+    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    res.status(401).json({ error: "User not found" });
+    return;
+  }
+
+  // Find their MissionHubPersonnel record (if any)
+  const personnel = await db.missionHubPersonnel.findFirst({
+    where: { organizationId, email: user.email },
+  }) as Record<string, unknown> | null;
+
+  logger.info("[mission-hub] Session validated", { userId, organizationId });
+
+  res.json({
+    user: {
+      id: user.id,
+      email: user.email,
+      role: user.role,
+      firstName: user.firstName,
+      lastName: user.lastName,
+      displayName: user.displayName,
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      personnelId: personnel ? String(personnel.id) : undefined,
+    },
+  });
+});
+
+// Logout: invalidate the session
+router.post("/logout", async (req, res) => {
+  const sessionId = req.cookies?.missionHubSessionId || req.cookies?.["missionHubSessionId"];
+  
+  if (sessionId) {
+    const db = getInviteStore();
+    try {
+      await (db as unknown as {
+        missionHubSession: { delete: (a: Record<string, unknown>) => Promise<unknown> }
+      }).missionHubSession.delete({
+        where: { id: sessionId },
+      } as Record<string, unknown>);
+    } catch {
+      // Session already deleted or doesn't exist, that's fine
+    }
+  }
+
+  // Clear the session cookie
+  res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+  res.json({ success: true });
 });
 
 router.post("/auth/forgot-password", async (req, res) => {
@@ -659,7 +836,28 @@ router.post("/platform-auth/consume", async (req, res) => {
     programDomain: MISSION_HUB_PROGRAM_DOMAIN,
   });
 
+  const db = getInviteStore();
+  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  const session = await (db as unknown as {
+    missionHubSession: { create: (args: Record<string, unknown>) => Promise<{ id: string }> };
+  }).missionHubSession.create({
+    data: {
+      userId: claims.userId,
+      organizationId: claims.organizationId,
+      expiresAt,
+    },
+  } as Record<string, unknown>) as { id: string };
+
   const secureCookie = process.env.NODE_ENV === "production";
+  res.cookie("missionHubSessionId", session.id, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: secureCookie ? "none" : "lax",
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+    path: "/",
+  });
+
+  // Keep legacy token cookie while clients transition to session-backed auth.
   res.cookie("missionHubToken", missionHubToken, {
     httpOnly: true,
     secure: secureCookie,
@@ -3536,7 +3734,14 @@ router.get("/organization-settings", requireMissionHubAuth, async (req, res) => 
   const settings = await store.missionHubOrganizationSettings.findUnique({ where: { organizationId } });
   if (!settings) {
     // Return defaults for org with no settings yet — do not 404.
-    res.json({ organizationId, orgDisplayName: "", fiscalYearStart: "01-01", defaultTimezone: "America/New_York", expenseCategories: [] });
+    res.json({
+      organizationId,
+      orgDisplayName: "",
+      fiscalYearStart: "01-01",
+      defaultTimezone: "America/New_York",
+      selectedStorageEndpointId: null,
+      expenseCategories: [],
+    });
     return;
   }
   res.json(settings);
@@ -3554,6 +3759,29 @@ router.put("/organization-settings", requireMissionHubAuth, async (req, res) => 
   if (typeof body.orgDisplayName === "string") data.orgDisplayName = body.orgDisplayName.trim();
   if (typeof body.fiscalYearStart === "string") data.fiscalYearStart = body.fiscalYearStart.trim();
   if (typeof body.defaultTimezone === "string") data.defaultTimezone = body.defaultTimezone.trim();
+  if (body.selectedStorageEndpointId === null) {
+    data.selectedStorageEndpointId = null;
+  } else if (typeof body.selectedStorageEndpointId === "string") {
+    const selectedStorageEndpointId = body.selectedStorageEndpointId.trim();
+    if (!selectedStorageEndpointId) {
+      data.selectedStorageEndpointId = null;
+    } else {
+      const endpointStore = prisma as unknown as EndpointStore;
+      const endpoint = await endpointStore.missionHubStorageEndpoint.findFirst({
+        where: {
+          id: selectedStorageEndpointId,
+          organizationId,
+          programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+          enabled: true,
+        },
+      });
+      if (!endpoint) {
+        res.status(400).json({ error: "selectedStorageEndpointId is invalid for this organization." });
+        return;
+      }
+      data.selectedStorageEndpointId = selectedStorageEndpointId;
+    }
+  }
   if (Array.isArray(body.expenseCategories)) data.expenseCategories = body.expenseCategories.filter((c: unknown) => typeof c === "string");
   const settings = await store.missionHubOrganizationSettings.upsert({
     where: { organizationId },
