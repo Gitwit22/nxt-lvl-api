@@ -1642,7 +1642,7 @@ router.put("/expenses/:id", requireMissionHubAuth, async (req, res) => {
   if (isApprovalChange) {
     void auditMissionHubEvent(req, "expense.approval.changed", getUser(req), {
       resourceType: "expense",
-      resourceId: req.params.id,
+      resourceId: String(req.params.id),
       oldValue: { approvalStatus: currentApprovalStatus },
       newValue: { approvalStatus: nextApprovalStatus },
       metadata: { source: "expenses.put" },
@@ -1679,7 +1679,7 @@ router.post("/expenses/:id/approve", requireMissionHubAuth, async (req, res) => 
 
   void auditMissionHubEvent(req, "expense.approve", user, {
     resourceType: "expense",
-    resourceId: req.params.id,
+    resourceId: String(req.params.id),
     oldValue: { approvalStatus: (existing as Record<string, unknown>).approvalStatus },
     newValue: { approvalStatus: "Approved" },
   });
@@ -1718,7 +1718,7 @@ router.post("/expenses/:id/reject", requireMissionHubAuth, async (req, res) => {
 
   void auditMissionHubEvent(req, "expense.reject", user, {
     resourceType: "expense",
-    resourceId: req.params.id,
+    resourceId: String(req.params.id),
     oldValue: { approvalStatus: (existing as Record<string, unknown>).approvalStatus },
     newValue: { approvalStatus: "Rejected", reviewerNote: reviewerNote || null },
   });
@@ -1739,7 +1739,7 @@ router.delete("/expenses/:id", requireMissionHubAuth, async (req, res) => {
   await store.missionHubExpense.update({ where: { id: req.params.id }, data: { isActive: false } });
   void auditMissionHubEvent(req, "expense.delete", getUser(req), {
     resourceType: "expense",
-    resourceId: req.params.id,
+    resourceId: String(req.params.id),
     oldValue: existing,
     newValue: { isActive: false },
   });
@@ -3835,7 +3835,7 @@ router.get("/documents/:id", requireMissionHubAuth, async (req, res) => {
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
   void auditMissionHubEvent(req, "document.view", getUser(req), {
     resourceType: "document",
-    resourceId: req.params.id,
+    resourceId: String(req.params.id),
     metadata: { linkedEntityType: typeof doc.linkedEntityType === "string" ? doc.linkedEntityType : null },
   });
   res.json(doc);
@@ -3916,7 +3916,7 @@ router.put("/documents/:id", requireMissionHubAuth, async (req, res) => {
   const updated = await store.missionHubDocument.update({ where: { id: req.params.id }, data });
   void auditMissionHubEvent(req, "document.update", getUser(req), {
     resourceType: "document",
-    resourceId: req.params.id,
+    resourceId: String(req.params.id),
     oldValue: existing,
     newValue: updated,
   });
@@ -3931,7 +3931,7 @@ router.delete("/documents/:id", requireMissionHubAuth, async (req, res) => {
   await store.missionHubDocument.update({ where: { id: req.params.id }, data: { isActive: false, deletedAt: new Date(), deletedByUserId: getUser(req).userId } });
   void auditMissionHubEvent(req, "document.delete", getUser(req), {
     resourceType: "document",
-    resourceId: req.params.id,
+    resourceId: String(req.params.id),
     oldValue: existing,
     newValue: { isActive: false, deletedAt: new Date().toISOString() },
   });
