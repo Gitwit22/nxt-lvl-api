@@ -2077,6 +2077,88 @@ router.delete("/personnel/:id", requireMissionHubAuth, async (req, res) => {
   res.status(204).send();
 });
 
+// ─── Access Controls ─────────────────────────────────────────────────────────
+
+router.get("/access-controls", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const store = prisma as unknown as {
+    missionHubPersonnel: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+  };
+
+  const rows = await store.missionHubPersonnel.findMany({
+    where: { organizationId, isActive: true },
+    orderBy: [{ lastName: "asc" }, { firstName: "asc" }],
+  });
+
+  const accessControls = rows.map((person) => ({
+    id: String(person.id || ""),
+    personnelId: String(person.id || ""),
+    role: String(person.role || "Admin"),
+    permissions: [],
+    effectiveDate: person.createdAt instanceof Date
+      ? person.createdAt.toISOString().slice(0, 10)
+      : String(person.createdAt || "").slice(0, 10),
+    expiryDate: null,
+    notes: String(person.notes || ""),
+    createdAt: person.createdAt,
+    updatedAt: person.updatedAt,
+  }));
+
+  res.json(accessControls);
+});
+
+router.put("/access-controls/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    missionHubPersonnel: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.missionHubPersonnel.findFirst({
+    where: { id: req.params.id, organizationId, isActive: true },
+  });
+
+  if (!existing) {
+    res.status(404).json({ error: "Access control record not found" });
+    return;
+  }
+
+  const data: Record<string, unknown> = {};
+  if (typeof body.role === "string") data.role = body.role;
+  if (typeof body.accessLevel === "string") data.accessLevel = body.accessLevel;
+  if (typeof body.notes === "string") data.notes = body.notes;
+
+  if (Object.keys(data).length > 0) {
+    await store.missionHubPersonnel.update({ where: { id: req.params.id }, data });
+  }
+
+  const refreshed = await store.missionHubPersonnel.findFirst({
+    where: { id: req.params.id, organizationId, isActive: true },
+  });
+
+  if (!refreshed) {
+    res.status(404).json({ error: "Access control record not found" });
+    return;
+  }
+
+  res.json({
+    id: String(refreshed.id || ""),
+    personnelId: String(refreshed.id || ""),
+    role: String(refreshed.role || "Admin"),
+    permissions: [],
+    effectiveDate: refreshed.createdAt instanceof Date
+      ? refreshed.createdAt.toISOString().slice(0, 10)
+      : String(refreshed.createdAt || "").slice(0, 10),
+    expiryDate: null,
+    notes: String(refreshed.notes || ""),
+    createdAt: refreshed.createdAt,
+    updatedAt: refreshed.updatedAt,
+  });
+});
+
 // ─── Invites (admin) ──────────────────────────────────────────────────────────
 
 router.get("/invites", requireMissionHubAuth, async (req, res) => {

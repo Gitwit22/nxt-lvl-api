@@ -1196,6 +1196,123 @@ model Document {
   @@index([organizationId, programDomain, splitReviewRequired, updatedAt])
 }
 
+// ─── Finance Hub: Payee & Tax Identity Management ────────────────────────────
+
+model Payee {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  payeeType             String   // w2_employee | contractor_1099 | vendor_business | volunteer | board_member | stipend_honorarium_recipient | reimbursement_only
+
+  legalName             String
+  businessName          String?
+  dbaName               String?
+  preferredName         String?
+
+  address               String?
+  phone                 String?
+  email                 String?
+
+  startDate             DateTime?
+  endDate               DateTime?
+  employmentStatus      String?  // active | inactive | terminated
+
+  relationshipType      String?  // board | volunteer | intern | community_partner | participant
+  jobTitle              String?
+  department            String?
+  program               String?
+  supervisor            String?
+
+  compensationModel     String?  // hourly | salary | stipend | project | flat_fee | reimbursement_only
+  payRate               Float?
+  payFrequency          String?
+  standardHours         Float?
+  fteStatus             String?
+
+  w4Status              String?  // received | missing | not_required
+  w9Status              String?  // received | missing | not_required
+  directDepositStatus   String?  // received | missing | not_required
+  is1099Eligible        String?  // yes | no | unknown
+  benefitsEligible      String?  // yes | no | unknown
+
+  insuranceDeductionAmount Float?
+  retirementDeductionAmount Float?
+  insuranceCertificateStatus String?  // received | missing | not_required
+
+  paymentTerms          String?
+  serviceCategory       String?
+  emergencyContact      String?
+  notes                 String?
+
+  eligiblePaymentTypes  String[] // reimbursement | stipend | mileage | gift_card | honorarium
+  uploadedDocuments     String[] // w4 | i9 | id_or_license | w9 | contract | etc.
+
+  hasTaxIdentity        Boolean  @default(false)
+  taxIdStatus           String?  // collected | verified | needs_correction | missing
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  createdByUserId       String?
+  updatedByUserId       String?
+
+  secureTaxIdentity     PayeeSecureTaxIdentity?
+  auditLogs             AuditLog[]
+
+  @@index([organizationId])
+  @@index([organizationId, payeeType])
+  @@index([organizationId, employmentStatus])
+  @@index([organizationId, hasTaxIdentity])
+}
+
+model PayeeSecureTaxIdentity {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  payeeId               String   @unique
+  
+  taxIdType             String   // SSN | EIN | ITIN | UNKNOWN
+  encryptedTaxId        String   @db.Text
+  taxIdLast4            String   // Last 4 digits for display, e.g., "1234"
+  taxIdHash             String   // SHA-256 hash of formatted tax ID for duplicate detection (never exposed)
+  
+  taxIdStatus           String   // Missing | Collected | Verified | Needs correction
+  taxIdVerifiedAt       DateTime?
+  
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+  createdByUserId       String
+  updatedByUserId       String
+
+  payee                 Payee    @relation(fields: [payeeId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([organizationId, payeeId])
+  @@index([organizationId, taxIdHash])
+}
+
+model AuditLog {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  payeeId               String
+  
+  action                String   // tax_id_created | tax_id_updated | tax_id_revealed | tax_id_deleted | tax_id_verification_status_changed
+  actionType            String   // CREATE | UPDATE | READ | DELETE
+  
+  userId                String   // User who performed the action
+  userEmail             String?
+  
+  details               Json?    // Additional context about the action
+  ipAddress             String?
+  userAgent             String?
+  
+  createdAt             DateTime @default(now())
+
+  payee                 Payee    @relation(fields: [payeeId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@index([organizationId, payeeId])
+  @@index([organizationId, action, createdAt])
+  @@index([userId, createdAt])
+}
+
 model DocumentLink {
   id             String   @id @default(cuid())
   organizationId String

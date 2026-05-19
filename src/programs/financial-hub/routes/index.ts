@@ -15,6 +15,7 @@ import {
 import { hashPassword, signToken } from "../../../core/auth/auth.service.js";
 import { resolveStorageAdapter } from "../../../core/storage/storageResolver.js";
 import { logger } from "../../../logger.js";
+import { taxIdentityRouter } from "./taxIdentity.routes.js";
 
 const router = express.Router();
 
@@ -77,6 +78,26 @@ const RECEIPT_ANALYZE_MIME_TYPES = new Set([
 ]);
 const RECEIPT_ANALYZE_ALLOWED_EXTENSIONS = new Set([".pdf", ".jpg", ".jpeg", ".png", ".webp"]);
 const DATA_CLASSIFICATIONS = new Set(["public", "internal", "confidential", "restricted"]);
+const FINANCE_STATE_PROGRAM_DOMAIN = `${FINANCIAL_HUB_PROGRAM_DOMAIN}:state`;
+const FINANCE_STATE_MAX_BYTES = 1024 * 1024; // 1MB safety cap per org snapshot
+const FINANCE_STATE_ALLOWED_KEYS = new Set([
+  "fcc_guided_task_runs",
+  "fcc_generated_forms",
+  "fcc_export_records",
+  "fcc_export_templates",
+  "fcc_transactions",
+  "fcc_deposits",
+  "fcc_grants",
+  "fcc_review_queue",
+  "fcc_month_close",
+  "fcc_payroll_intake",
+  "fcc_payees",
+  "fcc_bank_accounts",
+  "fcc_opening_balance_corrections",
+  "fcc_account_adjustments",
+  "fcc_account_reconciliations",
+  "fcc_mock_data_purged",
+]);
 
 type DataClassification = "public" | "internal" | "confidential" | "restricted";
 type FinanceHubNormalizedRole =
@@ -483,6 +504,45 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+function normalizeFinanceStateSnapshot(value: unknown): Record<string, string> {
+  if (!isRecord(value)) {
+    throw new Error("Invalid state payload");
+  }
+
+  const normalized: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value)) {
+    if (!FINANCE_STATE_ALLOWED_KEYS.has(key)) {
+      continue;
+    }
+    if (typeof raw !== "string") {
+      continue;
+    }
+    normalized[key] = raw;
+  }
+
+  const bytes = Buffer.byteLength(JSON.stringify(normalized), "utf8");
+  if (bytes > FINANCE_STATE_MAX_BYTES) {
+    throw new Error("Finance state payload exceeds 1MB limit");
+  }
+
+  return normalized;
+}
+
+function readFinanceStateFromProgramSettings(settings: unknown): Record<string, string> {
+  if (!isRecord(settings)) return {};
+  const nested = isRecord(settings.state) ? settings.state : settings;
+  const state: Record<string, string> = {};
+
+  for (const key of FINANCE_STATE_ALLOWED_KEYS) {
+    const raw = nested[key];
+    if (typeof raw === "string") {
+      state[key] = raw;
+    }
+  }
+
+  return state;
+}
+
 function validatePassword(password: string): string | null {
   if (!password || password.length < 8) {
     return "Password must be at least 8 characters";
@@ -878,6 +938,80 @@ router.get("/me", requireFinancialHubAuth, async (req, res) => {
       programDomain: FINANCIAL_HUB_PROGRAM_DOMAIN,
       capabilities: (profile?.capabilities as Record<string, boolean> | undefined) || DEFAULT_CAPABILITIES,
     },
+  });
+});
+
+router.get("/finance/state", requireFinancialHubAuth, async (req, res) => {
+  const user = getFinancialHubUser(req);
+
+  const row = await prisma.programStorageSettings.findUnique({
+    where: {
+      organizationId_programDomain: {
+        organizationId: user.organizationId,
+        programDomain: FINANCE_STATE_PROGRAM_DOMAIN,
+      },
+    },
+  });
+
+  const state = readFinanceStateFromProgramSettings(row?.settings);
+  res.json({
+    state,
+    updatedAt: row?.updatedAt?.toISOString() || null,
+    organizationId: user.organizationId,
+  });
+});
+
+router.put("/finance/state", requireFinancialHubAuth, async (req, res) => {
+  const user = getFinancialHubUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+
+  if (!isRecord(body.state)) {
+    res.status(400).json({ error: "Invalid payload. Expected { state: Record<string, string> }" });
+    return;
+  }
+
+  let state: Record<string, string>;
+  try {
+    state = normalizeFinanceStateSnapshot(body.state);
+  } catch (error) {
+    res.status(400).json({
+      error: error instanceof Error ? error.message : "Invalid finance state payload",
+    });
+    return;
+  }
+
+  const settingsPayload: Prisma.InputJsonValue = {
+    state,
+    updatedByUserId: user.userId,
+    updatedByRole: user.role,
+    updatedAt: new Date().toISOString(),
+  };
+
+  const saved = await prisma.programStorageSettings.upsert({
+    where: {
+      organizationId_programDomain: {
+        organizationId: user.organizationId,
+        programDomain: FINANCE_STATE_PROGRAM_DOMAIN,
+      },
+    },
+    update: {
+      settings: settingsPayload,
+    },
+    create: {
+      organizationId: user.organizationId,
+      programDomain: FINANCE_STATE_PROGRAM_DOMAIN,
+      settings: settingsPayload,
+    },
+  });
+
+  auditFinanceHubEvent("finance.state.update", user, {
+    keyCount: Object.keys(state).length,
+  });
+
+  res.json({
+    state,
+    updatedAt: saved.updatedAt.toISOString(),
+    organizationId: user.organizationId,
   });
 });
 
@@ -1551,5 +1685,8 @@ router.patch("/settings", requireFinancialHubAuth, async (req, res) => {
 
   res.json({ settings: saved.settings });
 });
+
+// Mount tax identity routes
+router.use("/", taxIdentityRouter);
 
 export { router as financialHubRouter };
