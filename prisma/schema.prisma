@@ -369,7 +369,7 @@ model TimeflowProjectBill {
   id             String   @id @default(cuid())
   organizationId String
   userId         String
-  projectId      String?
+  projectId      String
   clientId       String
   title          String
   amount         Float    @default(0)
