@@ -10,11 +10,14 @@ import express, { type NextFunction, type Request, type Response } from "express
 import jwt from "jsonwebtoken";
 import crypto from "crypto";
 import path from "path";
+import JSZip from "jszip";
 import rateLimit from "express-rate-limit";
 import { prisma } from "../../../core/db/prisma.js";
 import { JWT_SECRET, PLATFORM_LAUNCH_TOKEN_SECRET, FRONTEND_BASE_URL } from "../../../core/config/env.js";
 import { signToken, hashPassword, verifyPassword } from "../../../core/auth/auth.service.js";
 import { requireProgramSubscription } from "../../../core/middleware/program-access.middleware.js";
+import { upload } from "../../../validators.js";
+import { resolveStorageAdapter, StorageConfigError } from "../../../core/storage/storageResolver.js";
 import {
   issueMissionHubInvite,
   resendMissionHubInvite,
@@ -79,6 +82,7 @@ const MISSION_HUB_ALLOWED_DOCUMENT_EXTENSIONS = new Set([
   ".heif",
 ]);
 const MISSION_HUB_ALLOWED_SENSITIVITY = new Set(["public", "internal", "confidential", "restricted"]);
+const MISSION_HUB_DOCUMENT_EXPORT_TTL_HOURS = 24;
 
 const EXPENSE_APPROVER_ROLES = new Set(["admin", "reviewer", "finance", "executive director", "deputy director"]);
 
@@ -99,6 +103,254 @@ function sanitizeMissionHubFilename(filename: string): string {
   const noControls = base.replace(/[\u0000-\u001f\u007f]/g, "");
   const safe = noControls.replace(/[^a-zA-Z0-9._ -]/g, "_").trim();
   return safe || "document";
+}
+
+function buildPartitionedKey(args: {
+  prefix: string;
+  programDomain: string;
+  organizationId: string;
+  userId: string;
+  stamp: string;
+  safeFileName: string;
+}): string {
+  const keyParts = [
+    args.prefix.replace(/^\/+|\/+$/g, ""),
+    args.programDomain,
+    args.organizationId,
+    args.userId,
+  ].filter(Boolean);
+
+  return `${keyParts.join("/")}/${args.stamp}-${args.safeFileName}`;
+}
+
+function parseRouteId(value: string | string[] | undefined): string | null {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value) && typeof value[0] === "string") return value[0];
+  return null;
+}
+
+function isMissionHubDocumentEntityType(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return new Set([
+    "program",
+    "project",
+    "grant",
+    "sponsor",
+    "fundraising",
+    "event",
+    "expense",
+    "personnel",
+    "employee",
+  ]).has(normalized);
+}
+
+function isMissionHubDocumentLinkType(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  const normalized = value.trim().toLowerCase();
+  return new Set([
+    "attachment",
+    "receipt",
+    "invoice",
+    "agreement",
+    "award_letter",
+    "report",
+    "reimbursement_backup",
+    "proof",
+    "logo",
+    "tax_form",
+    "payment_confirmation",
+    "supporting_document",
+  ]).has(normalized);
+}
+
+function normalizeEntityType(value: unknown): string | null {
+  if (!isMissionHubDocumentEntityType(value)) return null;
+  return value.trim().toLowerCase();
+}
+
+function normalizeLinkType(value: unknown): string | null {
+  if (!isMissionHubDocumentLinkType(value)) return null;
+  return value.trim().toLowerCase();
+}
+
+function getMissionHubDocumentClient() {
+  return (prisma as unknown as {
+    missionHubDocument: {
+      findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      delete: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  }).missionHubDocument;
+}
+
+function getMissionHubDocumentLinkClient() {
+  return (prisma as unknown as {
+    missionHubDocumentLink: {
+      findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      delete: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  }).missionHubDocumentLink;
+}
+
+function getMissionHubDocumentExportClient() {
+  return (prisma as unknown as {
+    missionHubDocumentExport: {
+      findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  }).missionHubDocumentExport;
+}
+
+function toIsoString(value: unknown): string {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "string") return value;
+  return "";
+}
+
+function csvEscape(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  const raw = String(value);
+  if (/[",\n\r]/.test(raw)) {
+    return `"${raw.replace(/"/g, '""')}"`;
+  }
+  return raw;
+}
+
+function buildDocumentExportCsv(docs: Record<string, unknown>[]): string {
+  const header = [
+    "id",
+    "title",
+    "originalFilename",
+    "mimeType",
+    "sizeBytes",
+    "storageKey",
+    "storageProvider",
+    "linkedEntityType",
+    "linkedEntityId",
+    "createdAt",
+  ];
+
+  const rows = docs.map((doc) => [
+    String(doc.id ?? ""),
+    String(doc.title ?? ""),
+    String(doc.originalFilename ?? ""),
+    String(doc.mimeType ?? ""),
+    String(doc.sizeBytes ?? 0),
+    String(doc.storageKey ?? ""),
+    String(doc.storageProvider ?? ""),
+    String(doc.linkedEntityType ?? ""),
+    String(doc.linkedEntityId ?? ""),
+    toIsoString(doc.createdAt),
+  ]);
+
+  return [header, ...rows].map((row) => row.map((cell) => csvEscape(cell)).join(",")).join("\n");
+}
+
+async function hasMissionHubEntityReadAccess(
+  entityType: string,
+  entityId: string,
+  organizationId: string,
+  role: string,
+): Promise<boolean> {
+  if ((entityType === "personnel" || entityType === "employee") && !isAdminRole(role)) {
+    return false;
+  }
+  if (entityType === "expense" && !(canApproveExpenses(role) || canWriteDocuments(role) || isAdminRole(role))) {
+    return false;
+  }
+  return resolveMissionHubEntityAccess(entityType, entityId, organizationId);
+}
+
+async function canReadMissionHubDocument(
+  doc: Record<string, unknown>,
+  organizationId: string,
+  role: string,
+): Promise<boolean> {
+  const directEntityType = normalizeEntityType(doc.linkedEntityType);
+  const directEntityId = typeof doc.linkedEntityId === "string" ? doc.linkedEntityId : null;
+
+  if (directEntityType && directEntityId) {
+    const directAllowed = await hasMissionHubEntityReadAccess(directEntityType, directEntityId, organizationId, role);
+    if (!directAllowed) {
+      return false;
+    }
+  }
+
+  const linkClient = getMissionHubDocumentLinkClient();
+  const links = await linkClient.findMany({
+    where: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      documentId: String(doc.id ?? ""),
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  if (!links.length) {
+    return true;
+  }
+
+  for (const link of links) {
+    const entityType = normalizeEntityType(link.entityType);
+    const entityId = typeof link.entityId === "string" ? link.entityId : null;
+    if (!entityType || !entityId) {
+      continue;
+    }
+    const allowed = await hasMissionHubEntityReadAccess(entityType, entityId, organizationId, role);
+    if (allowed) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+async function resolveMissionHubEntityAccess(
+  entityType: string,
+  entityId: string,
+  organizationId: string,
+): Promise<boolean> {
+  const store = prisma as unknown as Record<string, { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> }>;
+  const entityModel =
+    entityType === "program" ? "missionHubProgram"
+      : entityType === "project" ? "missionHubProject"
+        : entityType === "grant" ? "missionHubGrant"
+          : entityType === "sponsor" ? "missionHubSponsor"
+            : entityType === "fundraising" ? "missionHubCampaign"
+              : entityType === "event" ? "missionHubEvent"
+                : entityType === "expense" ? "missionHubExpense"
+                  : entityType === "personnel" || entityType === "employee" ? "missionHubPersonnel"
+                    : "";
+
+  if (!entityModel || !(entityModel in store)) return false;
+
+  const client = store[entityModel];
+  const record = await client.findFirst({ where: { id: entityId, organizationId, isActive: true } });
+  return Boolean(record);
+}
+
+function toMissionHubDocumentLink(link: Record<string, unknown>) {
+  return {
+    id: String(link.id),
+    organizationId: String(link.organizationId),
+    programDomain: String(link.programDomain ?? MISSION_HUB_PROGRAM_DOMAIN),
+    documentId: String(link.documentId),
+    entityType: String(link.entityType),
+    entityId: String(link.entityId),
+    linkType: String(link.linkType ?? "attachment"),
+    notes: typeof link.notes === "string" ? link.notes : null,
+    sourceContext: typeof link.sourceContext === "string" ? link.sourceContext : null,
+    createdByUserId: typeof link.createdByUserId === "string" ? link.createdByUserId : null,
+    createdAt: link.createdAt instanceof Date ? link.createdAt.toISOString() : String(link.createdAt ?? ""),
+    updatedAt: link.updatedAt instanceof Date ? link.updatedAt.toISOString() : String(link.updatedAt ?? ""),
+  };
 }
 
 async function auditMissionHubEvent(
@@ -344,6 +596,7 @@ const TIME_ENTRY_STATUSES = new Set([
 const TIMESHEET_APPROVER_ROLES = new Set(["finance", "admin", "executive director", "deputy director", "reviewer"]);
 const TIMESHEET_PROCESSOR_ROLES = new Set(["finance", "admin", "executive director", "deputy director"]);
 const TIMESHEET_EXPORTER_ROLES = new Set(["finance", "admin", "executive director", "deputy director"]);
+const DOCUMENT_WRITE_ROLES = new Set(["staff", "uploader", "reviewer", "finance", "admin", "executive director", "deputy director"]);
 const ADMIN_ROLES = new Set(["admin", "executive director", "deputy director"]);
 
 // Personnel roles that require the requester to hold an admin role to assign.
@@ -402,6 +655,19 @@ function canProcessTimesheets(role: unknown): boolean {
 
 function canExportTimesheets(role: unknown): boolean {
   return TIMESHEET_EXPORTER_ROLES.has(normalizeRoleValue(role));
+}
+
+function canWriteDocuments(role: unknown): boolean {
+  return DOCUMENT_WRITE_ROLES.has(normalizeRoleValue(role));
+}
+
+function requireMissionHubDocumentWrite(req: Request, res: Response, next: NextFunction): void {
+  const { role } = getUser(req);
+  if (!canWriteDocuments(role)) {
+    res.status(403).json({ error: "Missing capability: canWriteDocuments." });
+    return;
+  }
+  next();
 }
 
 function isAdminRole(role: unknown): boolean {
@@ -3896,25 +4162,284 @@ type DocStore = {
     findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
     create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
     update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    delete: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+  missionHubDocumentLink: {
+    findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    delete: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+  missionHubDocumentExport: {
+    findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
   };
 };
 
 router.get("/documents", requireMissionHubAuth, async (req, res) => {
-  const { organizationId } = getUser(req);
+  const { organizationId, role } = getUser(req);
   const { linkedEntityType, linkedEntityId } = req.query;
   const store = prisma as unknown as DocStore;
   const where: Record<string, unknown> = { organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, isActive: true, deletedAt: null };
-  if (typeof linkedEntityType === "string") where.linkedEntityType = linkedEntityType;
+
+  if (typeof linkedEntityType === "string" && typeof linkedEntityId === "string") {
+    const normalizedEntityType = normalizeEntityType(linkedEntityType);
+    if (!normalizedEntityType) {
+      res.status(400).json({ error: "Invalid linkedEntityType" });
+      return;
+    }
+    const allowed = await hasMissionHubEntityReadAccess(normalizedEntityType, linkedEntityId, organizationId, role);
+    if (!allowed) {
+      res.status(403).json({ error: "You do not have access to linked entity documents." });
+      return;
+    }
+    where.linkedEntityType = normalizedEntityType;
+  } else if (typeof linkedEntityType === "string") {
+    const normalizedEntityType = normalizeEntityType(linkedEntityType);
+    if (!normalizedEntityType) {
+      res.status(400).json({ error: "Invalid linkedEntityType" });
+      return;
+    }
+    where.linkedEntityType = normalizedEntityType;
+  }
+
   if (typeof linkedEntityId === "string") where.linkedEntityId = linkedEntityId;
+
   const docs = await store.missionHubDocument.findMany({ where, orderBy: { createdAt: "desc" } });
-  res.json(docs);
+  const readableDocs: Record<string, unknown>[] = [];
+  for (const doc of docs) {
+    const allowed = await canReadMissionHubDocument(doc, organizationId, role);
+    if (allowed) readableDocs.push(doc);
+  }
+  res.json(readableDocs);
+});
+
+router.post("/documents/exports", requireMissionHubAuth, requireMissionHubDocumentWrite, EXPORT_RATE_LIMIT, async (req, res) => {
+  const { organizationId, userId, role } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as DocStore;
+  const where: Record<string, unknown> = {
+    organizationId,
+    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    isActive: true,
+    deletedAt: null,
+  };
+
+  const linkedEntityType = normalizeEntityType(body.linkedEntityType);
+  const linkedEntityId = typeof body.linkedEntityId === "string" ? body.linkedEntityId : null;
+  if ((linkedEntityType && !linkedEntityId) || (!linkedEntityType && linkedEntityId)) {
+    res.status(400).json({ error: "linkedEntityType and linkedEntityId must be provided together" });
+    return;
+  }
+  if (linkedEntityType && linkedEntityId) {
+    const allowed = await hasMissionHubEntityReadAccess(linkedEntityType, linkedEntityId, organizationId, role);
+    if (!allowed) {
+      res.status(403).json({ error: "You do not have access to export documents for this entity." });
+      return;
+    }
+    where.linkedEntityType = linkedEntityType;
+    where.linkedEntityId = linkedEntityId;
+  }
+
+  if (typeof body.sensitivityLevel === "string") {
+    const sensitivityLevel = body.sensitivityLevel.toLowerCase();
+    if (!MISSION_HUB_ALLOWED_SENSITIVITY.has(sensitivityLevel)) {
+      res.status(400).json({ error: "Invalid sensitivityLevel" });
+      return;
+    }
+    where.sensitivityLevel = sensitivityLevel;
+  }
+
+  const docs = await store.missionHubDocument.findMany({ where, orderBy: { createdAt: "desc" } });
+  const readableDocs: Record<string, unknown>[] = [];
+  for (const doc of docs) {
+    const allowed = await canReadMissionHubDocument(doc, organizationId, role);
+    if (allowed) readableDocs.push(doc);
+  }
+
+  const totalBytes = readableDocs.reduce((sum, doc) => {
+    const size = typeof doc.sizeBytes === "number" ? doc.sizeBytes : 0;
+    return sum + size;
+  }, 0);
+
+  const exportClient = getMissionHubDocumentExportClient();
+  const exportJob = await exportClient.create({
+    data: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      requestedByUserId: userId,
+      status: "processing",
+      filters: {
+        linkedEntityType,
+        linkedEntityId,
+        sensitivityLevel: typeof body.sensitivityLevel === "string" ? body.sensitivityLevel.toLowerCase() : null,
+      },
+      documentCount: readableDocs.length,
+      totalBytes,
+      manifest: {},
+    },
+  });
+
+  try {
+    const manifest = {
+      exportId: String(exportJob.id),
+      generatedAt: new Date().toISOString(),
+      organizationId,
+      requestedByUserId: userId,
+      documentCount: readableDocs.length,
+      totalBytes,
+      filters: exportJob.filters,
+      documents: readableDocs.map((doc) => ({
+        id: String(doc.id ?? ""),
+        title: String(doc.title ?? ""),
+        originalFilename: String(doc.originalFilename ?? ""),
+        mimeType: String(doc.mimeType ?? ""),
+        sizeBytes: typeof doc.sizeBytes === "number" ? doc.sizeBytes : 0,
+        storageKey: String(doc.storageKey ?? ""),
+        storageProvider: String(doc.storageProvider ?? ""),
+        linkedEntityType: typeof doc.linkedEntityType === "string" ? doc.linkedEntityType : null,
+        linkedEntityId: typeof doc.linkedEntityId === "string" ? doc.linkedEntityId : null,
+        createdAt: toIsoString(doc.createdAt),
+      })),
+    };
+
+    const zip = new JSZip();
+    zip.file("manifest.json", JSON.stringify(manifest, null, 2));
+    zip.file("manifest.csv", buildDocumentExportCsv(readableDocs));
+    zip.file("README.txt", "This archive contains Mission Hub export metadata only. Use storageKey with your storage backend for raw file retrieval.\n");
+    const archiveBuffer = await zip.generateAsync({
+      type: "nodebuffer",
+      compression: "DEFLATE",
+      compressionOptions: { level: 6 },
+    });
+
+    const storage = await resolveStorageAdapter({ organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN });
+    const archiveName = `documents-export-${String(exportJob.id)}.zip`;
+    const exportKey = buildPartitionedKey({
+      prefix: storage.prefix,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      organizationId,
+      userId,
+      stamp: `${Date.now()}-${crypto.randomBytes(3).toString("hex")}`,
+      safeFileName: archiveName,
+    });
+    const uploaded = await storage.adapter.upload(exportKey, archiveBuffer, "application/zip");
+
+    const expiresAt = new Date(Date.now() + MISSION_HUB_DOCUMENT_EXPORT_TTL_HOURS * 60 * 60 * 1000);
+    const completed = await exportClient.update({
+      where: { id: String(exportJob.id) },
+      data: {
+        status: "completed",
+        manifest,
+        storageKey: uploaded.key,
+        storageProvider: storage.adapter.backendId,
+        completedAt: new Date(),
+        expiresAt,
+        errorMessage: null,
+      },
+    });
+
+    void auditMissionHubEvent(req, "document.export", getUser(req), {
+      resourceType: "document_export",
+      resourceId: String(exportJob.id),
+      newValue: {
+        documentCount: readableDocs.length,
+        totalBytes,
+      },
+    });
+
+    res.status(201).json(completed);
+  } catch (error) {
+    const failed = await exportClient.update({
+      where: { id: String(exportJob.id) },
+      data: {
+        status: "failed",
+        errorMessage: error instanceof Error ? error.message : "Failed to generate export archive",
+      },
+    });
+    res.status(500).json(failed);
+  }
+});
+
+router.get("/documents/exports", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const exportClient = getMissionHubDocumentExportClient();
+  const exports = await exportClient.findMany({
+    where: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+  res.json(exports);
+});
+
+router.get("/documents/exports/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const exportClient = getMissionHubDocumentExportClient();
+  const exportJob = await exportClient.findFirst({
+    where: {
+      id: req.params.id,
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+  if (!exportJob) {
+    res.status(404).json({ error: "Export job not found" });
+    return;
+  }
+  res.json(exportJob);
+});
+
+router.get("/documents/exports/:id/download", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const exportClient = getMissionHubDocumentExportClient();
+  const exportJob = await exportClient.findFirst({
+    where: {
+      id: req.params.id,
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+  if (!exportJob || typeof exportJob.storageKey !== "string" || exportJob.status !== "completed") {
+    res.status(404).json({ error: "Export archive not found" });
+    return;
+  }
+  const expiresAt = exportJob.expiresAt instanceof Date ? exportJob.expiresAt : null;
+  if (expiresAt && expiresAt < new Date()) {
+    res.status(410).json({ error: "Export archive has expired" });
+    return;
+  }
+
+  try {
+    const storage = await resolveStorageAdapter({ organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN });
+    const downloadUrl = await storage.adapter.getDownloadUrl(String(exportJob.storageKey), {
+      filename: `mission-hub-documents-export-${String(exportJob.id)}.zip`,
+      disposition: "attachment",
+      expiresIn: 900,
+    });
+    res.redirect(302, downloadUrl);
+  } catch (err) {
+    if (err instanceof StorageConfigError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
 });
 
 router.get("/documents/:id", requireMissionHubAuth, async (req, res) => {
-  const { organizationId } = getUser(req);
+  const { organizationId, role } = getUser(req);
   const store = prisma as unknown as DocStore;
   const doc = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true, deletedAt: null } });
   if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+  const allowed = await canReadMissionHubDocument(doc, organizationId, role);
+  if (!allowed) {
+    res.status(403).json({ error: "You do not have access to this document." });
+    return;
+  }
   void auditMissionHubEvent(req, "document.view", getUser(req), {
     resourceType: "document",
     resourceId: String(req.params.id),
@@ -3956,6 +4481,7 @@ router.post("/documents", requireMissionHubAuth, UPLOAD_RATE_LIMIT, async (req, 
     data: {
       organizationId,
       programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      createdByUserId: userId,
       uploaderUserId: userId,
       title: (body.title as string).trim(),
       documentType: typeof body.documentType === "string" ? body.documentType : "",
@@ -4018,6 +4544,300 @@ router.delete("/documents/:id", requireMissionHubAuth, async (req, res) => {
     newValue: { isActive: false, deletedAt: new Date().toISOString() },
   });
   res.status(204).send();
+});
+
+router.get("/documents/:id/preview", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, role } = getUser(req);
+  const store = prisma as unknown as DocStore;
+  const doc = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true, deletedAt: null } });
+  if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+  const allowed = await canReadMissionHubDocument(doc, organizationId, role);
+  if (!allowed) {
+    res.status(403).json({ error: "You do not have access to this document." });
+    return;
+  }
+
+  res.json({
+    id: String(doc.id),
+    title: String(doc.title ?? "Untitled"),
+    filename: String(doc.originalFilename ?? "") || null,
+    documentType: String(doc.documentType ?? "") || "general",
+    uploadedAt: doc.createdAt instanceof Date ? doc.createdAt.toISOString() : String(doc.createdAt ?? ""),
+    originalAvailable: Boolean(doc.storageKey),
+    truncated: false,
+    previewText: typeof doc.metadata === "object" && doc.metadata && !Array.isArray(doc.metadata)
+      ? JSON.stringify(doc.metadata, null, 2).slice(0, 12000)
+      : "",
+    previewMarkdown: null,
+    snippet: String(doc.title ?? "Untitled"),
+    markdownAvailable: false,
+  });
+});
+
+router.get("/documents/:id/download", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, role } = getUser(req);
+  const store = prisma as unknown as DocStore;
+  const doc = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true, deletedAt: null } });
+  if (!doc?.storageKey) { res.status(404).json({ error: "File not found" }); return; }
+  const allowed = await canReadMissionHubDocument(doc, organizationId, role);
+  if (!allowed) {
+    res.status(403).json({ error: "You do not have access to this document." });
+    return;
+  }
+
+  try {
+    const storage = await resolveStorageAdapter({ organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN });
+    const downloadUrl = await storage.adapter.getDownloadUrl(String(doc.storageKey), {
+      filename: typeof doc.originalFilename === "string" ? doc.originalFilename : undefined,
+      disposition: req.query.disposition === "inline" ? "inline" : "attachment",
+    });
+    res.redirect(302, downloadUrl);
+  } catch (err) {
+    if (err instanceof StorageConfigError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+});
+
+router.get("/documents/:id/links", requireMissionHubAuth, async (req, res) => {
+  const { organizationId, role } = getUser(req);
+  const store = prisma as unknown as DocStore;
+  const doc = await store.missionHubDocument.findFirst({ where: { id: req.params.id, organizationId, isActive: true, deletedAt: null } });
+  if (!doc) { res.status(404).json({ error: "Document not found" }); return; }
+  const allowed = await canReadMissionHubDocument(doc, organizationId, role);
+  if (!allowed) {
+    res.status(403).json({ error: "You do not have access to this document." });
+    return;
+  }
+
+  const links = await store.missionHubDocumentLink.findMany({
+    where: { organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN, documentId: req.params.id },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.json(links.map((link) => toMissionHubDocumentLink(link)));
+});
+
+router.post("/documents/:id/links", requireMissionHubAuth, requireMissionHubDocumentWrite, async (req, res) => {
+  const { organizationId, userId } = getUser(req);
+  const id = parseRouteId(req.params.id);
+  const body = isRecord(req.body) ? req.body : {};
+  const entityType = normalizeEntityType(body.entityType);
+  const entityId = parseRouteId(typeof body.entityId === "string" ? body.entityId : undefined);
+  const linkType = normalizeLinkType(body.linkType) ?? "attachment";
+  if (!id || !entityType || !entityId) {
+    res.status(400).json({ error: "entityType and entityId are required" });
+    return;
+  }
+
+  const docClient = getMissionHubDocumentClient();
+  const linkClient = getMissionHubDocumentLinkClient();
+  const doc = await docClient.findFirst({ where: { id, organizationId, isActive: true, deletedAt: null } });
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const allowed = await resolveMissionHubEntityAccess(entityType, entityId, organizationId);
+  if (!allowed) {
+    res.status(404).json({ error: "Entity not found" });
+    return;
+  }
+
+  try {
+    const link = await linkClient.create({
+      data: {
+        organizationId,
+        programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+        documentId: id,
+        entityType,
+        entityId,
+        linkType,
+        notes: typeof body.notes === "string" ? body.notes : null,
+        sourceContext: typeof body.sourceContext === "string" ? body.sourceContext : null,
+        createdByUserId: userId,
+      },
+    });
+    res.status(201).json({ link: toMissionHubDocumentLink(link), document: doc });
+  } catch (error) {
+    const maybeCode = typeof error === "object" && error && "code" in error ? String((error as { code?: unknown }).code) : "";
+    if (maybeCode === "P2002") {
+      res.status(409).json({ error: "This document is already linked to that entity with the same linkType." });
+      return;
+    }
+    throw error;
+  }
+});
+
+router.delete("/documents/:id/links/:linkId", requireMissionHubAuth, requireMissionHubDocumentWrite, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const id = parseRouteId(req.params.id);
+  const linkId = parseRouteId(req.params.linkId);
+  if (!id || !linkId) {
+    res.status(400).json({ error: "Invalid document id or link id" });
+    return;
+  }
+
+  const store = prisma as unknown as DocStore;
+  const link = await store.missionHubDocumentLink.findFirst({
+    where: {
+      id: linkId,
+      documentId: id,
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+  if (!link) {
+    res.status(404).json({ error: "Document link not found" });
+    return;
+  }
+
+  await store.missionHubDocumentLink.delete({ where: { id: linkId } });
+  res.status(204).send();
+});
+
+router.get("/entities/:entityType/:entityId/documents", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const entityType = normalizeEntityType(req.params.entityType);
+  const entityId = parseRouteId(req.params.entityId);
+  if (!entityType || !entityId) {
+    res.status(400).json({ error: "Invalid entityType or entityId" });
+    return;
+  }
+
+  const allowed = await resolveMissionHubEntityAccess(entityType, entityId, organizationId);
+  if (!allowed) {
+    res.status(404).json({ error: "Entity not found" });
+    return;
+  }
+
+  const store = prisma as unknown as DocStore;
+  const links = await store.missionHubDocumentLink.findMany({
+    where: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      entityType,
+      entityId,
+    },
+    include: {
+      document: true,
+    },
+    orderBy: { createdAt: "desc" },
+  });
+
+  res.json(
+    links.map((link) => ({
+      link: toMissionHubDocumentLink(link),
+      document: link.document,
+    })),
+  );
+});
+
+router.post("/documents/upload", requireMissionHubAuth, requireMissionHubDocumentWrite, upload.single("file"), async (req, res) => {
+  if (!req.file) {
+    res.status(400).json({ error: "File is required" });
+    return;
+  }
+
+  const { organizationId, userId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const entityType = normalizeEntityType(body.entityType);
+  const entityId = parseRouteId(typeof body.entityId === "string" ? body.entityId : undefined);
+  const linkType = normalizeLinkType(body.linkType) ?? "attachment";
+  const store = prisma as unknown as DocStore;
+
+  if ((entityType && !entityId) || (entityId && !entityType)) {
+    res.status(400).json({ error: "entityType and entityId must be provided together" });
+    return;
+  }
+  if (entityType && entityId) {
+    const allowed = await resolveMissionHubEntityAccess(entityType, entityId, organizationId);
+    if (!allowed) {
+      res.status(404).json({ error: "Entity not found" });
+      return;
+    }
+  }
+
+  let storage;
+  try {
+    storage = await resolveStorageAdapter({ organizationId, programDomain: MISSION_HUB_PROGRAM_DOMAIN });
+  } catch (err) {
+    if (err instanceof StorageConfigError) {
+      res.status(422).json({ error: err.message });
+      return;
+    }
+    throw err;
+  }
+
+  const stamp = `${Date.now()}-${crypto.randomBytes(3).toString("hex")}`;
+  const key = buildPartitionedKey({
+    prefix: storage.prefix,
+    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    organizationId,
+    userId,
+    stamp,
+    safeFileName: sanitizeMissionHubFilename(req.file.originalname),
+  });
+
+  const uploadResult = await storage.adapter.upload(key, req.file.buffer, req.file.mimetype);
+  const linkedEntityType = entityType ?? (typeof body.linkedEntityType === "string" ? body.linkedEntityType : null);
+  const linkedEntityId = entityId ?? (typeof body.linkedEntityId === "string" ? body.linkedEntityId : null);
+
+  try {
+    const created = await store.missionHubDocument.create({
+      data: {
+        organizationId,
+        programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+        createdByUserId: userId,
+        uploaderUserId: userId,
+        title: typeof body.title === "string" && body.title.trim() ? body.title.trim() : req.file.originalname,
+        originalFilename: req.file.originalname,
+        mimeType: req.file.mimetype,
+        sizeBytes: req.file.size,
+        storageKey: uploadResult.key,
+        storageBucket: typeof body.storageBucket === "string" ? body.storageBucket : "",
+        storageProvider: typeof body.storageProvider === "string" ? body.storageProvider : "r2",
+        documentType: typeof body.type === "string" ? body.type : (typeof body.documentType === "string" ? body.documentType : ""),
+        sensitivityLevel: typeof body.sensitivityLevel === "string" ? body.sensitivityLevel : "confidential",
+        retentionCategory: typeof body.retentionCategory === "string" ? body.retentionCategory : "",
+        linkedEntityType,
+        linkedEntityId,
+        tags: Array.isArray(body.tags) ? body.tags : [],
+        metadata: isRecord(body.metadata) ? body.metadata : {},
+      },
+    });
+
+    let createdLink: Record<string, unknown> | null = null;
+    if (entityType && entityId) {
+      createdLink = await store.missionHubDocumentLink.create({
+        data: {
+          organizationId,
+          programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+          documentId: String(created.id),
+          entityType,
+          entityId,
+          linkType,
+          notes: typeof body.notes === "string" ? body.notes : null,
+          sourceContext: typeof body.sourceContext === "string" ? body.sourceContext : null,
+          createdByUserId: userId,
+        },
+      });
+    }
+
+    res.status(201).json({
+      document: created,
+      link: createdLink ? toMissionHubDocumentLink(createdLink) : null,
+    });
+  } catch (error) {
+    try {
+      await storage.adapter.delete(uploadResult.key);
+    } catch {
+      // Best effort cleanup only.
+    }
+    throw error;
+  }
 });
 
 // ─── Storage Endpoints ────────────────────────────────────────────────────────

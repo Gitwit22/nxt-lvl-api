@@ -919,6 +919,8 @@ router.post("/debug/relink-current-org", async (req, res) => {
           businessName: sourceSettings.businessName || targetSettings.businessName,
           defaultClientId: sourceSettings.defaultClientId || targetSettings.defaultClientId,
           invoiceFrequency: sourceSettings.invoiceFrequency || targetSettings.invoiceFrequency,
+          payPeriodFrequency: sourceSettings.payPeriodFrequency || targetSettings.payPeriodFrequency,
+          payPeriodStartDate: sourceSettings.payPeriodStartDate || targetSettings.payPeriodStartDate,
           invoiceNotes: sourceSettings.invoiceNotes || targetSettings.invoiceNotes,
           paymentInstructions: sourceSettings.paymentInstructions || targetSettings.paymentInstructions,
           invoiceLogoDataUrl: sourceSettings.invoiceLogoDataUrl || targetSettings.invoiceLogoDataUrl,
@@ -1387,6 +1389,7 @@ router.get("/settings", requireTimeflowAuth, async (req, res) => {
         userId,
         businessName: "",
         invoiceFrequency: "monthly",
+        payPeriodFrequency: "monthly",
         periodWeekStartsOn: 1,
         periodTargetHours: 0,
         periodTargetEarnings: 0,
@@ -1413,6 +1416,8 @@ router.put("/settings", requireTimeflowAuth, async (req, res) => {
   if (typeof body.businessName === "string") data.businessName = body.businessName;
   if ("defaultClientId" in body) data.defaultClientId = typeof body.defaultClientId === "string" ? body.defaultClientId : null;
   if (typeof body.invoiceFrequency === "string") data.invoiceFrequency = body.invoiceFrequency;
+  if (typeof body.payPeriodFrequency === "string") data.payPeriodFrequency = body.payPeriodFrequency;
+  if ("payPeriodStartDate" in body) data.payPeriodStartDate = typeof body.payPeriodStartDate === "string" ? body.payPeriodStartDate : null;
   if (typeof body.invoiceNotes === "string") data.invoiceNotes = body.invoiceNotes;
   if (typeof body.paymentInstructions === "string") data.paymentInstructions = body.paymentInstructions;
   if ("invoiceLogoDataUrl" in body) data.invoiceLogoDataUrl = typeof body.invoiceLogoDataUrl === "string" ? body.invoiceLogoDataUrl : null;
@@ -2057,26 +2062,23 @@ router.post("/project-bills", requireTimeflowAuth, async (req, res) => {
     res.status(400).json({ error: "clientId is required" });
     return;
   }
-  if (typeof body.projectId !== "string") {
-    res.status(400).json({ error: "projectId is required" });
-    return;
-  }
   if (typeof body.title !== "string" || !body.title.trim()) {
     res.status(400).json({ error: "title is required" });
     return;
   }
 
-  const [client, project] = await Promise.all([
-    store.timeflowClient.findFirst({ where: { id: body.clientId, organizationId, userId } }),
-    store.timeflowProject.findFirst({ where: { id: body.projectId, organizationId, userId } }),
-  ]);
+  const client = await store.timeflowClient.findFirst({ where: { id: body.clientId, organizationId, userId } });
   if (!client) {
     res.status(400).json({ error: "Client not found" });
     return;
   }
-  if (!project) {
-    res.status(400).json({ error: "Project not found" });
-    return;
+
+  if (typeof body.projectId === "string") {
+    const project = await store.timeflowProject.findFirst({ where: { id: body.projectId, organizationId, userId } });
+    if (!project) {
+      res.status(400).json({ error: "Project not found" });
+      return;
+    }
   }
 
   const projectBill = await store.timeflowProjectBill.create({
@@ -2085,7 +2087,7 @@ router.post("/project-bills", requireTimeflowAuth, async (req, res) => {
       organizationId,
       userId,
       clientId: body.clientId,
-      projectId: body.projectId,
+      projectId: typeof body.projectId === "string" ? body.projectId : null,
       title: body.title.trim(),
       amount: typeof body.amount === "number" ? body.amount : 0,
       issueDate: typeof body.issueDate === "string" ? body.issueDate : new Date().toISOString().split("T")[0],
@@ -2130,6 +2132,25 @@ router.put("/project-bills/:id", requireTimeflowAuth, async (req, res) => {
   }
   if ("paidAt" in body) data.paidAt = typeof body.paidAt === "string" ? new Date(body.paidAt) : null;
   if ("voidedAt" in body) data.voidedAt = typeof body.voidedAt === "string" ? new Date(body.voidedAt) : null;
+  if ("projectId" in body) {
+    if (typeof body.projectId === "string") {
+      const projectClient = prisma as unknown as {
+        timeflowProject: {
+          findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+        };
+      };
+      const project = await projectClient.timeflowProject.findFirst({
+        where: { id: body.projectId, organizationId, userId },
+      });
+      if (!project) {
+        res.status(400).json({ error: "Project not found" });
+        return;
+      }
+      data.projectId = body.projectId;
+    } else {
+      data.projectId = null;
+    }
+  }
 
   const updated = await store.timeflowProjectBill.update({ where: { id }, data });
   res.json(updated);

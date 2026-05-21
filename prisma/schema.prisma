@@ -236,6 +236,8 @@ model TimeflowSettings {
   businessName          String   @default("")
   defaultClientId       String?
   invoiceFrequency      String   @default("monthly")
+  payPeriodFrequency    String   @default("monthly")
+  payPeriodStartDate    String?
   invoiceNotes          String   @default("")
   paymentInstructions   String   @default("")
   invoiceLogoDataUrl    String?  @db.Text
@@ -367,7 +369,7 @@ model TimeflowProjectBill {
   id             String   @id @default(cuid())
   organizationId String
   userId         String
-  projectId      String
+  projectId      String?
   clientId       String
   title          String
   amount         Float    @default(0)
@@ -844,6 +846,7 @@ model MissionHubDocument {
   id               String   @id @default(cuid())
   organizationId   String
   programDomain    String   @default("mission-hub")
+  createdByUserId  String?
   uploaderUserId   String
   title            String
   originalFilename String   @default("")
@@ -852,17 +855,68 @@ model MissionHubDocument {
   storageKey       String   @default("")
   storageBucket    String   @default("")
   storageProvider  String   @default("r2")  // r2|local|external
+  documentType     String   @default("")
+  sensitivityLevel String   @default("confidential")
+  retentionCategory String   @default("")
   linkedEntityType String?  // program|project|event|grant|sponsor|campaign|expense|personnel
   linkedEntityId   String?
   tags             Json     @default("[]")
   metadata         Json     @default("{}")
   isActive         Boolean  @default(true)
+  deletedAt        DateTime?
+  deletedByUserId  String?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
+
+  links            MissionHubDocumentLink[]
 
   @@index([organizationId, programDomain])
   @@index([organizationId, programDomain, linkedEntityType, linkedEntityId])
   @@index([organizationId, programDomain, uploaderUserId])
+}
+
+model MissionHubDocumentLink {
+  id               String   @id @default(cuid())
+  organizationId   String
+  programDomain    String   @default("mission-hub")
+  documentId       String
+  entityType       String
+  entityId         String
+  linkType         String   @default("attachment")
+  notes            String?
+  sourceContext    String?
+  createdByUserId  String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  document         MissionHubDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, programDomain, documentId, entityType, entityId, linkType])
+  @@index([organizationId, programDomain, entityType, entityId])
+  @@index([organizationId, programDomain, documentId])
+}
+
+model MissionHubDocumentExport {
+  id                String   @id @default(cuid())
+  organizationId    String
+  programDomain     String   @default("mission-hub")
+  requestedByUserId String
+  status            String   @default("pending") // pending|processing|completed|failed
+  filters           Json     @default("{}")
+  manifest          Json     @default("{}")
+  documentCount     Int      @default(0)
+  totalBytes        Int      @default(0)
+  storageKey        String?
+  storageBucket     String?
+  storageProvider   String?
+  errorMessage      String?
+  completedAt       DateTime?
+  expiresAt         DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@index([organizationId, programDomain, status])
+  @@index([organizationId, requestedByUserId, createdAt])
 }
 
 model MissionHubStorageEndpoint {
