@@ -137,6 +137,8 @@ export const FINANCE_HUB_DOCUMENT_MAX_UPLOAD_MB = Number(
 );
 export const FINANCE_HUB_DOCUMENT_MAX_UPLOAD_BYTES =
   FINANCE_HUB_DOCUMENT_MAX_UPLOAD_MB * 1024 * 1024;
+export const TIMEFLOW_MAX_UPLOAD_MB = Number(process.env.TIMEFLOW_MAX_UPLOAD_MB || 25);
+export const TIMEFLOW_MAX_UPLOAD_BYTES = TIMEFLOW_MAX_UPLOAD_MB * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Storage backend

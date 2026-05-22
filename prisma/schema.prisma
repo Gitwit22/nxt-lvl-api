@@ -333,6 +333,36 @@ model TimeflowTimeEntry {
   @@index([organizationId, userId, status])
 }
 
+model TimeflowExpense {
+  id                   String   @id @default(cuid())
+  organizationId       String
+  userId               String
+  amount               Float    @default(0)
+  category             String   @default("other") // travel|software|meals|supplies|other
+  billableToClient     Boolean  @default(true)
+  billTo               String   @default("client") // client|project
+  clientId             String?
+  date                 String
+  description          String   @default("")
+  excludedFromPayPeriod Boolean @default(false)
+  includedInPayPeriod  Boolean  @default(false)
+  invoiceId            String?
+  notes                String   @default("") @db.Text
+  projectId            String?
+  receiptAttached      Boolean  @default(false)
+  status               String   @default("billable") // draft|billable|invoiced|reimbursed|non_billable
+  vendor               String?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([organizationId, userId])
+  @@index([organizationId, userId, clientId])
+  @@index([organizationId, userId, projectId])
+  @@index([organizationId, userId, invoiceId])
+  @@index([organizationId, userId, date])
+  @@index([organizationId, userId, status])
+}
+
 model TimeflowInvoice {
   id            String   @id @default(cuid())
   organizationId String

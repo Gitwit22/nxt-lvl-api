@@ -15,6 +15,7 @@ import {
   DEFAULT_ORGANIZATION_ID,
   JWT_EXPIRES_IN,
   JWT_SECRET,
+  TIMEFLOW_MAX_UPLOAD_BYTES,
   UPLOAD_DIR,
 } from "../../../core/config/env.js";
 import { hashPassword, verifyPassword } from "../../../core/auth/auth.service.js";
@@ -43,7 +44,7 @@ interface TimeflowTokenPayload {
 }
 
 type TimeflowAuthRole = "contractor" | "client_viewer";
-type TimeflowEntityType = "client" | "project";
+type TimeflowEntityType = "client" | "project" | "expense" | "invoice";
 
 type TimeflowUserRecord = {
   id: string;
@@ -502,7 +503,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isTimeflowEntityType(value: unknown): value is TimeflowEntityType {
-  return value === "client" || value === "project";
+  return value === "client" || value === "project" || value === "expense" || value === "invoice";
 }
 
 function buildEntitySourceReference(entityType: TimeflowEntityType, entityId: string): string {
@@ -537,15 +538,19 @@ function makeSafeFilename(name: string): string {
 
 function buildTimeflowR2Key(input: {
   organizationId: string;
-  userId: string;
+  entityType?: TimeflowEntityType;
+  entityId?: string;
   safeFilename: string;
   stamp: string;
 }): string {
+  const scopedEntityType = input.entityType || "document";
+  const scopedEntityId = input.entityId || "unscoped";
+
   return [
     "timeflow",
-    "documents",
     input.organizationId,
-    input.userId,
+    scopedEntityType,
+    scopedEntityId,
     `${input.stamp}-${input.safeFilename}`,
   ]
     .map((segment) => segment.trim().replace(/^\/+|\/+$/g, ""))
@@ -561,6 +566,8 @@ async function assertTimeflowEntityAccess(
   const store = prisma as unknown as {
     timeflowClient: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
     timeflowProject: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+    timeflowExpense: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+    timeflowInvoice: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
   };
 
   if (entityType === "client") {
@@ -570,10 +577,24 @@ async function assertTimeflowEntityAccess(
     return Boolean(client);
   }
 
-  const project = await store.timeflowProject.findFirst({
-    where: { id: entityId, organizationId: scope.organizationId, userId: scope.userId, isActive: true },
+  if (entityType === "project") {
+    const project = await store.timeflowProject.findFirst({
+      where: { id: entityId, organizationId: scope.organizationId, userId: scope.userId, isActive: true },
+    });
+    return Boolean(project);
+  }
+
+  if (entityType === "expense") {
+    const expense = await store.timeflowExpense.findFirst({
+      where: { id: entityId, organizationId: scope.organizationId, userId: scope.userId },
+    });
+    return Boolean(expense);
+  }
+
+  const invoice = await store.timeflowInvoice.findFirst({
+    where: { id: entityId, organizationId: scope.organizationId, userId: scope.userId },
   });
-  return Boolean(project);
+  return Boolean(invoice);
 }
 
 function toTimeflowDocumentRecord(doc: {
@@ -974,9 +995,10 @@ router.get("/documents", async (req, res) => {
   const query = req.query;
   const entityType = typeof query.entityType === "string" ? query.entityType : undefined;
   const entityId = typeof query.entityId === "string" ? query.entityId : undefined;
+  const includeArchived = query.includeArchived === "true";
 
   if (!isTimeflowEntityType(entityType)) {
-    res.status(400).json({ error: "entityType must be 'client' or 'project'" });
+    res.status(400).json({ error: "entityType must be 'client', 'project', 'expense', or 'invoice'" });
     return;
   }
 
@@ -1016,6 +1038,10 @@ router.get("/documents", async (req, res) => {
       : { startsWith: `timeflow:${entityType}:` },
   };
 
+  if (!includeArchived) {
+    where.status = "active";
+  }
+
   const docs = await store.document.findMany({
     where,
     orderBy: { createdAt: "desc" },
@@ -1045,7 +1071,7 @@ router.post("/documents", async (req, res) => {
   const uploadedAt = asString(body.uploadedAt).trim() || new Date().toISOString();
 
   if (!isTimeflowEntityType(entityType)) {
-    res.status(400).json({ error: "entityType must be 'client' or 'project'" });
+    res.status(400).json({ error: "entityType must be 'client', 'project', 'expense', or 'invoice'" });
     return;
   }
   if (!entityId) {
@@ -1235,11 +1261,101 @@ router.patch("/documents/:id", async (req, res) => {
   res.json({ document: toTimeflowDocumentRecord(updated) });
 });
 
+router.patch("/documents/:id/archive", async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+
+  const store = prisma as unknown as {
+    document: {
+      findFirst: (args: Record<string, unknown>) => Promise<{
+        id: string;
+        sourceReference: string | null;
+      } | null>;
+      update: (args: Record<string, unknown>) => Promise<{
+        id: string;
+        title: string;
+        originalFileName: string | null;
+        author: string;
+        createdAt: Date;
+        updatedAt: Date;
+        status: string | null;
+        mimeType: string | null;
+        fileSize: number | null;
+        filePath: string | null;
+        sourceReference: string | null;
+        extractedMetadata: unknown;
+      }>;
+    };
+  };
+
+  const current = await store.document.findFirst({
+    where: {
+      id,
+      organizationId,
+      programDomain: TIMEFLOW_PROGRAM_DOMAIN,
+      intakeSource: "timeflow_attachment",
+    },
+  });
+
+  if (!current) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const entity = parseEntitySourceReference(current.sourceReference);
+  if (!entity) {
+    res.status(400).json({ error: "Document source reference is invalid" });
+    return;
+  }
+
+  const allowed = await assertTimeflowEntityAccess(entity.entityType, entity.entityId, { organizationId, userId });
+  if (!allowed) {
+    res.status(404).json({ error: `${entity.entityType} not found` });
+    return;
+  }
+
+  const updated = await store.document.update({
+    where: { id },
+    data: {
+      status: "archived",
+    },
+  });
+
+  res.json({ document: toTimeflowDocumentRecord(updated) });
+});
+
 router.post("/documents/upload", upload.single("file"), async (req, res) => {
   const { userId, organizationId } = getUser(req);
+  const body = req.body as Record<string, unknown>;
+  const entityType = asString(body?.entityType).trim();
+  const entityId = asString(body?.entityId).trim();
+
   if (!req.file) {
     res.status(400).json({ error: "File is required" });
     return;
+  }
+
+  if (req.file.size > TIMEFLOW_MAX_UPLOAD_BYTES) {
+    res.status(413).json({ error: `File too large. Maximum size is ${Math.round(TIMEFLOW_MAX_UPLOAD_BYTES / (1024 * 1024))}MB.` });
+    return;
+  }
+
+  if (entityType && !isTimeflowEntityType(entityType)) {
+    res.status(400).json({ error: "entityType must be 'client', 'project', 'expense', or 'invoice'" });
+    return;
+  }
+
+  if (entityType && !entityId) {
+    res.status(400).json({ error: "entityId is required when entityType is provided" });
+    return;
+  }
+
+  if (entityType && entityId) {
+    const allowed = await assertTimeflowEntityAccess(entityType, entityId, { organizationId, userId });
+    if (!allowed) {
+      res.status(404).json({ error: `${entityType} not found` });
+      return;
+    }
   }
 
   const safeFilename = makeSafeFilename(req.file.originalname);
@@ -1248,7 +1364,8 @@ router.post("/documents/upload", upload.single("file"), async (req, res) => {
   if (isR2Configured()) {
     const key = buildTimeflowR2Key({
       organizationId,
-      userId,
+      entityType: isTimeflowEntityType(entityType) ? entityType : undefined,
+      entityId: entityId || undefined,
       safeFilename,
       stamp,
     });
@@ -1259,13 +1376,21 @@ router.post("/documents/upload", upload.single("file"), async (req, res) => {
       originalFilename: req.file.originalname,
       mimeType: req.file.mimetype,
       sizeBytes: req.file.size,
+      entityType: entityType || null,
+      entityId: entityId || null,
       storage: "r2",
     });
     return;
   }
 
   // Local fallback for development environments without R2.
-  const localDir = path.join(UPLOAD_DIR, "timeflow", "documents", organizationId, userId);
+  const localDir = path.join(
+    UPLOAD_DIR,
+    "timeflow",
+    organizationId,
+    entityType || "document",
+    entityId || "unscoped",
+  );
   await fsPromises.mkdir(localDir, { recursive: true });
   const localPath = path.join(localDir, `${stamp}-${safeFilename}`);
   await fsPromises.writeFile(localPath, req.file.buffer);
@@ -1275,8 +1400,130 @@ router.post("/documents/upload", upload.single("file"), async (req, res) => {
     originalFilename: req.file.originalname,
     mimeType: req.file.mimetype,
     sizeBytes: req.file.size,
+    entityType: entityType || null,
+    entityId: entityId || null,
     storage: "local",
   });
+});
+
+router.get("/documents/:id/view-url", async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+
+  const store = prisma as unknown as {
+    document: {
+      findFirst: (args: Record<string, unknown>) => Promise<{
+        id: string;
+        status: string | null;
+        filePath: string | null;
+        sourceReference: string | null;
+        extractedMetadata: unknown;
+      } | null>;
+    };
+  };
+
+  const doc = await store.document.findFirst({
+    where: {
+      id,
+      organizationId,
+      programDomain: TIMEFLOW_PROGRAM_DOMAIN,
+      intakeSource: "timeflow_attachment",
+    },
+  });
+
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const entity = parseEntitySourceReference(doc.sourceReference);
+  if (!entity) {
+    res.status(400).json({ error: "Document source reference is invalid" });
+    return;
+  }
+
+  const allowed = await assertTimeflowEntityAccess(entity.entityType, entity.entityId, { organizationId, userId });
+  if (!allowed) {
+    res.status(404).json({ error: `${entity.entityType} not found` });
+    return;
+  }
+
+  if (doc.status === "archived") {
+    res.status(410).json({ error: "Document is archived" });
+    return;
+  }
+
+  const metadata = isRecord(doc.extractedMetadata) ? doc.extractedMetadata : {};
+  const timeflowMeta = isRecord(metadata.timeflow) ? metadata.timeflow : {};
+  const storageKey = asString(timeflowMeta.storageKey) || doc.filePath || "";
+  if (!storageKey) {
+    res.status(404).json({ error: "Document storage key is missing" });
+    return;
+  }
+
+  if (isR2Configured() && isR2Key(storageKey)) {
+    const signedUrl = await getR2SignedDownloadUrl(storageKey, {
+      expiresIn: 900,
+      disposition: "inline",
+    });
+    if (!signedUrl) {
+      res.status(404).json({ error: "Document file was not found in storage" });
+      return;
+    }
+
+    res.json({ url: signedUrl, expiresIn: 900 });
+    return;
+  }
+
+  res.json({ url: `/api/timeflow/documents/${encodeURIComponent(id)}/download`, expiresIn: 900 });
+});
+
+router.get("/documents/:id/download-url", async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+
+  const store = prisma as unknown as {
+    document: {
+      findFirst: (args: Record<string, unknown>) => Promise<{
+        id: string;
+        status: string | null;
+        sourceReference: string | null;
+      } | null>;
+    };
+  };
+
+  const doc = await store.document.findFirst({
+    where: {
+      id,
+      organizationId,
+      programDomain: TIMEFLOW_PROGRAM_DOMAIN,
+      intakeSource: "timeflow_attachment",
+    },
+  });
+
+  if (!doc) {
+    res.status(404).json({ error: "Document not found" });
+    return;
+  }
+
+  const entity = parseEntitySourceReference(doc.sourceReference);
+  if (!entity) {
+    res.status(400).json({ error: "Document source reference is invalid" });
+    return;
+  }
+
+  const allowed = await assertTimeflowEntityAccess(entity.entityType, entity.entityId, { organizationId, userId });
+  if (!allowed) {
+    res.status(404).json({ error: `${entity.entityType} not found` });
+    return;
+  }
+
+  if (doc.status === "archived") {
+    res.status(410).json({ error: "Document is archived" });
+    return;
+  }
+
+  res.json({ url: `/api/timeflow/documents/${encodeURIComponent(id)}/download`, expiresIn: 900 });
 });
 
 router.get("/documents/:id/download", async (req, res) => {
@@ -1328,6 +1575,11 @@ router.get("/documents/:id/download", async (req, res) => {
   });
   if (!allowed) {
     res.status(404).json({ error: `${entity.entityType} not found` });
+    return;
+  }
+
+  if (doc.status === "archived") {
+    res.status(410).json({ error: "Document is archived" });
     return;
   }
 
@@ -1910,6 +2162,124 @@ router.patch("/time-entries/bulk", requireTimeflowAuth, async (req, res) => {
   });
 
   res.json({ updated: result.count });
+});
+
+// ─── Expenses ────────────────────────────────────────────────────────────────
+
+router.get("/expenses", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { clientId, status, invoiceId } = req.query;
+  const store = prisma as unknown as {
+    timeflowExpense: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+  };
+
+  const where: Record<string, unknown> = { organizationId, userId };
+  if (typeof clientId === "string") where.clientId = clientId;
+  if (typeof status === "string") where.status = status;
+  if (typeof invoiceId === "string") where.invoiceId = invoiceId;
+
+  const expenses = await store.timeflowExpense.findMany({
+    where,
+    orderBy: { date: "desc" },
+  });
+
+  res.json(expenses);
+});
+
+router.post("/expenses", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    timeflowExpense: { create: (args: Record<string, unknown>) => Promise<Record<string, unknown>> };
+  };
+
+  if (typeof body.date !== "string") {
+    res.status(400).json({ error: "date is required" });
+    return;
+  }
+
+  const expense = await store.timeflowExpense.create({
+    data: {
+      ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
+      organizationId,
+      userId,
+      amount: typeof body.amount === "number" ? body.amount : 0,
+      category: typeof body.category === "string" ? body.category : "other",
+      billableToClient: body.billableToClient !== false,
+      billTo: typeof body.billTo === "string" ? body.billTo : "client",
+      clientId: typeof body.clientId === "string" ? body.clientId : null,
+      date: body.date,
+      description: typeof body.description === "string" ? body.description : "",
+      excludedFromPayPeriod: body.excludedFromPayPeriod === true,
+      includedInPayPeriod: body.includedInPayPeriod === true,
+      invoiceId: typeof body.invoiceId === "string" ? body.invoiceId : null,
+      notes: typeof body.notes === "string" ? body.notes : "",
+      projectId: typeof body.projectId === "string" ? body.projectId : null,
+      receiptAttached: body.receiptAttached === true,
+      status: typeof body.status === "string" ? body.status : "billable",
+      vendor: typeof body.vendor === "string" ? body.vendor : null,
+    },
+  });
+
+  res.status(201).json(expense);
+});
+
+router.put("/expenses/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    timeflowExpense: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowExpense.findFirst({ where: { id, organizationId, userId } });
+  if (!existing) {
+    res.status(404).json({ error: "Expense not found" });
+    return;
+  }
+
+  const data: Record<string, unknown> = {};
+  if (typeof body.amount === "number") data.amount = body.amount;
+  if (typeof body.category === "string") data.category = body.category;
+  if (typeof body.billableToClient === "boolean") data.billableToClient = body.billableToClient;
+  if (typeof body.billTo === "string") data.billTo = body.billTo;
+  if ("clientId" in body) data.clientId = typeof body.clientId === "string" ? body.clientId : null;
+  if (typeof body.date === "string") data.date = body.date;
+  if (typeof body.description === "string") data.description = body.description;
+  if (typeof body.excludedFromPayPeriod === "boolean") data.excludedFromPayPeriod = body.excludedFromPayPeriod;
+  if (typeof body.includedInPayPeriod === "boolean") data.includedInPayPeriod = body.includedInPayPeriod;
+  if ("invoiceId" in body) data.invoiceId = typeof body.invoiceId === "string" ? body.invoiceId : null;
+  if (typeof body.notes === "string") data.notes = body.notes;
+  if ("projectId" in body) data.projectId = typeof body.projectId === "string" ? body.projectId : null;
+  if (typeof body.receiptAttached === "boolean") data.receiptAttached = body.receiptAttached;
+  if (typeof body.status === "string") data.status = body.status;
+  if ("vendor" in body) data.vendor = typeof body.vendor === "string" ? body.vendor : null;
+
+  const updated = await store.timeflowExpense.update({ where: { id }, data });
+  res.json(updated);
+});
+
+router.delete("/expenses/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowExpense: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      delete: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowExpense.findFirst({ where: { id, organizationId, userId } });
+  if (!existing) {
+    res.status(404).json({ error: "Expense not found" });
+    return;
+  }
+
+  await store.timeflowExpense.delete({ where: { id } });
+  res.status(204).send();
 });
 
 // ─── Invoices ─────────────────────────────────────────────────────────────────
