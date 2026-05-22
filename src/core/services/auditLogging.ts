@@ -10,7 +10,7 @@
  * Important: Raw tax IDs are NEVER logged
  */
 
-import prisma from "../db.js";
+import { prisma } from "../db/prisma.js";
 
 export type AuditAction =
   | "tax_id_created"

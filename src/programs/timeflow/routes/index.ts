@@ -1768,18 +1768,34 @@ router.post("/time-entries", requireTimeflowAuth, async (req, res) => {
     return;
   }
 
+  const entryType = body.entryType === "fixed" ? "fixed" : "time";
+  const fixedAmount = entryType === "fixed"
+    ? (typeof body.fixedAmount === "number" ? body.fixedAmount : 0)
+    : null;
+  const durationHours = entryType === "fixed"
+    ? 0
+    : (typeof body.durationHours === "number" ? body.durationHours : 0);
+  const billingRate = entryType === "fixed"
+    ? null
+    : (typeof body.billingRate === "number" ? body.billingRate : null);
+  const endTime = entryType === "fixed"
+    ? null
+    : (typeof body.endTime === "string" ? body.endTime : null);
+
   const entry = await store.timeflowTimeEntry.create({
     data: {
       ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
       organizationId,
       userId,
+      entryType,
+      fixedAmount,
       clientId: body.clientId as string,
       projectId: typeof body.projectId === "string" ? body.projectId : null,
       date: typeof body.date === "string" ? body.date : new Date().toISOString().split("T")[0],
       startTime: typeof body.startTime === "string" ? body.startTime : "00:00",
-      endTime: typeof body.endTime === "string" ? body.endTime : null,
-      durationHours: typeof body.durationHours === "number" ? body.durationHours : 0,
-      billingRate: typeof body.billingRate === "number" ? body.billingRate : null,
+      endTime,
+      durationHours,
+      billingRate,
       billable: body.billable !== false,
       invoiced: body.invoiced === true,
       invoiceId: typeof body.invoiceId === "string" ? body.invoiceId : null,
@@ -1809,13 +1825,35 @@ router.put("/time-entries/:id", requireTimeflowAuth, async (req, res) => {
   }
 
   const data: Record<string, unknown> = {};
+  const effectiveEntryType = body.entryType === "fixed"
+    ? "fixed"
+    : body.entryType === "time"
+      ? "time"
+      : (existing.entryType === "fixed" ? "fixed" : "time");
+
   if (typeof body.clientId === "string") data.clientId = body.clientId;
   if ("projectId" in body) data.projectId = typeof body.projectId === "string" ? body.projectId : null;
   if (typeof body.date === "string") data.date = body.date;
   if (typeof body.startTime === "string") data.startTime = body.startTime;
-  if ("endTime" in body) data.endTime = typeof body.endTime === "string" ? body.endTime : null;
-  if (typeof body.durationHours === "number") data.durationHours = body.durationHours;
-  if ("billingRate" in body) data.billingRate = typeof body.billingRate === "number" ? body.billingRate : null;
+  if ("entryType" in body) data.entryType = effectiveEntryType;
+  if ("fixedAmount" in body) {
+    data.fixedAmount = effectiveEntryType === "fixed" && typeof body.fixedAmount === "number"
+      ? body.fixedAmount
+      : null;
+  }
+  if ("endTime" in body) {
+    data.endTime = effectiveEntryType === "fixed"
+      ? null
+      : (typeof body.endTime === "string" ? body.endTime : null);
+  }
+  if (typeof body.durationHours === "number") {
+    data.durationHours = effectiveEntryType === "fixed" ? 0 : body.durationHours;
+  }
+  if ("billingRate" in body) {
+    data.billingRate = effectiveEntryType === "fixed"
+      ? null
+      : (typeof body.billingRate === "number" ? body.billingRate : null);
+  }
   if (typeof body.billable === "boolean") data.billable = body.billable;
   if (typeof body.invoiced === "boolean") data.invoiced = body.invoiced;
   if ("invoiceId" in body) data.invoiceId = typeof body.invoiceId === "string" ? body.invoiceId : null;

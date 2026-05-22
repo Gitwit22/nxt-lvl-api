@@ -306,6 +306,8 @@ model TimeflowTimeEntry {
   id             String   @id @default(cuid())
   organizationId String
   userId         String
+  entryType      String   @default("time") // time|fixed
+  fixedAmount    Float?
   clientId       String
   projectId      String?
   date           String

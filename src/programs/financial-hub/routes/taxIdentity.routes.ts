@@ -30,6 +30,18 @@ import { logger } from "../../../logger.js";
 
 const router = express.Router();
 
+function firstString(value: string | string[] | undefined): string {
+  if (typeof value === "string") {
+    return value;
+  }
+
+  if (Array.isArray(value) && typeof value[0] === "string") {
+    return value[0];
+  }
+
+  return "";
+}
+
 /**
  * Middleware: Check encryption configuration
  */
@@ -40,7 +52,9 @@ export function checkTaxIdEncryptionMiddleware(
 ): void {
   const config = validateEncryptionConfiguration();
   if (!config.valid) {
-    logger.error("Tax ID encryption misconfigured:", config.error);
+    logger.error("Tax ID encryption misconfigured", {
+      error: config.error,
+    });
     res.status(503).json({
       error: "Tax ID operations are not available due to configuration issues",
       code: "TAX_ID_ENCRYPTION_DISABLED",
@@ -95,11 +109,19 @@ router.post(
   requireFinanceAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { payeeId } = req.params;
+      const payeeId = firstString(req.params.payeeId);
       const { taxIdType, taxId, taxIdStatus } = req.body;
       const organizationId = (req as any).organizationId || "default-org";
       const userId = (req as any).userId || "system";
       const userEmail = (req as any).userEmail;
+
+      if (!payeeId) {
+        res.status(400).json({
+          error: "payeeId is required",
+          code: "INVALID_PAYEE_ID",
+        });
+        return;
+      }
 
       // Validate inputs
       if (!taxIdType || !["SSN", "EIN", "ITIN"].includes(taxIdType)) {
@@ -250,8 +272,16 @@ router.get(
   checkTaxIdEncryptionMiddleware,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { payeeId } = req.params;
+      const payeeId = firstString(req.params.payeeId);
       const organizationId = (req as any).organizationId || "default-org";
+
+      if (!payeeId) {
+        res.status(400).json({
+          error: "payeeId is required",
+          code: "INVALID_PAYEE_ID",
+        });
+        return;
+      }
 
       // Verify payee exists
       const payee = await prisma.payee.findUnique({
@@ -314,12 +344,20 @@ router.post(
   requireFinanceAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { payeeId } = req.params;
+      const payeeId = firstString(req.params.payeeId);
       const organizationId = (req as any).organizationId || "default-org";
       const userId = (req as any).userId || "system";
       const userEmail = (req as any).userEmail;
       const ipAddress = req.ip;
       const userAgent = req.get("user-agent");
+
+      if (!payeeId) {
+        res.status(400).json({
+          error: "payeeId is required",
+          code: "INVALID_PAYEE_ID",
+        });
+        return;
+      }
 
       // Check rate limit
       const withinLimit = await checkRevealRateLimit(userId, organizationId);
@@ -402,10 +440,18 @@ router.delete(
   requireFinanceAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { payeeId } = req.params;
+      const payeeId = firstString(req.params.payeeId);
       const organizationId = (req as any).organizationId || "default-org";
       const userId = (req as any).userId || "system";
       const userEmail = (req as any).userEmail;
+
+      if (!payeeId) {
+        res.status(400).json({
+          error: "payeeId is required",
+          code: "INVALID_PAYEE_ID",
+        });
+        return;
+      }
 
       // Delete secure tax identity
       const deleted = await prisma.payeeSecureTaxIdentity.delete({
@@ -460,9 +506,19 @@ router.get(
   requireFinanceAdmin,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { payeeId } = req.params;
+      const payeeId = firstString(req.params.payeeId);
       const organizationId = (req as any).organizationId || "default-org";
-      const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+      const limitQuery = firstString(req.query.limit as string | string[] | undefined);
+      const parsedLimit = Number.parseInt(limitQuery, 10);
+      const limit = Math.min(Number.isNaN(parsedLimit) ? 50 : parsedLimit, 200);
+
+      if (!payeeId) {
+        res.status(400).json({
+          error: "payeeId is required",
+          code: "INVALID_PAYEE_ID",
+        });
+        return;
+      }
 
       const logs = await getPayeeAuditLog(organizationId, payeeId, limit);
 
