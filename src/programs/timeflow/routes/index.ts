@@ -1345,15 +1345,17 @@ router.post("/documents/upload", upload.single("file"), async (req, res) => {
     return;
   }
 
+  const normalizedEntityType = isTimeflowEntityType(entityType) ? entityType : undefined;
+
   if (entityType && !entityId) {
     res.status(400).json({ error: "entityId is required when entityType is provided" });
     return;
   }
 
-  if (entityType && entityId) {
-    const allowed = await assertTimeflowEntityAccess(entityType, entityId, { organizationId, userId });
+  if (normalizedEntityType && entityId) {
+    const allowed = await assertTimeflowEntityAccess(normalizedEntityType, entityId, { organizationId, userId });
     if (!allowed) {
-      res.status(404).json({ error: `${entityType} not found` });
+      res.status(404).json({ error: `${normalizedEntityType} not found` });
       return;
     }
   }
@@ -1364,7 +1366,7 @@ router.post("/documents/upload", upload.single("file"), async (req, res) => {
   if (isR2Configured()) {
     const key = buildTimeflowR2Key({
       organizationId,
-      entityType: isTimeflowEntityType(entityType) ? entityType : undefined,
+      entityType: normalizedEntityType,
       entityId: entityId || undefined,
       safeFilename,
       stamp,
