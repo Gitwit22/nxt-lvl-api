@@ -12,7 +12,6 @@ import fsPromises from "fs/promises";
 import path from "path";
 import { prisma } from "../../../core/db/prisma.js";
 import {
-  DEFAULT_ORGANIZATION_ID,
   JWT_EXPIRES_IN,
   JWT_SECRET,
   TIMEFLOW_MAX_UPLOAD_BYTES,
@@ -43,7 +42,7 @@ interface TimeflowTokenPayload {
   programDomain: string;
 }
 
-type TimeflowAuthRole = "contractor" | "client_viewer";
+type TimeflowAuthRole = "owner" | "admin" | "manager" | "employee" | "viewer" | "contractor" | "client_viewer";
 type TimeflowEntityType = "client" | "project" | "expense" | "invoice";
 
 type TimeflowUserRecord = {
@@ -81,8 +80,26 @@ function normalizeDisplayName(value: unknown, fallbackEmail: string): string {
   return fallbackEmail.split("@")[0] || "User";
 }
 
+function createPendingOrganizationId() {
+  return `unassigned-${crypto.randomUUID()}`;
+}
+
+function slugifyOrganizationName(name: string) {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || `org-${Math.random().toString(36).slice(2, 8)}`;
+}
+
 function toTimeflowRole(value: string): TimeflowAuthRole {
-  return value === "client_viewer" ? "client_viewer" : "contractor";
+  if (value === "owner") return "owner";
+  if (value === "admin") return "admin";
+  if (value === "manager") return "manager";
+  if (value === "employee") return "employee";
+  if (value === "viewer") return "viewer";
+  if (value === "client_viewer") return "client_viewer";
+  return "contractor";
 }
 
 function signTimeflowToken(user: {
@@ -91,12 +108,13 @@ function signTimeflowToken(user: {
   role: string;
   organizationId: string | null;
 }): string {
+  const organizationId = user.organizationId || createPendingOrganizationId();
   return jwt.sign(
     {
       userId: user.id,
       email: user.email,
       role: user.role,
-      organizationId: user.organizationId || DEFAULT_ORGANIZATION_ID,
+      organizationId,
       programDomain: TIMEFLOW_PROGRAM_DOMAIN,
     },
     JWT_SECRET,
@@ -120,15 +138,35 @@ function writeAuthCookies(res: Response, token: string): void {
 }
 
 function toAuthUserPayload(user: TimeflowUserRecord) {
+  const organizationId = user.organizationId || createPendingOrganizationId();
   return {
     id: user.id,
     email: user.email,
     displayName: user.displayName,
     role: toTimeflowRole(user.role),
-    organizationId: user.organizationId || DEFAULT_ORGANIZATION_ID,
+    organizationId,
     programDomain: TIMEFLOW_PROGRAM_DOMAIN,
     mustChangePassword: user.mustChangePassword ?? false,
   };
+}
+
+async function getUserOrgMemberships(userId: string) {
+  const memberships = await prisma.membership.findMany({
+    where: { userId },
+    include: {
+      organization: {
+        select: { id: true, name: true, slug: true, status: true, isActive: true },
+      },
+    },
+  });
+
+  return memberships
+    .filter((membership) => membership.organization?.isActive !== false && membership.organization?.status !== "archived")
+    .map((membership) => ({
+      organizationId: membership.organizationId,
+      role: membership.role,
+      organizationName: membership.organization?.name ?? "Organization",
+    }));
 }
 
 // ─── TimeFlow direct auth endpoints (DB-backed) ─────────────────────────────
@@ -156,16 +194,18 @@ router.post("/auth/login", async (req, res) => {
   }
 
   const token = signTimeflowToken(user);
+  const memberships = await getUserOrgMemberships(user.id);
   writeAuthCookies(res, token);
   res.setHeader("Authorization", `Bearer ${token}`);
 
   logger.info("[timeflow] direct login success", {
     userId: user.id,
     role: user.role,
-    organizationId: user.organizationId || DEFAULT_ORGANIZATION_ID,
+    organizationId: user.organizationId,
+    memberships: memberships.length,
   });
 
-  res.json({ token, user: toAuthUserPayload(user) });
+  res.json({ token, user: toAuthUserPayload(user), onboardingRequired: memberships.length === 0 });
 });
 
 router.post("/auth/register", async (req, res) => {
@@ -191,7 +231,7 @@ router.post("/auth/register", async (req, res) => {
 
   const user = await prismaUser.user.create({
     data: {
-      organizationId: DEFAULT_ORGANIZATION_ID,
+      organizationId: createPendingOrganizationId(),
       email,
       passwordHash: await hashPassword(password),
       role: "contractor",
@@ -207,10 +247,11 @@ router.post("/auth/register", async (req, res) => {
   logger.info("[timeflow] direct register success", {
     userId: user.id,
     role: user.role,
-    organizationId: user.organizationId || DEFAULT_ORGANIZATION_ID,
+    organizationId: user.organizationId,
+    onboardingRequired: true,
   });
 
-  res.status(201).json({ token, user: toAuthUserPayload(user) });
+  res.status(201).json({ token, user: toAuthUserPayload(user), onboardingRequired: true });
 });
 
 router.get("/auth/me", requireTimeflowAuth, async (req, res) => {
@@ -221,7 +262,252 @@ router.get("/auth/me", requireTimeflowAuth, async (req, res) => {
     return;
   }
 
-  res.json({ user: toAuthUserPayload(user) });
+  const memberships = await getUserOrgMemberships(user.id);
+  res.json({ user: toAuthUserPayload(user), onboardingRequired: memberships.length === 0 });
+});
+
+// ─── Post-signup organization onboarding ────────────────────────────────────
+
+router.get("/setup-organization/status", requireTimeflowAuth, async (req, res) => {
+  const payload = getUser(req);
+  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } });
+  if (!user) {
+    res.status(401).json({ error: "User not found" });
+    return;
+  }
+
+  const memberships = await getUserOrgMemberships(user.id);
+  res.json({
+    onboardingRequired: memberships.length === 0,
+    memberships,
+    user: toAuthUserPayload(user),
+  });
+});
+
+router.post("/setup-organization/create", requireTimeflowAuth, async (req, res) => {
+  const payload = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const organizationName = typeof body.organizationName === "string" ? body.organizationName.trim() : "";
+
+  if (!organizationName) {
+    res.status(400).json({ error: "organizationName is required" });
+    return;
+  }
+
+  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } });
+  if (!user) {
+    res.status(401).json({ error: "User not found" });
+    return;
+  }
+
+  const baseSlug = slugifyOrganizationName(organizationName);
+  let slug = baseSlug;
+  let sequence = 1;
+  // Keep slug unique in a simple deterministic way.
+  while (await prisma.organization.findFirst({ where: { slug } })) {
+    sequence += 1;
+    slug = `${baseSlug}-${sequence}`;
+  }
+
+  const organization = await prisma.organization.create({
+    data: {
+      name: organizationName,
+      slug,
+      ownerEmail: user.email,
+      contactEmail: user.email,
+      status: "active",
+      isActive: true,
+    },
+  });
+
+  await prisma.membership.create({
+    data: {
+      userId: user.id,
+      organizationId: organization.id,
+      role: "owner",
+    },
+  });
+
+  const updatedUser = await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      organizationId: organization.id,
+      role: "owner",
+    },
+  }) as unknown as TimeflowUserRecord;
+
+  await prisma.timeflowSettings.upsert({
+    where: { organizationId_userId: { organizationId: organization.id, userId: user.id } },
+    create: {
+      organizationId: organization.id,
+      userId: user.id,
+      businessName: organizationName,
+      invoiceFrequency: "monthly",
+      periodWeekStartsOn: 1,
+      periodTargetHours: 0,
+      periodTargetEarnings: 0,
+    },
+    update: {
+      businessName: organizationName,
+    },
+  });
+
+  const token = signTimeflowToken(updatedUser);
+  writeAuthCookies(res, token);
+  res.setHeader("Authorization", `Bearer ${token}`);
+
+  res.status(201).json({
+    token,
+    user: toAuthUserPayload(updatedUser),
+    organization: { id: organization.id, name: organization.name, slug: organization.slug },
+    onboardingRequired: false,
+  });
+});
+
+router.post("/setup-organization/solo", requireTimeflowAuth, async (req, res) => {
+  const payload = getUser(req);
+  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } });
+  if (!user) {
+    res.status(401).json({ error: "User not found" });
+    return;
+  }
+
+  const baseName = user.displayName?.trim() || user.email.split("@")[0] || "Solo";
+  const organizationName = `${baseName}'s Workspace`;
+  const baseSlug = slugifyOrganizationName(`${baseName}-workspace`);
+  let slug = baseSlug;
+  let sequence = 1;
+  while (await prisma.organization.findFirst({ where: { slug } })) {
+    sequence += 1;
+    slug = `${baseSlug}-${sequence}`;
+  }
+
+  const organization = await prisma.organization.create({
+    data: {
+      name: organizationName,
+      slug,
+      ownerEmail: user.email,
+      contactEmail: user.email,
+      status: "active",
+      isActive: true,
+    },
+  });
+
+  await prisma.membership.create({
+    data: {
+      userId: user.id,
+      organizationId: organization.id,
+      role: "owner",
+    },
+  });
+
+  const updatedUser = await prisma.user.update({
+    where: { id: user.id },
+    data: {
+      organizationId: organization.id,
+      role: "owner",
+    },
+  }) as unknown as TimeflowUserRecord;
+
+  await prisma.timeflowSettings.upsert({
+    where: { organizationId_userId: { organizationId: organization.id, userId: user.id } },
+    create: {
+      organizationId: organization.id,
+      userId: user.id,
+      businessName: organizationName,
+      invoiceFrequency: "monthly",
+      periodWeekStartsOn: 1,
+      periodTargetHours: 0,
+      periodTargetEarnings: 0,
+    },
+    update: {
+      businessName: organizationName,
+    },
+  });
+
+  const token = signTimeflowToken(updatedUser);
+  writeAuthCookies(res, token);
+  res.setHeader("Authorization", `Bearer ${token}`);
+
+  res.status(201).json({
+    token,
+    user: toAuthUserPayload(updatedUser),
+    organization: { id: organization.id, name: organization.name, slug: organization.slug },
+    onboardingRequired: false,
+  });
+});
+
+router.post("/setup-organization/join", requireTimeflowAuth, async (req, res) => {
+  const payload = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const inviteToken = typeof body.inviteToken === "string" ? body.inviteToken.trim() : "";
+
+  if (!inviteToken) {
+    res.status(400).json({ error: "inviteToken is required" });
+    return;
+  }
+
+  const user = await prismaUser.user.findUnique({ where: { id: payload.userId } });
+  if (!user) {
+    res.status(401).json({ error: "User not found" });
+    return;
+  }
+
+  const invitation = await prisma.orgInvitation.findFirst({
+    where: {
+      token: inviteToken,
+      status: "pending",
+      email: user.email,
+      expiresAt: { gt: new Date() },
+    },
+  });
+
+  if (!invitation) {
+    res.status(404).json({ error: "Invite not found, expired, or already used" });
+    return;
+  }
+
+  const existingMembership = await prisma.membership.findFirst({
+    where: {
+      userId: user.id,
+      organizationId: invitation.organizationId,
+    },
+  });
+
+  if (!existingMembership) {
+    await prisma.membership.create({
+      data: {
+        userId: user.id,
+        organizationId: invitation.organizationId,
+        role: invitation.role || "member",
+      },
+    });
+  }
+
+  await prisma.orgInvitation.update({
+    where: { id: invitation.id },
+    data: { status: "accepted" },
+  });
+
+  const joinedOrganization = await prisma.organization.findFirst({ where: { id: invitation.organizationId } });
+
+  const updatedUser = await prisma.user.update({
+    where: { id: user.id },
+    data: { organizationId: invitation.organizationId },
+  }) as unknown as TimeflowUserRecord;
+
+  const token = signTimeflowToken(updatedUser);
+  writeAuthCookies(res, token);
+  res.setHeader("Authorization", `Bearer ${token}`);
+
+  res.status(200).json({
+    token,
+    user: toAuthUserPayload(updatedUser),
+    organization: joinedOrganization
+      ? { id: joinedOrganization.id, name: joinedOrganization.name, slug: joinedOrganization.slug }
+      : undefined,
+    onboardingRequired: false,
+  });
 });
 
 // ─── Viewer invite endpoints ─────────────────────────────────────────────────
@@ -231,8 +517,8 @@ const INVITE_EXPIRES_IN = "7d";
 
 router.post("/auth/invite/generate", requireTimeflowAuth, async (req, res) => {
   const actor = getUser(req);
-  if (actor.role !== "contractor") {
-    res.status(403).json({ error: "Only contractors can generate viewer invites" });
+  if (!["contractor", "owner", "admin", "manager"].includes(actor.role)) {
+    res.status(403).json({ error: "Only workspace admins can generate viewer invites" });
     return;
   }
 
@@ -295,7 +581,7 @@ router.post("/auth/invite/accept", async (req, res) => {
 
   const user = await prismaUser.user.create({
     data: {
-      organizationId: payload.organizationId || DEFAULT_ORGANIZATION_ID,
+      organizationId: payload.organizationId || createPendingOrganizationId(),
       email,
       passwordHash: await hashPassword(password),
       role: "client_viewer",
@@ -310,7 +596,7 @@ router.post("/auth/invite/accept", async (req, res) => {
       userId: user.id,
       email: user.email,
       role: user.role,
-      organizationId: user.organizationId || DEFAULT_ORGANIZATION_ID,
+      organizationId: user.organizationId,
       programDomain: TIMEFLOW_PROGRAM_DOMAIN,
       clientId: payload.clientId,
     },
