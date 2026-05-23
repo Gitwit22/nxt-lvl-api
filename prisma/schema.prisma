@@ -306,7 +306,7 @@ model TimeflowTimeEntry {
   id             String   @id @default(cuid())
   organizationId String
   userId         String
-  entryType      String   @default("time") // time|fixed
+  entryType      String   @default("time") // time|fixed (legacy; use timeType instead)
   fixedAmount    Float?
   clientId       String
   projectId      String?
@@ -320,6 +320,9 @@ model TimeflowTimeEntry {
   invoiceId      String?
   notes          String   @default("")
   status         String   @default("completed")  // running|completed|invoiced
+  // First-class time entry categorization (replacing keyword-inferred leave types)
+  timeType       String   @default("worked")    // worked|leave|manual|correction
+  leaveType      String?                        // pto|vacation|sick|holiday|unpaid|bereavement|admin_leave (only set when timeType=leave)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -331,6 +334,8 @@ model TimeflowTimeEntry {
   @@index([organizationId, userId, date])
   @@index([organizationId, userId, invoiced])
   @@index([organizationId, userId, status])
+  @@index([organizationId, userId, timeType])
+  @@index([organizationId, userId, leaveType])
 }
 
 model TimeflowExpense {
