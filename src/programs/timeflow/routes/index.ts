@@ -1986,7 +1986,7 @@ router.patch("/projects/:id/restore", requireTimeflowAuth, async (req, res) => {
 
 router.get("/time-entries", requireTimeflowAuth, async (req, res) => {
   const { userId, organizationId } = getUser(req);
-  const { clientId, projectId, invoiced, status, dateFrom, dateTo } = req.query;
+  const { clientId, projectId, workspaceId, invoiced, status, dateFrom, dateTo } = req.query;
   const store = prisma as unknown as {
     timeflowTimeEntry: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
@@ -1994,6 +1994,7 @@ router.get("/time-entries", requireTimeflowAuth, async (req, res) => {
   const where: Record<string, unknown> = { organizationId, userId };
   if (typeof clientId === "string") where.clientId = clientId;
   if (typeof projectId === "string") where.projectId = projectId;
+  if (typeof workspaceId === "string") where.workspaceId = workspaceId;
   if (invoiced === "true") where.invoiced = true;
   if (invoiced === "false") where.invoiced = false;
   if (typeof status === "string") where.status = status;
@@ -2035,11 +2036,18 @@ router.post("/time-entries", requireTimeflowAuth, async (req, res) => {
   const endTime = entryType === "fixed"
     ? null
     : (typeof body.endTime === "string" ? body.endTime : null);
+  const timeType = body.timeType === "leave" || body.timeType === "manual" || body.timeType === "correction"
+    ? body.timeType
+    : "worked";
+  const leaveType = timeType === "leave" && typeof body.leaveType === "string"
+    ? body.leaveType
+    : null;
 
   const entry = await store.timeflowTimeEntry.create({
     data: {
       ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
       organizationId,
+      workspaceId: typeof body.workspaceId === "string" ? body.workspaceId : organizationId,
       userId,
       entryType,
       fixedAmount,
@@ -2055,6 +2063,10 @@ router.post("/time-entries", requireTimeflowAuth, async (req, res) => {
       invoiceId: typeof body.invoiceId === "string" ? body.invoiceId : null,
       notes: typeof body.notes === "string" ? body.notes : "",
       status: typeof body.status === "string" ? body.status : "completed",
+      timeType,
+      leaveType,
+      sourceType: typeof body.sourceType === "string" ? body.sourceType : null,
+      sourceRequestId: typeof body.sourceRequestId === "string" ? body.sourceRequestId : null,
     },
   });
 
@@ -2086,6 +2098,7 @@ router.put("/time-entries/:id", requireTimeflowAuth, async (req, res) => {
       : (existing.entryType === "fixed" ? "fixed" : "time");
 
   if (typeof body.clientId === "string") data.clientId = body.clientId;
+  if (typeof body.workspaceId === "string") data.workspaceId = body.workspaceId;
   if ("projectId" in body) data.projectId = typeof body.projectId === "string" ? body.projectId : null;
   if (typeof body.date === "string") data.date = body.date;
   if (typeof body.startTime === "string") data.startTime = body.startTime;
@@ -2113,6 +2126,16 @@ router.put("/time-entries/:id", requireTimeflowAuth, async (req, res) => {
   if ("invoiceId" in body) data.invoiceId = typeof body.invoiceId === "string" ? body.invoiceId : null;
   if (typeof body.notes === "string") data.notes = body.notes;
   if (typeof body.status === "string") data.status = body.status;
+  if (typeof body.timeType === "string") {
+    data.timeType = body.timeType;
+    data.leaveType = body.timeType === "leave" && typeof body.leaveType === "string"
+      ? body.leaveType
+      : null;
+  } else if ("leaveType" in body) {
+    data.leaveType = typeof body.leaveType === "string" ? body.leaveType : null;
+  }
+  if (typeof body.sourceType === "string") data.sourceType = body.sourceType;
+  if ("sourceRequestId" in body) data.sourceRequestId = typeof body.sourceRequestId === "string" ? body.sourceRequestId : null;
 
   const updated = await store.timeflowTimeEntry.update({ where: { id }, data });
   res.json(updated);
@@ -2164,6 +2187,454 @@ router.patch("/time-entries/bulk", requireTimeflowAuth, async (req, res) => {
   });
 
   res.json({ updated: result.count });
+});
+
+// ─── Time-off requests ───────────────────────────────────────────────────────
+
+router.get("/time-off-requests", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { status, workspaceId } = req.query;
+  const store = prisma as unknown as {
+    timeflowTimeOffRequest: {
+      findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    };
+  };
+
+  const where: Record<string, unknown> = { organizationId };
+  if (typeof status === "string") where.status = status;
+  if (typeof workspaceId === "string") where.workspaceId = workspaceId;
+  if (typeof req.query.employeeId === "string") {
+    where.employeeId = req.query.employeeId;
+  } else {
+    where.OR = [{ employeeId: userId }, { requestedBy: userId }];
+  }
+
+  const requests = await store.timeflowTimeOffRequest.findMany({
+    where,
+    orderBy: [{ requestedAt: "desc" }],
+  });
+
+  res.json(requests);
+});
+
+router.get("/time-off-requests/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowTimeOffRequest: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    };
+  };
+
+  const request = await store.timeflowTimeOffRequest.findFirst({
+    where: {
+      id,
+      organizationId,
+      OR: [{ employeeId: userId }, { requestedBy: userId }, { reviewedBy: userId }],
+    },
+  });
+
+  if (!request) {
+    res.status(404).json({ error: "Time-off request not found" });
+    return;
+  }
+
+  res.json(request);
+});
+
+router.post("/time-off-requests", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId, role } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+
+  const leaveType = typeof body.leaveType === "string" ? body.leaveType : "pto";
+  const startDate = typeof body.startDate === "string" ? body.startDate : new Date().toISOString().slice(0, 10);
+  const endDate = typeof body.endDate === "string" ? body.endDate : startDate;
+  const hoursRequested = typeof body.hoursRequested === "number" ? body.hoursRequested : 0;
+  const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : organizationId;
+  const employeeId = typeof body.employeeId === "string" && body.employeeId.trim() ? body.employeeId : userId;
+  const autoApprove = body.autoApprove === true && ["owner", "admin", "manager", "contractor"].includes(role);
+
+  if (hoursRequested <= 0) {
+    res.status(400).json({ error: "hoursRequested must be greater than 0" });
+    return;
+  }
+
+  const store = prisma as unknown as {
+    timeflowTimeOffRequest: {
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+    timeflowTimeEntry: {
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+    timeflowClient: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    };
+  };
+
+  const request = await store.timeflowTimeOffRequest.create({
+    data: {
+      organizationId,
+      workspaceId,
+      employeeId,
+      leaveType,
+      startDate,
+      endDate,
+      hoursRequested,
+      status: autoApprove ? "approved" : "pending",
+      reason: typeof body.reason === "string" ? body.reason : null,
+      requestedBy: userId,
+      requestedAt: new Date(),
+      reviewedBy: autoApprove ? userId : null,
+      reviewedAt: autoApprove ? new Date() : null,
+      generatedTimeEntryIds: [],
+    },
+  });
+
+  if (!autoApprove) {
+    res.status(201).json({ request });
+    return;
+  }
+
+  const fallbackClient = await store.timeflowClient.findFirst({
+    where: { organizationId, userId: employeeId },
+    orderBy: { createdAt: "asc" },
+  });
+  const clientId = typeof body.clientId === "string"
+    ? body.clientId
+    : (fallbackClient?.id as string | undefined);
+  if (!clientId) {
+    res.status(400).json({ error: "A valid clientId is required to generate leave entries." });
+    return;
+  }
+
+  const generatedEntry = await store.timeflowTimeEntry.create({
+    data: {
+      organizationId,
+      workspaceId,
+      userId: employeeId,
+      entryType: "time",
+      fixedAmount: null,
+      clientId,
+      projectId: typeof body.projectId === "string" ? body.projectId : null,
+      date: startDate,
+      startTime: "09:00",
+      endTime: "17:00",
+      durationHours: hoursRequested,
+      billingRate: null,
+      billable: leaveType !== "unpaid",
+      invoiced: false,
+      invoiceId: null,
+      notes: typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : `Time off request (${leaveType})`,
+      status: "approved",
+      timeType: "leave",
+      leaveType,
+      sourceType: "time_off_request",
+      sourceRequestId: request.id,
+    },
+  });
+
+  const finalizedRequest = await store.timeflowTimeOffRequest.update({
+    where: { id: request.id },
+    data: {
+      generatedTimeEntryIds: [generatedEntry.id],
+    },
+  });
+
+  res.status(201).json({ request: finalizedRequest, generatedEntries: [generatedEntry] });
+});
+
+router.patch("/time-off-requests/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const body = isRecord(req.body) ? req.body : {};
+
+  const store = prisma as unknown as {
+    timeflowTimeOffRequest: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existing = await store.timeflowTimeOffRequest.findFirst({ where: { id, organizationId } });
+  if (!existing) {
+    res.status(404).json({ error: "Time-off request not found" });
+    return;
+  }
+
+  const data: Record<string, unknown> = {};
+  if (typeof body.reason === "string") data.reason = body.reason;
+  if (typeof body.reviewerNote === "string") data.reviewerNote = body.reviewerNote;
+  if (typeof body.startDate === "string") data.startDate = body.startDate;
+  if (typeof body.endDate === "string") data.endDate = body.endDate;
+  if (typeof body.hoursRequested === "number" && body.hoursRequested > 0) data.hoursRequested = body.hoursRequested;
+  data.updatedAt = new Date();
+
+  const updated = await store.timeflowTimeOffRequest.update({ where: { id }, data });
+  res.json(updated);
+});
+
+router.post("/time-off-requests/:id/approve", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const body = isRecord(req.body) ? req.body : {};
+
+  const store = prisma as unknown as {
+    timeflowTimeOffRequest: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+    timeflowTimeEntry: {
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+    timeflowClient: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    };
+  };
+
+  const existing = await store.timeflowTimeOffRequest.findFirst({ where: { id, organizationId } });
+  if (!existing) {
+    res.status(404).json({ error: "Time-off request not found" });
+    return;
+  }
+
+  const requestRecord = existing as Record<string, unknown>;
+  const existingStatus = typeof requestRecord.status === "string" ? requestRecord.status : "pending";
+  if (existingStatus === "approved") {
+    res.status(400).json({ error: "Time-off request is already approved" });
+    return;
+  }
+
+  const leaveType = typeof requestRecord.leaveType === "string" ? requestRecord.leaveType : "pto";
+  const employeeId = (requestRecord.employeeId as string) || userId;
+  const fallbackClient = await store.timeflowClient.findFirst({
+    where: { organizationId, userId: employeeId },
+    orderBy: { createdAt: "asc" },
+  });
+  const clientId = typeof body.clientId === "string"
+    ? body.clientId
+    : (fallbackClient?.id as string | undefined);
+  if (!clientId) {
+    res.status(400).json({ error: "A valid clientId is required to approve and generate leave entries." });
+    return;
+  }
+
+  const entry = await store.timeflowTimeEntry.create({
+    data: {
+      organizationId,
+      workspaceId: (requestRecord.workspaceId as string) || organizationId,
+      userId: employeeId,
+      entryType: "time",
+      fixedAmount: null,
+      clientId,
+      projectId: typeof body.projectId === "string" ? body.projectId : null,
+      date: (requestRecord.startDate as string) || new Date().toISOString().slice(0, 10),
+      startTime: "09:00",
+      endTime: "17:00",
+      durationHours: typeof requestRecord.hoursRequested === "number" ? requestRecord.hoursRequested : 0,
+      billingRate: null,
+      billable: leaveType !== "unpaid",
+      invoiced: false,
+      invoiceId: null,
+      notes: typeof requestRecord.reason === "string" && requestRecord.reason.trim() ? requestRecord.reason : `Time off request (${leaveType})`,
+      status: "approved",
+      timeType: "leave",
+      leaveType,
+      sourceType: "time_off_request",
+      sourceRequestId: id,
+    },
+  });
+
+  const updatedRequest = await store.timeflowTimeOffRequest.update({
+    where: { id },
+    data: {
+      status: "approved",
+      reviewedBy: userId,
+      reviewedAt: new Date(),
+      reviewerNote: typeof body.reviewerNote === "string" ? body.reviewerNote : null,
+      generatedTimeEntryIds: [entry.id],
+    },
+  });
+
+  res.json({ request: updatedRequest, generatedEntries: [entry] });
+});
+
+router.post("/time-off-requests/:id/deny", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const body = isRecord(req.body) ? req.body : {};
+  const store = prisma as unknown as {
+    timeflowTimeOffRequest: {
+      updateMany: (args: Record<string, unknown>) => Promise<{ count: number }>;
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    };
+  };
+
+  await store.timeflowTimeOffRequest.updateMany({
+    where: { id, organizationId },
+    data: {
+      status: "denied",
+      reviewedBy: userId,
+      reviewedAt: new Date(),
+      reviewerNote: typeof body.reviewerNote === "string" ? body.reviewerNote : null,
+    },
+  });
+
+  const updated = await store.timeflowTimeOffRequest.findFirst({ where: { id, organizationId } });
+  if (!updated) {
+    res.status(404).json({ error: "Time-off request not found" });
+    return;
+  }
+  res.json(updated);
+});
+
+router.post("/time-off-requests/:id/cancel", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { id } = req.params;
+  const store = prisma as unknown as {
+    timeflowTimeOffRequest: {
+      updateMany: (args: Record<string, unknown>) => Promise<{ count: number }>;
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    };
+  };
+
+  await store.timeflowTimeOffRequest.updateMany({
+    where: {
+      id,
+      organizationId,
+      OR: [{ requestedBy: userId }, { employeeId: userId }],
+    },
+    data: { status: "cancelled" },
+  });
+
+  const updated = await store.timeflowTimeOffRequest.findFirst({ where: { id, organizationId } });
+  if (!updated) {
+    res.status(404).json({ error: "Time-off request not found" });
+    return;
+  }
+  res.json(updated);
+});
+
+// ─── Export helpers ─────────────────────────────────────────────────────────
+
+router.get("/exports/pay-period-summary", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { startDate, endDate, workspaceId } = req.query;
+  if (typeof startDate !== "string" || typeof endDate !== "string") {
+    res.status(400).json({ error: "startDate and endDate are required" });
+    return;
+  }
+
+  const store = prisma as unknown as {
+    timeflowTimeEntry: {
+      findMany: (args: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+    };
+  };
+
+  const where: Record<string, unknown> = {
+    organizationId,
+    userId,
+    date: {
+      gte: startDate,
+      lte: endDate,
+    },
+  };
+  if (typeof workspaceId === "string") where.workspaceId = workspaceId;
+
+  const entries = await store.timeflowTimeEntry.findMany({ where });
+  const totalHours = entries.reduce((sum, entry) => sum + (typeof entry.durationHours === "number" ? entry.durationHours : 0), 0);
+  const byStatus = entries.reduce<Record<string, number>>((acc, entry) => {
+    const status = typeof entry.status === "string" ? entry.status : "unknown";
+    acc[status] = (acc[status] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  res.json({
+    startDate,
+    endDate,
+    workspaceId: typeof workspaceId === "string" ? workspaceId : null,
+    totalEntries: entries.length,
+    totalHours: Number(totalHours.toFixed(2)),
+    byStatus,
+  });
+});
+
+router.get("/exports/pay-period-preview", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const { startDate, endDate, workspaceId } = req.query;
+  if (typeof startDate !== "string" || typeof endDate !== "string") {
+    res.status(400).json({ error: "startDate and endDate are required" });
+    return;
+  }
+
+  const store = prisma as unknown as {
+    timeflowTimeEntry: {
+      findMany: (args: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+    };
+  };
+
+  const where: Record<string, unknown> = {
+    organizationId,
+    userId,
+    date: {
+      gte: startDate,
+      lte: endDate,
+    },
+  };
+  if (typeof workspaceId === "string") where.workspaceId = workspaceId;
+
+  const entries = await store.timeflowTimeEntry.findMany({
+    where,
+    orderBy: [{ date: "asc" }, { startTime: "asc" }],
+  });
+
+  res.json({ entries });
+});
+
+router.post("/exports/repair-workspace-scope", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+
+  const workspaceId = typeof body.workspaceId === "string" ? body.workspaceId : organizationId;
+  const startDate = typeof body.startDate === "string" ? body.startDate : undefined;
+  const endDate = typeof body.endDate === "string" ? body.endDate : undefined;
+
+  const store = prisma as unknown as {
+    timeflowTimeEntry: {
+      updateMany: (args: Record<string, unknown>) => Promise<{ count: number }>;
+    };
+  };
+
+  const where: Record<string, unknown> = {
+    organizationId,
+    userId,
+    OR: [{ workspaceId: null }, { workspaceId: "" }],
+  };
+  if (startDate || endDate) {
+    where.date = {};
+    if (startDate) (where.date as Record<string, unknown>).gte = startDate;
+    if (endDate) (where.date as Record<string, unknown>).lte = endDate;
+  }
+
+  const result = await store.timeflowTimeEntry.updateMany({
+    where,
+    data: {
+      workspaceId,
+    },
+  });
+
+  res.json({ repaired: result.count });
+});
+
+router.post("/exports/create", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  res.status(201).json({
+    exportId: `exp-${Math.random().toString(36).slice(2, 10)}`,
+    createdBy: userId,
+    createdAt: new Date().toISOString(),
+    payload: body,
+  });
 });
 
 // ─── Expenses ────────────────────────────────────────────────────────────────

@@ -305,6 +305,7 @@ model TimeflowProject {
 model TimeflowTimeEntry {
   id             String   @id @default(cuid())
   organizationId String
+  workspaceId    String?
   userId         String
   entryType      String   @default("time") // time|fixed (legacy; use timeType instead)
   fixedAmount    Float?
@@ -323,6 +324,8 @@ model TimeflowTimeEntry {
   // First-class time entry categorization (replacing keyword-inferred leave types)
   timeType       String   @default("worked")    // worked|leave|manual|correction
   leaveType      String?                        // pto|vacation|sick|holiday|unpaid|bereavement|admin_leave (only set when timeType=leave)
+  sourceType     String?                        // manual|clock|time_off_request|correction
+  sourceRequestId String?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -336,6 +339,33 @@ model TimeflowTimeEntry {
   @@index([organizationId, userId, status])
   @@index([organizationId, userId, timeType])
   @@index([organizationId, userId, leaveType])
+  @@index([organizationId, userId, workspaceId])
+}
+
+model TimeflowTimeOffRequest {
+  id                   String   @id @default(cuid())
+  organizationId       String
+  workspaceId          String
+  employeeId           String
+  leaveType            String   // pto|vacation|sick|holiday|unpaid|bereavement|admin_leave
+  startDate            String
+  endDate              String
+  hoursRequested       Float
+  status               String   @default("pending") // pending|approved|denied|cancelled
+  reason               String?  @db.Text
+  reviewerNote         String?  @db.Text
+  requestedBy          String
+  requestedAt          DateTime @default(now())
+  reviewedBy           String?
+  reviewedAt           DateTime?
+  generatedTimeEntryIds Json    @default("[]")
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([organizationId, workspaceId])
+  @@index([organizationId, employeeId])
+  @@index([organizationId, status])
+  @@index([organizationId, startDate, endDate])
 }
 
 model TimeflowExpense {
