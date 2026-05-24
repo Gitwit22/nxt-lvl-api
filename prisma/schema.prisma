@@ -456,6 +456,44 @@ model TimeflowProjectBill {
   @@index([organizationId, userId, issueDate])
 }
 
+// TimeFlow workspace metadata — solo/team type, default flag
+model TimeflowWorkspaceMeta {
+  id             String   @id @default(cuid())
+  organizationId String   @unique
+  workspaceType  String   @default("solo")  // solo | team
+  teamEnabled    Boolean  @default(false)
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([organizationId])
+}
+
+// TimeFlow persistent team member invites (separate from viewer invite flow)
+model TimeflowWorkspaceInvite {
+  id             String    @id @default(cuid())
+  organizationId String
+  email          String
+  name           String?
+  role           String    @default("employee") // owner|admin|manager|employee|viewer
+  employeeType   String    @default("employee") // employee|contractor|volunteer|intern
+  hourlyRate     Float?
+  canClockInOut  Boolean   @default(true)
+  status         String    @default("pending")  // pending|accepted|expired|revoked
+  tokenHash      String    @unique              // SHA-256 of raw token — never store raw
+  expiresAt      DateTime
+  invitedByUserId String
+  invitedAt      DateTime  @default(now())
+  acceptedAt     DateTime?
+  lastResentAt   DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  @@index([organizationId, status])
+  @@index([tokenHash])
+  @@index([email, status])
+}
+
 // ─── End Timeflow ──────────────────────────────────────────────────────────────
 
 // ─── Mission Hub ──────────────────────────────────────────────────────────────

@@ -9,6 +9,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import jwt from "jsonwebtoken";
 import fs from "fs";
 import fsPromises from "fs/promises";
+import crypto from "crypto";
 import path from "path";
 import { prisma } from "../../../core/db/prisma.js";
 import {
@@ -19,6 +20,7 @@ import {
 } from "../../../core/config/env.js";
 import { hashPassword, verifyPassword } from "../../../core/auth/auth.service.js";
 import { createDocumentPayload } from "../../../documentFactory.js";
+import { sendTimeflowTeamInviteEmail } from "../../../core/services/email.service.js";
 import { logger } from "../../../logger.js";
 import { upload } from "../../../validators.js";
 import {
@@ -328,6 +330,14 @@ router.post("/setup-organization/create", requireTimeflowAuth, async (req, res) 
     },
   });
 
+  await (prisma as unknown as {
+    timeflowWorkspaceMeta: { upsert: (args: Record<string, unknown>) => Promise<unknown> };
+  }).timeflowWorkspaceMeta.upsert({
+    where: { organizationId: organization.id },
+    create: { organizationId: organization.id, workspaceType: "solo", teamEnabled: false, isDefault: true },
+    update: { workspaceType: "solo", teamEnabled: false, isDefault: true },
+  });
+
   const updatedUser = await prisma.user.update({
     where: { id: user.id },
     data: {
@@ -399,6 +409,14 @@ router.post("/setup-organization/solo", requireTimeflowAuth, async (req, res) =>
       organizationId: organization.id,
       role: "owner",
     },
+  });
+
+  await (prisma as unknown as {
+    timeflowWorkspaceMeta: { upsert: (args: Record<string, unknown>) => Promise<unknown> };
+  }).timeflowWorkspaceMeta.upsert({
+    where: { organizationId: organization.id },
+    create: { organizationId: organization.id, workspaceType: "solo", teamEnabled: false, isDefault: true },
+    update: { workspaceType: "solo", teamEnabled: false, isDefault: true },
   });
 
   const updatedUser = await prisma.user.update({
@@ -3331,6 +3349,856 @@ router.delete("/project-bills/:id", requireTimeflowAuth, async (req, res) => {
 
 router.get("/health", (_req, res) => {
   res.json({ ok: true, program: "timeflow", status: "ready" });
+});
+
+// ─── Workspace management ────────────────────────────────────────────────────
+
+type WorkspaceStore = {
+  organization: {
+    findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+  membership: {
+    count: (args: Record<string, unknown>) => Promise<number>;
+  };
+  timeflowWorkspaceMeta: {
+    findUnique: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    upsert: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  };
+  timeflowWorkspaceInvite: {
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]>;
+    findUnique: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    updateMany: (args: Record<string, unknown>) => Promise<{ count: number }>;
+  };
+  timeflowClient: {
+    count: (args: Record<string, unknown>) => Promise<number>;
+  };
+  timeflowProject: {
+    count: (args: Record<string, unknown>) => Promise<number>;
+  };
+  timeflowTimeEntry: {
+    count: (args: Record<string, unknown>) => Promise<number>;
+  };
+  timeflowExpense: {
+    count: (args: Record<string, unknown>) => Promise<number>;
+  };
+  timeflowInvoice: {
+    count: (args: Record<string, unknown>) => Promise<number>;
+  };
+};
+
+function getWorkspaceStore(): WorkspaceStore {
+  return prisma as unknown as WorkspaceStore;
+}
+
+function hashInviteToken(raw: string): string {
+  return crypto.createHash("sha256").update(raw).digest("hex");
+}
+
+function generateWorkspaceInviteToken(): { raw: string; hash: string } {
+  const raw = crypto.randomBytes(32).toString("hex");
+  return { raw, hash: hashInviteToken(raw) };
+}
+
+function workspaceInviteExpiresAt(): Date {
+  return new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+}
+
+function toWorkspaceMeta(org: Record<string, unknown>, meta: Record<string, unknown> | null, memberCount: number) {
+  const workspaceType = (meta?.workspaceType as string) ?? (memberCount > 1 ? "team" : "solo");
+  return {
+    workspaceType,
+    solo: workspaceType === "solo",
+    teamEnabled: Boolean(meta?.teamEnabled ?? (memberCount > 1)),
+    isDefault: Boolean(meta?.isDefault ?? false),
+  };
+}
+
+// GET /organizations — list all user's workspaces
+router.get("/organizations", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId: tokenOrganizationId } = getUser(req);
+  const store = getWorkspaceStore();
+
+  const memberships = await (prisma as unknown as {
+    membership: { findMany: (args: Record<string, unknown>) => Promise<Array<{ organizationId: string; role: string }>> };
+  }).membership.findMany({
+    where: { userId },
+    select: { organizationId: true, role: true },
+  });
+
+  if (memberships.length === 0) {
+    res.json({ organizations: [] });
+    return;
+  }
+
+  const orgIds = memberships.map((m) => m.organizationId);
+
+  const [orgs, metas, memberCounts] = await Promise.all([
+    (prisma as unknown as {
+      organization: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+    }).organization.findMany({
+      where: { id: { in: orgIds }, isActive: true },
+      select: { id: true, name: true, ownerEmail: true, createdAt: true, status: true },
+    }),
+    (prisma as unknown as {
+      timeflowWorkspaceMeta: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
+    }).timeflowWorkspaceMeta.findMany({
+      where: { organizationId: { in: orgIds } },
+    }),
+    (prisma as unknown as {
+      membership: { groupBy: (args: Record<string, unknown>) => Promise<Array<{ organizationId: string; _count: { id: number } }>> };
+    }).membership.groupBy({
+      by: ["organizationId"],
+      where: { organizationId: { in: orgIds } },
+      _count: { id: true },
+    }),
+  ]);
+
+  const metaMap = new Map(metas.map((m) => [m.organizationId as string, m]));
+  const memberCountMap = new Map(memberCounts.map((mc) => [mc.organizationId, mc._count.id]));
+  const roleMap = new Map(memberships.map((m) => [m.organizationId, m.role]));
+
+  const result = orgs.map((org) => {
+    const orgId = org.id as string;
+    const count = memberCountMap.get(orgId) ?? 1;
+    const meta = metaMap.get(orgId) ?? null;
+    const metaPayload = toWorkspaceMeta(org, meta, count);
+    return {
+      id: orgId,
+      name: org.name,
+      ownerUserId: org.ownerEmail,
+      createdAt: org.createdAt,
+      status: org.status,
+      role: roleMap.get(orgId) ?? "member",
+      ...metaPayload,
+      isDefault: Boolean(metaPayload.isDefault || tokenOrganizationId === orgId),
+    };
+  });
+
+  res.json({ organizations: result });
+});
+
+// POST /organizations — create a new workspace for current user
+router.post("/organizations", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const body = isRecord(req.body) ? req.body : {};
+  const requestedName = typeof body.name === "string" ? body.name.trim() : "";
+  const workspaceType = body.workspaceType === "solo" ? "solo" : "team";
+
+  const user = await prismaUser.user.findUnique({ where: { id: userId } });
+  if (!user) {
+    res.status(401).json({ error: "User not found" });
+    return;
+  }
+
+  const organizationName = requestedName || `${user.displayName || user.email.split("@")[0] || "Workspace"} Team`;
+  const baseSlug = slugifyOrganizationName(organizationName);
+  let slug = baseSlug;
+  let sequence = 1;
+  while (await prisma.organization.findFirst({ where: { slug } })) {
+    sequence += 1;
+    slug = `${baseSlug}-${sequence}`;
+  }
+
+  const organization = await prisma.organization.create({
+    data: {
+      name: organizationName,
+      slug,
+      ownerEmail: user.email,
+      contactEmail: user.email,
+      status: "active",
+      isActive: true,
+    },
+  });
+
+  await prisma.membership.create({
+    data: {
+      userId: user.id,
+      organizationId: organization.id,
+      role: "owner",
+    },
+  });
+
+  await (prisma as unknown as {
+    timeflowWorkspaceMeta: { upsert: (args: Record<string, unknown>) => Promise<unknown> };
+  }).timeflowWorkspaceMeta.upsert({
+    where: { organizationId: organization.id },
+    create: {
+      organizationId: organization.id,
+      workspaceType,
+      teamEnabled: workspaceType === "team",
+      isDefault: false,
+    },
+    update: {
+      workspaceType,
+      teamEnabled: workspaceType === "team",
+    },
+  });
+
+  res.status(201).json({
+    organization: {
+      id: organization.id,
+      name: organization.name,
+      ownerUserId: user.id,
+      createdAt: organization.createdAt,
+      status: organization.status,
+      workspaceType,
+      solo: workspaceType === "solo",
+      teamEnabled: workspaceType === "team",
+      isDefault: false,
+    },
+  });
+});
+
+// PATCH /organizations/:id — rename workspace
+router.patch("/organizations/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const { id } = req.params;
+  const body = isRecord(req.body) ? req.body : {};
+  const name = typeof body.name === "string" ? body.name.trim() : "";
+
+  if (!name) {
+    res.status(400).json({ error: "name is required" });
+    return;
+  }
+
+  const store = getWorkspaceStore();
+
+  // Must be owner or admin
+  const membership = await (prisma as unknown as {
+    membership: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  }).membership.findFirst({ where: { userId, organizationId: id } });
+
+  if (!membership || !["owner", "admin"].includes(membership.role as string)) {
+    res.status(403).json({ error: "Only workspace owners and admins can rename a workspace" });
+    return;
+  }
+
+  const updated = await store.organization.update({
+    where: { id },
+    data: { name },
+  });
+
+  res.json({ id: updated.id, name: updated.name });
+});
+
+// POST /organizations/:id/archive — archive workspace
+router.post("/organizations/:id/archive", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const { id } = req.params;
+
+  const membership = await (prisma as unknown as {
+    membership: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  }).membership.findFirst({ where: { userId, organizationId: id } });
+
+  if (!membership || membership.role !== "owner") {
+    res.status(403).json({ error: "Only the workspace owner can archive it" });
+    return;
+  }
+
+  // Cannot archive last workspace
+  const totalWorkspaces = await (prisma as unknown as {
+    membership: { count: (args: Record<string, unknown>) => Promise<number> };
+  }).membership.count({ where: { userId } });
+
+  if (totalWorkspaces <= 1) {
+    res.status(400).json({ error: "Cannot archive your only workspace" });
+    return;
+  }
+
+  const store = getWorkspaceStore();
+  await store.organization.update({ where: { id }, data: { status: "archived", isActive: false } });
+
+  res.json({ archived: true });
+});
+
+// DELETE /organizations/:id — delete workspace (only if empty and not last)
+router.delete("/organizations/:id", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const { id } = req.params;
+
+  const membership = await (prisma as unknown as {
+    membership: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  }).membership.findFirst({ where: { userId, organizationId: id } });
+
+  if (!membership || membership.role !== "owner") {
+    res.status(403).json({ error: "Only the workspace owner can delete it" });
+    return;
+  }
+
+  const totalWorkspaces = await (prisma as unknown as {
+    membership: { count: (args: Record<string, unknown>) => Promise<number> };
+  }).membership.count({ where: { userId } });
+
+  if (totalWorkspaces <= 1) {
+    res.status(400).json({ error: "Cannot delete your only workspace. Archive it instead." });
+    return;
+  }
+
+  const store = getWorkspaceStore();
+
+  // Check non-owner members
+  const nonOwnerMemberCount = await store.membership.count({
+    where: { organizationId: id, NOT: { userId } },
+  });
+
+  if (nonOwnerMemberCount > 0) {
+    res.status(400).json({
+      error: "Workspace has team members. Remove all members before deleting.",
+      code: "has_members",
+    });
+    return;
+  }
+
+  // Check data
+  const [clients, projects, timeEntries, expenses, invoices] = await Promise.all([
+    store.timeflowClient.count({ where: { organizationId: id } }),
+    store.timeflowProject.count({ where: { organizationId: id } }),
+    store.timeflowTimeEntry.count({ where: { organizationId: id } }),
+    store.timeflowExpense.count({ where: { organizationId: id } }),
+    store.timeflowInvoice.count({ where: { organizationId: id } }),
+  ]);
+
+  const hasData = clients > 0 || projects > 0 || timeEntries > 0 || expenses > 0 || invoices > 0;
+  if (hasData) {
+    res.status(400).json({
+      error: "Workspace has data. Archive it instead of deleting.",
+      code: "has_data",
+      details: { clients, projects, timeEntries, expenses, invoices },
+    });
+    return;
+  }
+
+  // Safe to delete — hard delete org and memberships
+  await (prisma as unknown as {
+    membership: { deleteMany: (args: Record<string, unknown>) => Promise<unknown> };
+  }).membership.deleteMany({ where: { organizationId: id } });
+
+  await store.organization.update({ where: { id }, data: { isActive: false, status: "archived" } });
+
+  res.json({ deleted: true });
+});
+
+// POST /organizations/:id/convert-to-team — solo → team conversion
+router.post("/organizations/:id/convert-to-team", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const { id } = req.params;
+
+  const membership = await (prisma as unknown as {
+    membership: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  }).membership.findFirst({ where: { userId, organizationId: id } });
+
+  if (!membership || !["owner", "admin"].includes(membership.role as string)) {
+    res.status(403).json({ error: "Only owner or admin can convert workspace type" });
+    return;
+  }
+
+  const store = getWorkspaceStore();
+  const meta = await store.timeflowWorkspaceMeta.upsert({
+    where: { organizationId: id },
+    create: { organizationId: id, workspaceType: "team", teamEnabled: true },
+    update: { workspaceType: "team", teamEnabled: true },
+  });
+
+  res.json({ organizationId: id, workspaceType: meta.workspaceType, teamEnabled: meta.teamEnabled });
+});
+
+// POST /organizations/:id/set-default — set user's default workspace
+router.post("/organizations/:id/set-default", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const { id } = req.params;
+
+  const membershipStore = prisma as unknown as {
+    membership: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      findMany: (args: Record<string, unknown>) => Promise<Array<{ organizationId: string }>>;
+    };
+  };
+
+  const hasMembership = await membershipStore.membership.findFirst({ where: { userId, organizationId: id } });
+  if (!hasMembership) {
+    res.status(403).json({ error: "You are not a member of this workspace" });
+    return;
+  }
+
+  const userMemberships = await membershipStore.membership.findMany({ where: { userId }, select: { organizationId: true } });
+  const orgIds = userMemberships.map((m) => m.organizationId);
+
+  const metaStore = prisma as unknown as {
+    timeflowWorkspaceMeta: {
+      updateMany: (args: Record<string, unknown>) => Promise<{ count: number }>;
+      upsert: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  await metaStore.timeflowWorkspaceMeta.updateMany({
+    where: { organizationId: { in: orgIds } },
+    data: { isDefault: false },
+  });
+
+  await metaStore.timeflowWorkspaceMeta.upsert({
+    where: { organizationId: id },
+    create: { organizationId: id, isDefault: true, workspaceType: "solo", teamEnabled: false },
+    update: { isDefault: true },
+  });
+
+  await prisma.user.update({ where: { id: userId }, data: { organizationId: id } });
+
+  res.json({ defaultWorkspaceId: id });
+});
+
+// POST /organizations/:id/transfer-ownership — transfer owner role to another member
+router.post("/organizations/:id/transfer-ownership", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const { id } = req.params;
+  const body = isRecord(req.body) ? req.body : {};
+  const newOwnerEmail = normalizeEmail(body.newOwnerEmail);
+
+  if (!newOwnerEmail) {
+    res.status(400).json({ error: "newOwnerEmail is required" });
+    return;
+  }
+
+  const membershipStore = prisma as unknown as {
+    membership: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const actorMembership = await membershipStore.membership.findFirst({ where: { userId, organizationId: id } });
+  if (!actorMembership || actorMembership.role !== "owner") {
+    res.status(403).json({ error: "Only the workspace owner can transfer ownership" });
+    return;
+  }
+
+  const targetUser = await prismaUser.user.findUnique({ where: { email: newOwnerEmail } });
+  if (!targetUser) {
+    res.status(404).json({ error: "Target user account not found" });
+    return;
+  }
+
+  const targetMembership = await membershipStore.membership.findFirst({
+    where: { userId: targetUser.id, organizationId: id },
+  });
+
+  if (!targetMembership) {
+    res.status(400).json({ error: "Target user must be a workspace member before ownership transfer" });
+    return;
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.membership.update({ where: { id: actorMembership.id as string }, data: { role: "admin" } });
+    await tx.membership.update({ where: { id: targetMembership.id as string }, data: { role: "owner" } });
+    await tx.organization.update({ where: { id }, data: { ownerEmail: targetUser.email } });
+  });
+
+  res.json({ transferred: true, newOwnerEmail });
+});
+
+// ─── Team Invites ─────────────────────────────────────────────────────────────
+
+const TEAM_INVITE_RESEND_COOLDOWN_MS = 60_000;
+
+// POST /team-invites — create a new team invite and send email
+router.post("/team-invites", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId, role: actorRole } = getUser(req);
+
+  if (!["owner", "admin"].includes(actorRole)) {
+    res.status(403).json({ error: "Only owners and admins can invite team members" });
+    return;
+  }
+
+  const body = isRecord(req.body) ? req.body : {};
+  const email = normalizeEmail(body.email);
+  const name = typeof body.name === "string" ? body.name.trim() : undefined;
+  const role = typeof body.role === "string" ? body.role : "employee";
+  const employeeType = typeof body.employeeType === "string" ? body.employeeType : "employee";
+  const hourlyRate = typeof body.hourlyRate === "number" ? body.hourlyRate : undefined;
+  const canClockInOut = body.canClockInOut !== false;
+  const targetOrgId = typeof body.organizationId === "string" ? body.organizationId : organizationId;
+
+  if (!email) {
+    res.status(400).json({ error: "email is required" });
+    return;
+  }
+
+  const store = getWorkspaceStore();
+
+  // Verify actor membership in target org
+  const actorMembership = await (prisma as unknown as {
+    membership: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  }).membership.findFirst({ where: { userId, organizationId: targetOrgId } });
+
+  if (!actorMembership) {
+    res.status(403).json({ error: "Not a member of this workspace" });
+    return;
+  }
+
+  // Expire any old pending invites for this email in the org
+  await store.timeflowWorkspaceInvite.updateMany({
+    where: { organizationId: targetOrgId, email, status: "pending" },
+    data: { status: "expired" },
+  });
+
+  const { raw, hash } = generateWorkspaceInviteToken();
+  const expiresAt = workspaceInviteExpiresAt();
+
+  const invite = await store.timeflowWorkspaceInvite.create({
+    data: {
+      organizationId: targetOrgId,
+      email,
+      name: name || undefined,
+      role,
+      employeeType,
+      hourlyRate: hourlyRate ?? undefined,
+      canClockInOut,
+      status: "pending",
+      tokenHash: hash,
+      expiresAt,
+      invitedByUserId: userId,
+    },
+  });
+
+  // Fetch org name for email
+  const org = await store.organization.findFirst({
+    where: { id: targetOrgId },
+    select: { name: true },
+  } as Record<string, unknown>);
+
+  const orgName = (org?.name as string) ?? "your workspace";
+  const recipientName = name || email.split("@")[0];
+
+  const emailSent = await sendTimeflowTeamInviteEmail({
+    to: email,
+    recipientName,
+    organizationName: orgName,
+    role,
+    rawToken: raw,
+    expiresAt,
+  }).catch(() => false);
+
+  logger.info("[timeflow] team invite created", {
+    inviteId: invite.id,
+    organizationId: targetOrgId,
+    email,
+    emailSent,
+  });
+
+  res.status(201).json({
+    invite: {
+      id: invite.id,
+      organizationId: invite.organizationId,
+      email: invite.email,
+      name: invite.name,
+      role: invite.role,
+      employeeType: invite.employeeType,
+      hourlyRate: invite.hourlyRate,
+      canClockInOut: invite.canClockInOut,
+      status: invite.status,
+      expiresAt: invite.expiresAt,
+      invitedAt: invite.invitedAt,
+    },
+    emailSent,
+  });
+});
+
+// GET /team-invites — list invites for active org
+router.get("/team-invites", requireTimeflowAuth, async (req, res) => {
+  const { userId, organizationId } = getUser(req);
+  const targetOrgId = typeof req.query.organizationId === "string" ? req.query.organizationId : organizationId;
+
+  const actorMembership = await (prisma as unknown as {
+    membership: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  }).membership.findFirst({ where: { userId, organizationId: targetOrgId } });
+
+  if (!actorMembership) {
+    res.status(403).json({ error: "Not a member of this workspace" });
+    return;
+  }
+
+  const store = getWorkspaceStore();
+  const invites = await store.timeflowWorkspaceInvite.findMany({
+    where: { organizationId: targetOrgId, status: { in: ["pending", "accepted"] } },
+    orderBy: { invitedAt: "desc" },
+  } as Record<string, unknown>);
+
+  res.json({
+    invites: invites.map((inv) => ({
+      id: inv.id,
+      organizationId: inv.organizationId,
+      email: inv.email,
+      name: inv.name,
+      role: inv.role,
+      employeeType: inv.employeeType,
+      hourlyRate: inv.hourlyRate,
+      canClockInOut: inv.canClockInOut,
+      status: inv.status,
+      expiresAt: inv.expiresAt,
+      invitedAt: inv.invitedAt,
+      acceptedAt: inv.acceptedAt,
+    })),
+  });
+});
+
+// POST /team-invites/:id/resend — resend invite email
+router.post("/team-invites/:id/resend", requireTimeflowAuth, async (req, res) => {
+  const { organizationId, role: actorRole } = getUser(req);
+  const { id } = req.params;
+
+  if (!["owner", "admin"].includes(actorRole)) {
+    res.status(403).json({ error: "Only owners and admins can resend invites" });
+    return;
+  }
+
+  const store = getWorkspaceStore();
+  const invite = await store.timeflowWorkspaceInvite.findFirst({
+    where: { id, organizationId },
+    select: {
+      id: true, organizationId: true, email: true, name: true, role: true,
+      status: true, lastResentAt: true, expiresAt: true,
+    },
+  } as Record<string, unknown>);
+
+  if (!invite) {
+    res.status(404).json({ error: "Invite not found" });
+    return;
+  }
+
+  if (invite.status !== "pending") {
+    res.status(400).json({ error: "Only pending invites can be resent" });
+    return;
+  }
+
+  const lastResent = invite.lastResentAt ? new Date(invite.lastResentAt as string).getTime() : 0;
+  if (Date.now() - lastResent < TEAM_INVITE_RESEND_COOLDOWN_MS) {
+    res.status(429).json({ error: "Please wait before resending again" });
+    return;
+  }
+
+  // Regenerate token (old link becomes invalid)
+  const { raw, hash } = generateWorkspaceInviteToken();
+  const expiresAt = workspaceInviteExpiresAt();
+
+  await store.timeflowWorkspaceInvite.update({
+    where: { id },
+    data: { tokenHash: hash, expiresAt, lastResentAt: new Date() },
+  });
+
+  const org = await store.organization.findFirst({
+    where: { id: organizationId },
+    select: { name: true },
+  } as Record<string, unknown>);
+
+  const orgName = (org?.name as string) ?? "your workspace";
+  const recipientName = (invite.name as string | null | undefined) || (invite.email as string).split("@")[0];
+
+  const emailSent = await sendTimeflowTeamInviteEmail({
+    to: invite.email as string,
+    recipientName,
+    organizationName: orgName,
+    role: invite.role as string,
+    rawToken: raw,
+    expiresAt,
+  }).catch(() => false);
+
+  res.json({ resent: true, emailSent });
+});
+
+// DELETE /team-invites/:id — revoke invite
+router.delete("/team-invites/:id", requireTimeflowAuth, async (req, res) => {
+  const { organizationId, role: actorRole } = getUser(req);
+  const { id } = req.params;
+
+  if (!["owner", "admin"].includes(actorRole)) {
+    res.status(403).json({ error: "Only owners and admins can revoke invites" });
+    return;
+  }
+
+  const store = getWorkspaceStore();
+  const invite = await store.timeflowWorkspaceInvite.findFirst({
+    where: { id, organizationId },
+    select: { id: true, status: true },
+  } as Record<string, unknown>);
+
+  if (!invite) {
+    res.status(404).json({ error: "Invite not found" });
+    return;
+  }
+
+  await store.timeflowWorkspaceInvite.update({
+    where: { id },
+    data: { status: "revoked" },
+  });
+
+  res.json({ revoked: true });
+});
+
+// ─── Accept Invite (public — no auth required before account exists) ──────────
+
+// GET /accept-invite?token=... — fetch invite details for pre-fill
+router.get("/accept-invite", async (req, res) => {
+  const rawToken = typeof req.query.token === "string" ? req.query.token.trim() : "";
+  if (!rawToken) {
+    res.status(400).json({ error: "token is required" });
+    return;
+  }
+
+  const tokenHash = hashInviteToken(rawToken);
+  const store = getWorkspaceStore();
+  const invite = await store.timeflowWorkspaceInvite.findFirst({
+    where: { tokenHash, status: "pending" },
+    select: {
+      id: true, organizationId: true, email: true, name: true, role: true,
+      employeeType: true, hourlyRate: true, canClockInOut: true, expiresAt: true,
+    },
+  } as Record<string, unknown>);
+
+  if (!invite) {
+    res.status(404).json({ error: "Invite not found, expired, or already used" });
+    return;
+  }
+
+  if (new Date(invite.expiresAt as string) < new Date()) {
+    await store.timeflowWorkspaceInvite.update({ where: { id: invite.id }, data: { status: "expired" } });
+    res.status(410).json({ error: "Invite has expired" });
+    return;
+  }
+
+  const org = await store.organization.findFirst({
+    where: { id: invite.organizationId as string },
+    select: { name: true },
+  } as Record<string, unknown>);
+
+  res.json({
+    invite: {
+      id: invite.id,
+      email: invite.email,
+      name: invite.name,
+      role: invite.role,
+      employeeType: invite.employeeType,
+      organizationName: (org?.name as string) ?? "Workspace",
+      expiresAt: invite.expiresAt,
+    },
+  });
+});
+
+// POST /accept-invite — accept invite (create account if needed, or log in)
+router.post("/accept-invite", async (req, res) => {
+  const body = isRecord(req.body) ? req.body : {};
+  const rawToken = typeof body.token === "string" ? body.token.trim() : "";
+  const email = normalizeEmail(body.email);
+  const password = typeof body.password === "string" ? body.password : "";
+  const displayName = normalizeDisplayName(body.displayName, email);
+
+  if (!rawToken || !email) {
+    res.status(400).json({ error: "token and email are required" });
+    return;
+  }
+
+  const tokenHash = hashInviteToken(rawToken);
+  const store = getWorkspaceStore();
+
+  const invite = await store.timeflowWorkspaceInvite.findFirst({
+    where: { tokenHash, status: "pending", email },
+    select: {
+      id: true, organizationId: true, email: true, name: true, role: true,
+      employeeType: true, hourlyRate: true, canClockInOut: true, expiresAt: true,
+    },
+  } as Record<string, unknown>);
+
+  if (!invite) {
+    res.status(404).json({ error: "Invite not found, expired, or already used" });
+    return;
+  }
+
+  if (new Date(invite.expiresAt as string) < new Date()) {
+    await store.timeflowWorkspaceInvite.update({ where: { id: invite.id }, data: { status: "expired" } });
+    res.status(410).json({ error: "Invite has expired" });
+    return;
+  }
+
+  const orgId = invite.organizationId as string;
+  let user = await prismaUser.user.findUnique({ where: { email } });
+
+  if (!user) {
+    // New user — password required
+    if (!password || password.length < 8) {
+      res.status(400).json({ error: "Password must be at least 8 characters" });
+      return;
+    }
+    user = await prismaUser.user.create({
+      data: {
+        organizationId: orgId,
+        email,
+        passwordHash: await hashPassword(password),
+        role: (invite.role as string) === "owner" ? "owner" : "employee",
+        displayName,
+        identitySource: "invite",
+      },
+    });
+  } else {
+    // Existing user — verify password
+    if (!password) {
+      res.status(400).json({ error: "password is required" });
+      return;
+    }
+    const valid = await verifyPassword(password, user.passwordHash);
+    if (!valid) {
+      res.status(401).json({ error: "Invalid password" });
+      return;
+    }
+  }
+
+  // Create or update membership
+  const existingMembership = await (prisma as unknown as {
+    membership: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+  }).membership.findFirst({ where: { userId: user.id, organizationId: orgId } });
+
+  if (!existingMembership) {
+    await (prisma as unknown as {
+      membership: { create: (args: Record<string, unknown>) => Promise<unknown> };
+    }).membership.create({
+      data: { userId: user.id, organizationId: orgId, role: invite.role as string },
+    });
+  }
+
+  // Mark invite accepted
+  await store.timeflowWorkspaceInvite.update({
+    where: { id: invite.id },
+    data: { status: "accepted", acceptedAt: new Date() },
+  });
+
+  // Ensure workspace is converted to team now that there are multiple members
+  await store.timeflowWorkspaceMeta.upsert({
+    where: { organizationId: orgId },
+    create: { organizationId: orgId, workspaceType: "team", teamEnabled: true },
+    update: { workspaceType: "team", teamEnabled: true },
+  });
+
+  // Issue token scoped to joined org
+  const updatedUser = await prisma.user.update({
+    where: { id: user.id },
+    data: { organizationId: orgId },
+  }) as unknown as TimeflowUserRecord;
+
+  const token = signTimeflowToken(updatedUser);
+  writeAuthCookies(res, token);
+  res.setHeader("Authorization", `Bearer ${token}`);
+
+  const org = await store.organization.findFirst({
+    where: { id: orgId },
+    select: { id: true, name: true },
+  } as Record<string, unknown>);
+
+  res.status(200).json({
+    token,
+    user: toAuthUserPayload(updatedUser),
+    organization: org ? { id: org.id, name: org.name } : undefined,
+  });
 });
 
 export { router as timeflowRouter };
