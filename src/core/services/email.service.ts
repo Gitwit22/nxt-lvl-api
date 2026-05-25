@@ -157,6 +157,7 @@ function buildPasswordResetHtml(params: PasswordResetEmailParams & { link: strin
   </table>
 </body>
 </html>`;
+}
 
 // ─── TimeFlow Team Invite Email ───────────────────────────────────────────────
 
@@ -252,7 +253,6 @@ function buildTimeflowInviteHtml(params: TimeflowTeamInviteEmailParams & { link:
   </table>
 </body>
 </html>`;
-}
 }
 
 function buildInviteText(params: InviteEmailParams & { link: string }): string {

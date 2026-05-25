@@ -3745,7 +3745,7 @@ router.post("/organizations/:id/set-default", requireTimeflowAuth, async (req, r
     update: { isDefault: true },
   });
 
-  await prisma.user.update({ where: { id: userId }, data: { organizationId: id } });
+  await prisma.user.update({ where: { id: userId }, data: { organizationId: id as string } });
 
   res.json({ defaultWorkspaceId: id });
 });
@@ -3793,7 +3793,7 @@ router.post("/organizations/:id/transfer-ownership", requireTimeflowAuth, async 
   await prisma.$transaction(async (tx) => {
     await tx.membership.update({ where: { id: actorMembership.id as string }, data: { role: "admin" } });
     await tx.membership.update({ where: { id: targetMembership.id as string }, data: { role: "owner" } });
-    await tx.organization.update({ where: { id }, data: { ownerEmail: targetUser.email } });
+    await tx.organization.update({ where: { id: id as string }, data: { ownerEmail: targetUser.email! } });
   });
 
   res.json({ transferred: true, newOwnerEmail });
