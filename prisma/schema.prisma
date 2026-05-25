@@ -902,6 +902,13 @@ model MissionHubTimesheetSubmission {
   id                     String   @id @default(cuid())
   organizationId         String
   programDomain          String   @default("mission-hub")
+  sourceApp              String?
+  sourceExportId         String?
+  sourcePayPeriodId      String?
+  importLifecycleStatus  String   @default("native")
+  processingHistory      Json     @default("[]")
+  validationIssues       Json     @default("[]")
+  importMetadata         Json     @default("{}")
   submittedByPersonId    String?
   submittedByUserId      String
   periodStart            String
@@ -926,9 +933,41 @@ model MissionHubTimesheetSubmission {
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 
-  @@index([organizationId, programDomain])
+  @@index([organizationId, programDomain], map: "mission_submissions_org_domain_idx")
+  @@index([organizationId, programDomain, status], map: "mission_submissions_org_domain_status_idx")
+  @@index([organizationId, submittedByUserId, programDomain], map: "mission_submissions_org_submitter_domain_idx")
+  @@index([organizationId, programDomain, sourceApp, sourceExportId], map: "mission_submissions_org_domain_source_export_idx")
+  @@index([organizationId, programDomain, importLifecycleStatus], map: "mission_submissions_org_domain_lifecycle_idx")
+}
+
+model MissionHubTimesheetIntake {
+  id                   String   @id @default(cuid())
+  organizationId       String
+  programDomain        String   @default("mission-hub")
+  sourceApp            String
+  sourceExportId       String
+  sourceRecordType     String   @default("mission_hub_timesheet")
+  payPeriodStart       String
+  payPeriodEnd         String
+  status               String   @default("imported")
+  totalEmployees       Int      @default(0)
+  acceptedEmployees    Int      @default(0)
+  quarantinedEmployees Int      @default(0)
+  totalHours           Float    @default(0)
+  payload              Json     @default("{}")
+  quarantine           Json     @default("[]")
+  validationIssues     Json     @default("[]")
+  importedByUserId     String
+  importedAt           DateTime @default(now())
+  reviewedByUserId     String?
+  reviewedAt           DateTime?
+  sentToFinanceAt      DateTime?
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([organizationId, sourceApp, sourceExportId, payPeriodStart, payPeriodEnd])
   @@index([organizationId, programDomain, status])
-  @@index([organizationId, submittedByUserId, programDomain])
+  @@index([organizationId, programDomain, sourceApp, sourceExportId])
 }
 
 model MissionHubTimesheetApprovalLog {
