@@ -624,6 +624,18 @@ const LOCKED_ENTRY_STATUSES = new Set([
   "exported",
   "archived",
 ]);
+const TIMESHEET_IMPORT_ALLOWED_SOURCE_APPS = new Set(["timeflow", "time-flow"]);
+const TIMESHEET_IMPORT_LIFECYCLE_STATUSES = new Set([
+  "not_imported",
+  "imported",
+  "imported_with_errors",
+  "mapped",
+  "needs_mapping",
+  "reviewed",
+  "allocated",
+  "sent_to_finance",
+  "rejected",
+]);
 
 function normalizeRoleValue(value: unknown): string {
   if (typeof value !== "string") return "";
@@ -727,6 +739,81 @@ function isLockedForNormalEdit(status: unknown): boolean {
 
 function toOptionalString(value: unknown): string | null {
   return typeof value === "string" ? value : null;
+}
+
+function toNumberOrZero(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+function toJsonArray(value: unknown): Record<string, unknown>[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is Record<string, unknown> => isRecord(item));
+}
+
+function normalizeImportLifecycleStatus(value: unknown): string {
+  if (typeof value !== "string") return "imported";
+  const normalized = value.trim().toLowerCase().replace(/[\s-]+/g, "_");
+  if (!TIMESHEET_IMPORT_LIFECYCLE_STATUSES.has(normalized)) {
+    return "imported";
+  }
+
+  // Legacy statuses are normalized to canonical lifecycle states.
+  if (normalized === "mapped" || normalized === "imported_with_errors") {
+    return "needs_mapping";
+  }
+
+  return normalized;
+}
+
+function canTransitionImportLifecycle(current: string, target: string): boolean {
+  if (current === target) return true;
+  if (current === "not_imported" && target === "imported") return true;
+  if (current === "imported" && ["needs_mapping", "reviewed", "rejected"].includes(target)) return true;
+  if (current === "needs_mapping" && ["reviewed", "rejected"].includes(target)) return true;
+  if (current === "reviewed" && ["allocated", "rejected", "needs_mapping"].includes(target)) return true;
+  if (current === "allocated" && ["sent_to_finance", "rejected", "needs_mapping"].includes(target)) return true;
+  if (current === "rejected" && target === "needs_mapping") return true;
+  return false;
+}
+
+function toTimesheetImportStatusResponse(record: Record<string, unknown>) {
+  const rawStatus = typeof record.status === "string" ? record.status : "imported";
+  const canonicalStatus = normalizeImportLifecycleStatus(rawStatus);
+  return {
+    id: typeof record.id === "string" ? record.id : "",
+    sourceApp: typeof record.sourceApp === "string" ? record.sourceApp : "",
+    sourceExportId: typeof record.sourceExportId === "string" ? record.sourceExportId : "",
+    sourceRecordType: typeof record.sourceRecordType === "string" ? record.sourceRecordType : "",
+    payPeriodStart: typeof record.payPeriodStart === "string" ? record.payPeriodStart : "",
+    payPeriodEnd: typeof record.payPeriodEnd === "string" ? record.payPeriodEnd : "",
+    status: rawStatus,
+    canonicalStatus,
+    totalEmployees: toNumberOrZero(record.totalEmployees),
+    acceptedEmployees: toNumberOrZero(record.acceptedEmployees),
+    quarantinedEmployees: toNumberOrZero(record.quarantinedEmployees),
+    totalHours: toNumberOrZero(record.totalHours),
+    importedByUserId: typeof record.importedByUserId === "string" ? record.importedByUserId : "",
+    importedAt: record.importedAt,
+    reviewedByUserId: toOptionalString(record.reviewedByUserId),
+    reviewedAt: record.reviewedAt ?? null,
+    sentToFinanceAt: record.sentToFinanceAt ?? null,
+    quarantine: toJsonArray(record.quarantine),
+    validationIssues: toJsonArray(record.validationIssues),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function mapImportedEmployeeStatusToSubmissionStatus(value: unknown): string {
+  const normalized = normalizeApprovalStatus(value);
+  if (normalized === "approved") return "finance_ready";
+  if (normalized === "rejected") return "changes_requested";
+  return "submitted";
 }
 
 // ─── Invite token helpers ─────────────────────────────────────────────────────
@@ -3190,6 +3277,460 @@ router.post("/timesheet-submissions/:id/mark-exported", requireMissionHubAuth, E
 
 router.post("/timesheet-submissions/:id/reopen", requireMissionHubAuth, async (req, res) => {
   await handleSubmissionAction(req, res, "reopened");
+});
+
+// ─── Timesheet Imports ───────────────────────────────────────────────────────
+
+router.get("/timesheet-imports", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+  const requestedStatus = typeof req.query.status === "string" ? normalizeImportLifecycleStatus(req.query.status) : undefined;
+  const sourceApp = typeof req.query.sourceApp === "string" ? req.query.sourceApp.trim().toLowerCase() : undefined;
+
+  const store = prisma as unknown as {
+    missionHubTimesheetIntake: {
+      findMany: (args: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+    };
+  };
+
+  const where: Record<string, unknown> = {
+    organizationId,
+    programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+  };
+  if (sourceApp) {
+    where.sourceApp = sourceApp;
+  }
+
+  const imports = await store.missionHubTimesheetIntake.findMany({
+    where,
+    orderBy: [{ importedAt: "desc" }, { createdAt: "desc" }],
+  });
+
+  const rows = imports
+    .map((record) => toTimesheetImportStatusResponse(record))
+    .filter((record) => !requestedStatus || record.canonicalStatus === requestedStatus);
+
+  const countsByStatus = rows.reduce<Record<string, number>>((acc, record) => {
+    acc[record.canonicalStatus] = (acc[record.canonicalStatus] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  res.json({
+    items: rows,
+    total: rows.length,
+    countsByStatus,
+  });
+});
+
+router.get("/timesheet-imports/:id", requireMissionHubAuth, async (req, res) => {
+  const { organizationId } = getUser(req);
+
+  const store = prisma as unknown as {
+    missionHubTimesheetIntake: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+    };
+    missionHubTimesheetSubmission: {
+      findMany: (args: Record<string, unknown>) => Promise<Array<Record<string, unknown>>>;
+    };
+  };
+
+  const intake = await store.missionHubTimesheetIntake.findFirst({
+    where: {
+      id: req.params.id,
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+
+  if (!intake) {
+    res.status(404).json({ error: "Timesheet intake not found." });
+    return;
+  }
+
+  const linkedSubmissions = await store.missionHubTimesheetSubmission.findMany({
+    where: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      sourceApp: intake.sourceApp,
+      sourceExportId: intake.sourceExportId,
+      periodStart: intake.payPeriodStart,
+      periodEnd: intake.payPeriodEnd,
+      isActive: true,
+    },
+    orderBy: [{ createdAt: "desc" }],
+  });
+
+  const submissionCountsByLifecycle = linkedSubmissions.reduce<Record<string, number>>((acc, submission) => {
+    const lifecycle = normalizeImportLifecycleStatus(submission.importLifecycleStatus);
+    acc[lifecycle] = (acc[lifecycle] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  const submissionCountsByWorkflowStatus = linkedSubmissions.reduce<Record<string, number>>((acc, submission) => {
+    const status = typeof submission.status === "string" ? submission.status : "draft";
+    acc[status] = (acc[status] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  res.json({
+    intake: toTimesheetImportStatusResponse(intake),
+    submissions: {
+      total: linkedSubmissions.length,
+      countsByLifecycle: submissionCountsByLifecycle,
+      countsByWorkflowStatus: submissionCountsByWorkflowStatus,
+    },
+  });
+});
+
+router.post("/timesheet-imports", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId, role } = getUser(req);
+  if (!canApproveTimesheets(role)) {
+    res.status(403).json({ error: "Missing capability: canApproveTimesheets." });
+    return;
+  }
+
+  const body = isRecord(req.body) ? req.body : {};
+  const payload = isRecord(body.payload) ? body.payload : body;
+
+  const sourceAppRaw = typeof payload.sourceApp === "string" ? payload.sourceApp.trim().toLowerCase() : "";
+  if (!TIMESHEET_IMPORT_ALLOWED_SOURCE_APPS.has(sourceAppRaw)) {
+    res.status(400).json({ error: "payload.sourceApp must be timeflow or time-flow." });
+    return;
+  }
+
+  if (payload.exportType !== "mission_hub_timesheet") {
+    res.status(400).json({ error: "payload.exportType must be mission_hub_timesheet." });
+    return;
+  }
+
+  const sourceExportId = typeof payload.exportId === "string" ? payload.exportId.trim() : "";
+  if (!sourceExportId) {
+    res.status(400).json({ error: "payload.exportId is required." });
+    return;
+  }
+
+  const payPeriod = isRecord(payload.payPeriod) ? payload.payPeriod : {};
+  const periodStart = typeof payPeriod.startDate === "string" ? payPeriod.startDate : "";
+  const periodEnd = typeof payPeriod.endDate === "string" ? payPeriod.endDate : "";
+  if (!isValidPeriod(periodStart, periodEnd)) {
+    res.status(400).json({ error: "payload.payPeriod.startDate and payload.payPeriod.endDate must be valid." });
+    return;
+  }
+
+  const employees = Array.isArray(payload.employees) ? payload.employees.filter((item): item is Record<string, unknown> => isRecord(item)) : [];
+  if (employees.length === 0) {
+    res.status(400).json({ error: "payload.employees must include at least one employee record." });
+    return;
+  }
+
+  const store = prisma as unknown as {
+    missionHubTimesheetIntake: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+    missionHubTimesheetSubmission: {
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+      updateMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+    missionHubTimeEntry: {
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+    missionHubTimesheetApprovalLog: {
+      create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const existingIntake = await store.missionHubTimesheetIntake.findFirst({
+    where: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      sourceApp: sourceAppRaw,
+      sourceExportId,
+      payPeriodStart: periodStart,
+      payPeriodEnd: periodEnd,
+    },
+  });
+  if (existingIntake) {
+    res.status(409).json({ error: "This export package has already been imported for the selected pay period." });
+    return;
+  }
+
+  const quarantine: Array<Record<string, unknown>> = [];
+  const acceptedSubmissionIds: string[] = [];
+  let totalHoursImported = 0;
+
+  const intake = await store.missionHubTimesheetIntake.create({
+    data: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      sourceApp: sourceAppRaw,
+      sourceExportId,
+      sourceRecordType: "mission_hub_timesheet",
+      payPeriodStart: periodStart,
+      payPeriodEnd: periodEnd,
+      status: "imported",
+      totalEmployees: employees.length,
+      importedByUserId: userId,
+      payload,
+    },
+  });
+
+  for (let index = 0; index < employees.length; index += 1) {
+    const row = employees[index];
+    const employeeId = typeof row.employeeId === "string" ? row.employeeId.trim() : "";
+    const employeeName = typeof row.employeeName === "string" ? row.employeeName.trim() : "";
+    const sourceTimeEntryIds = toStringArray(row.sourceTimeEntryIds);
+
+    const totalHours =
+      toNumberOrZero(row.regularHours)
+      + toNumberOrZero(row.manualHours)
+      + toNumberOrZero(row.ptoHours)
+      + toNumberOrZero(row.vacationHours)
+      + toNumberOrZero(row.sickHours)
+      + toNumberOrZero(row.holidayHours)
+      + toNumberOrZero(row.unpaidLeaveHours);
+
+    if (!employeeId || !employeeName) {
+      quarantine.push({
+        row: index,
+        employeeId: employeeId || null,
+        employeeName: employeeName || null,
+        reason: "Missing employeeId or employeeName.",
+      });
+      continue;
+    }
+
+    if (sourceTimeEntryIds.length === 0) {
+      quarantine.push({
+        row: index,
+        employeeId,
+        employeeName,
+        reason: "Missing sourceTimeEntryIds for traceability.",
+      });
+      continue;
+    }
+
+    if (totalHours <= 0) {
+      quarantine.push({
+        row: index,
+        employeeId,
+        employeeName,
+        reason: "Total hours must be greater than 0.",
+      });
+      continue;
+    }
+
+    const submissionStatus = mapImportedEmployeeStatusToSubmissionStatus(row.approvalStatus);
+    const now = new Date();
+    const processingHistory = [{
+      timestamp: now.toISOString(),
+      action: "imported",
+      status: "imported",
+      details: `Imported from ${sourceAppRaw} export ${sourceExportId}`,
+    }];
+
+    const createdSubmission = await store.missionHubTimesheetSubmission.create({
+      data: {
+        organizationId,
+        programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+        sourceApp: sourceAppRaw,
+        sourceExportId,
+        sourcePayPeriodId: typeof payPeriod.id === "string" ? payPeriod.id : null,
+        importLifecycleStatus: "imported",
+        processingHistory,
+        validationIssues: [],
+        importMetadata: {
+          intakeId: intake.id,
+          sourceTimeEntryIds,
+          originalApprovalStatus: row.approvalStatus,
+          employeeEmail: typeof row.employeeEmail === "string" ? row.employeeEmail : null,
+          projects: Array.isArray(row.projects) ? row.projects : [],
+        },
+        submittedByPersonId: employeeId,
+        submittedByUserId: userId,
+        periodStart,
+        periodEnd,
+        status: submissionStatus,
+        totalHours,
+        payableHours: toNumberOrZero(row.totalPaidHours),
+        volunteerHours: 0,
+        billableHours: 0,
+        estimatedPayableAmount: 0,
+        estimatedBillableAmount: 0,
+        grantLaborValue: null,
+        volunteerMatchValue: null,
+        submittedAt: now,
+      },
+    });
+
+    await store.missionHubTimeEntry.create({
+      data: {
+        organizationId,
+        userId,
+        programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+        personId: employeeId,
+        person: employeeName,
+        initials: employeeName.split(" ").map((part) => part[0] || "").join("").slice(0, 4).toUpperCase(),
+        date: periodStart,
+        startTime: "00:00",
+        endTime: "00:00",
+        hours: totalHours,
+        projectId: null,
+        projectName: "Imported from Time Flow",
+        notes: `Imported from ${sourceAppRaw} export ${sourceExportId}`,
+        status: submissionStatus,
+        timesheetSubmissionId: createdSubmission.id as string,
+        billable: false,
+        payable: true,
+        volunteer: false,
+        laborValue: null,
+        submittedAt: now,
+      },
+    });
+
+    await store.missionHubTimesheetApprovalLog.create({
+      data: {
+        organizationId,
+        programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+        timesheetSubmissionId: createdSubmission.id,
+        action: "imported",
+        actorUserId: userId,
+        actorRole: typeof role === "string" ? role : null,
+        note: `Imported from ${sourceAppRaw} package ${sourceExportId}`,
+      },
+    });
+
+    acceptedSubmissionIds.push(createdSubmission.id as string);
+    totalHoursImported += totalHours;
+  }
+
+  const finalStatus = quarantine.length > 0 ? "needs_mapping" : "imported";
+  const updatedIntake = await store.missionHubTimesheetIntake.update({
+    where: { id: intake.id as string },
+    data: {
+      status: finalStatus,
+      acceptedEmployees: acceptedSubmissionIds.length,
+      quarantinedEmployees: quarantine.length,
+      totalHours: totalHoursImported,
+      quarantine,
+      validationIssues: quarantine,
+    },
+  });
+
+  if (acceptedSubmissionIds.length > 0) {
+    await store.missionHubTimesheetSubmission.updateMany({
+      where: {
+        id: { in: acceptedSubmissionIds },
+        organizationId,
+        programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      },
+      data: {
+        importLifecycleStatus: finalStatus,
+      },
+    });
+  }
+
+  const intakeSummary = toTimesheetImportStatusResponse(updatedIntake);
+
+  res.status(201).json({
+    intakeId: intake.id,
+    status: finalStatus,
+    canonicalStatus: intakeSummary.canonicalStatus,
+    sourceExportId,
+    acceptedCount: acceptedSubmissionIds.length,
+    quarantinedCount: quarantine.length,
+    acceptedSubmissionIds,
+    quarantinedRows: quarantine,
+    intake: intakeSummary,
+  });
+});
+
+router.patch("/timesheet-imports/:id/lifecycle", requireMissionHubAuth, async (req, res) => {
+  const { userId, organizationId, role } = getUser(req);
+  if (!canApproveTimesheets(role)) {
+    res.status(403).json({ error: "Missing capability: canApproveTimesheets." });
+    return;
+  }
+
+  const body = isRecord(req.body) ? req.body : {};
+  const targetStatus = normalizeImportLifecycleStatus(body.status);
+  if (!["imported", "needs_mapping", "reviewed", "allocated", "sent_to_finance", "rejected"].includes(targetStatus)) {
+    res.status(400).json({ error: "status must be one of: imported, needs_mapping, reviewed, allocated, sent_to_finance, rejected." });
+    return;
+  }
+
+  const store = prisma as unknown as {
+    missionHubTimesheetIntake: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      update: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+    missionHubTimesheetSubmission: {
+      updateMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    };
+  };
+
+  const intake = await store.missionHubTimesheetIntake.findFirst({
+    where: {
+      id: req.params.id,
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+    },
+  });
+  if (!intake) {
+    res.status(404).json({ error: "Timesheet intake not found." });
+    return;
+  }
+
+  const currentStatus = normalizeImportLifecycleStatus(intake.status);
+  if (!canTransitionImportLifecycle(currentStatus, targetStatus)) {
+    res.status(409).json({ error: `Cannot transition intake lifecycle from ${currentStatus} to ${targetStatus}.` });
+    return;
+  }
+
+  const currentHistory = toJsonArray(intake.validationIssues);
+  currentHistory.push({
+    timestamp: new Date().toISOString(),
+    actorUserId: userId,
+    action: "lifecycle.transition",
+    from: currentStatus,
+    to: targetStatus,
+    note: typeof body.note === "string" ? body.note : null,
+  });
+
+  const updateData: Record<string, unknown> = {
+    status: targetStatus,
+    validationIssues: currentHistory,
+  };
+  if (targetStatus === "reviewed") {
+    updateData.reviewedByUserId = userId;
+    updateData.reviewedAt = new Date();
+  }
+  if (targetStatus === "sent_to_finance") {
+    updateData.sentToFinanceAt = new Date();
+  }
+
+  const updatedIntake = await store.missionHubTimesheetIntake.update({
+    where: { id: req.params.id },
+    data: updateData,
+  });
+
+  await store.missionHubTimesheetSubmission.updateMany({
+    where: {
+      organizationId,
+      programDomain: MISSION_HUB_PROGRAM_DOMAIN,
+      sourceApp: intake.sourceApp,
+      sourceExportId: intake.sourceExportId,
+      periodStart: intake.payPeriodStart,
+      periodEnd: intake.payPeriodEnd,
+      isActive: true,
+    },
+    data: {
+      importLifecycleStatus: targetStatus,
+    },
+  });
+
+  const intakeSummary = toTimesheetImportStatusResponse(updatedIntake);
+  res.json(intakeSummary);
 });
 
 // ─── Contacts ────────────────────────────────────────────────────────────────
