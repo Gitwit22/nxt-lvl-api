@@ -439,6 +439,26 @@ interface MissionHubTokenPayload {
   programDomain: string;
 }
 
+function getMissionHubSessionCookieDomain(): string | undefined {
+  const raw = String(process.env.MISSION_HUB_SESSION_COOKIE_DOMAIN ?? "").trim();
+  return raw || undefined;
+}
+
+function getMissionHubSessionCookieBaseOptions() {
+  const secureCookie = process.env.NODE_ENV === "production";
+  return {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: (secureCookie ? "none" : "lax") as "none" | "lax",
+    path: "/",
+    domain: getMissionHubSessionCookieDomain(),
+  };
+}
+
+function clearMissionHubSessionCookie(res: Response): void {
+  res.clearCookie("missionHubSessionId", getMissionHubSessionCookieBaseOptions());
+}
+
 function readTokenFromRequest(req: Request): string | undefined {
   const authHeader = req.headers.authorization;
   if (authHeader?.startsWith("Bearer ")) return authHeader.slice(7);
@@ -509,7 +529,7 @@ async function requireMissionHubAuth(req: Request, res: Response, next: NextFunc
   } as Record<string, unknown>) as Record<string, unknown> | null;
 
   if (!session) {
-    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    clearMissionHubSessionCookie(res);
     res.status(401).json({ error: "Invalid session" });
     return;
   }
@@ -527,7 +547,7 @@ async function requireMissionHubAuth(req: Request, res: Response, next: NextFunc
     } catch {
       // Session can already be deleted. Continue clearing cookie.
     }
-    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    clearMissionHubSessionCookie(res);
     res.status(401).json({ error: "Session expired" });
     return;
   }
@@ -539,7 +559,7 @@ async function requireMissionHubAuth(req: Request, res: Response, next: NextFunc
   } as Record<string, unknown>) as Record<string, unknown> | null;
 
   if (!user) {
-    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    clearMissionHubSessionCookie(res);
     res.status(401).json({ error: "User not found" });
     return;
   }
@@ -954,11 +974,8 @@ router.post("/auth/login", LOGIN_RATE_LIMIT, async (req, res) => {
 
   // Set HTTP-only cookie with session ID (not the full token)
   res.cookie("missionHubSessionId", session.id, {
-    httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
-    sameSite: "lax",
-    maxAge: 30 * 24 * 60 * 60 * 1000, // 30 days in milliseconds
-    path: "/",
+    ...getMissionHubSessionCookieBaseOptions(),
+    maxAge: 30 * 24 * 60 * 60 * 1000,
   });
 
   await ensureMissionHubSubscription(user.organizationId);
@@ -993,7 +1010,7 @@ router.post("/auth/login", LOGIN_RATE_LIMIT, async (req, res) => {
 
 // Check if user has a valid session cookie and return their user info
 router.get("/session", async (req, res) => {
-  const sessionId = req.cookies?.missionHubSessionId || req.cookies?.["missionHubSessionId"];
+  const sessionId = readMissionHubSessionId(req);
   if (!sessionId) {
     res.status(401).json({ error: "No session" });
     return;
@@ -1014,7 +1031,7 @@ router.get("/session", async (req, res) => {
 
   if (!session || !sessionExpiresAt || Number.isNaN(sessionExpiresAt.getTime()) || sessionExpiresAt < new Date()) {
     // Session expired or invalid
-    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    clearMissionHubSessionCookie(res);
     res.status(401).json({ error: "Session expired" });
     return;
   }
@@ -1031,7 +1048,7 @@ router.get("/session", async (req, res) => {
     .user.findUnique({ where: { id: userId } }) as UserRow | null;
 
   if (!user) {
-    res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+    clearMissionHubSessionCookie(res);
     res.status(401).json({ error: "User not found" });
     return;
   }
@@ -1060,7 +1077,7 @@ router.get("/session", async (req, res) => {
 
 // Logout: invalidate the session
 router.post("/logout", async (req, res) => {
-  const sessionId = req.cookies?.missionHubSessionId || req.cookies?.["missionHubSessionId"];
+  const sessionId = readMissionHubSessionId(req);
   
   if (sessionId) {
     const db = getInviteStore();
@@ -1076,7 +1093,7 @@ router.post("/logout", async (req, res) => {
   }
 
   // Clear the session cookie
-  res.clearCookie("missionHubSessionId", { httpOnly: true, path: "/" });
+  clearMissionHubSessionCookie(res);
   res.json({ success: true });
 });
 
@@ -1345,11 +1362,8 @@ router.post("/platform-auth/consume", async (req, res) => {
 
   const secureCookie = process.env.NODE_ENV === "production";
   res.cookie("missionHubSessionId", session.id, {
-    httpOnly: true,
-    secure: secureCookie,
-    sameSite: secureCookie ? "none" : "lax",
+    ...getMissionHubSessionCookieBaseOptions(),
     maxAge: 30 * 24 * 60 * 60 * 1000,
-    path: "/",
   });
 
   // Keep legacy token cookie while clients transition to session-backed auth.
