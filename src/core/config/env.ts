@@ -67,6 +67,7 @@ const ALLOWED_ORIGIN_PATTERNS = [
   /^https?:\/\/localhost(:\d+)?$/,
   /^https:\/\/([a-z0-9-]+\.)?nltops\.com$/,
   /^https:\/\/([a-z0-9-]+\.)?ntlops\.com$/,
+  /^https:\/\/eventure(-[a-z0-9]+)?\.pages\.dev$/,
   /^https:\/\/finance-command-center(-[a-z0-9]+)?\.pages\.dev$/,
   /^https:\/\/[a-z0-9-]+\.onrender\.com$/,
 ];

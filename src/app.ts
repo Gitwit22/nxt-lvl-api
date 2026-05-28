@@ -35,6 +35,7 @@ app.use(
   }),
 );
 app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 
 // Routers
 app.use(`${API_PREFIX}/auth`, authRouter);
