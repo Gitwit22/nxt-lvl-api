@@ -5,6 +5,7 @@ import { upload } from "../../../validators.js";
 import {
   confirmSponsorImportForEvent,
   previewSponsorImportForEvent,
+  type SponsorImportParserStrategy,
 } from "../services/sponsor-import.service.js";
 import { EventureServiceError } from "../services/eventure-error.js";
 
@@ -35,6 +36,13 @@ function getFileName(req: express.Request): string | undefined {
   return readString(req.body?.fileName);
 }
 
+function getParserStrategy(req: express.Request): SponsorImportParserStrategy | undefined {
+  const value = readString(req.body?.parserStrategy);
+  if (!value) return undefined;
+  if (value === "native" || value === "llama_core") return value;
+  throw new EventureServiceError("parserStrategy must be one of: native, llama_core.", 400);
+}
+
 function handleError(res: express.Response, error: unknown) {
   if (error instanceof EventureServiceError) {
     res.status(error.statusCode).json({ error: error.message });
@@ -57,6 +65,7 @@ router.post("/preview", upload.single("file"), async (req, res) => {
       eventId,
       csvContent: getCsvContent(req),
       fileName: getFileName(req),
+      parserStrategy: getParserStrategy(req),
     });
 
     res.json(result);
@@ -76,6 +85,7 @@ router.post("/confirm", upload.single("file"), async (req, res) => {
       createdByUserId: user!.userId,
       csvContent: getCsvContent(req),
       fileName: getFileName(req),
+      parserStrategy: getParserStrategy(req),
     });
 
     res.status(201).json(result);

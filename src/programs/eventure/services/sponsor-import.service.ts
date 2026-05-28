@@ -1,3 +1,6 @@
+import os from "node:os";
+import path from "node:path";
+import { promises as fs } from "node:fs";
 import {
   completeImportBatch,
   createImportBatch,
@@ -18,6 +21,7 @@ import {
   upsertSponsorYearHistory,
 } from "../repositories/sponsor-import.repository.js";
 import { EventureServiceError } from "./eventure-error.js";
+import { canUseSharedParser, parseDocumentWithSharedService } from "../../../core/services/parse/documentParseService.js";
 
 type ImportWarning = {
   rowNumber: number;
@@ -80,6 +84,8 @@ type ContactPreviewItem = {
   contactEmail?: string;
   action: "create" | "update" | "skip";
 };
+
+export type SponsorImportParserStrategy = "native" | "llama_core";
 
 const BLANK_MARKERS = new Set(["", "n/a", "na", "-", "--", "none", "null"]);
 
@@ -321,6 +327,56 @@ function parseCsv(content: string): { headers: string[]; rows: string[][] } {
   const headers = parseCsvLine(lines[0]).map((header) => header.trim());
   const rows = lines.slice(1).map((line) => parseCsvLine(line));
   return { headers, rows };
+}
+
+async function resolveCsvForParsing(
+  csvContent: string,
+  parserStrategy: SponsorImportParserStrategy,
+): Promise<{ content: string; parserUsed: SponsorImportParserStrategy; parserWarnings: string[] }> {
+  if (parserStrategy !== "llama_core") {
+    return {
+      content: csvContent,
+      parserUsed: "native",
+      parserWarnings: [],
+    };
+  }
+
+  if (!canUseSharedParser()) {
+    return {
+      content: csvContent,
+      parserUsed: "native",
+      parserWarnings: ["llama_core parser requested but shared parser is unavailable; using native CSV parser."],
+    };
+  }
+
+  const tempFilePath = path.join(os.tmpdir(), `eventure-sponsor-import-${Date.now()}.csv`);
+  try {
+    await fs.writeFile(tempFilePath, csvContent, "utf8");
+    const parsed = await parseDocumentWithSharedService(tempFilePath, { mimeType: "text/csv" });
+    const parsedText = (parsed.text || parsed.markdown || "").trim();
+
+    if (!parsedText) {
+      return {
+        content: csvContent,
+        parserUsed: "native",
+        parserWarnings: ["llama_core parser returned empty content; using native CSV parser."],
+      };
+    }
+
+    return {
+      content: parsedText,
+      parserUsed: "llama_core",
+      parserWarnings: [],
+    };
+  } catch {
+    return {
+      content: csvContent,
+      parserUsed: "native",
+      parserWarnings: ["llama_core parser failed; using native CSV parser."],
+    };
+  } finally {
+    await fs.unlink(tempFilePath).catch(() => undefined);
+  }
 }
 
 function extractDomain(email?: string): string | undefined {
@@ -599,13 +655,15 @@ export async function previewSponsorImportForEvent(input: {
   eventId: string;
   csvContent: string;
   fileName?: string;
+  parserStrategy?: SponsorImportParserStrategy;
 }) {
   const event = await getActiveEventForOrganization(input.organizationId, input.eventId);
   if (!event) {
     throw new EventureServiceError("Event not found.", 404);
   }
 
-  const parsed = parseRows(input.csvContent);
+  const parseResolution = await resolveCsvForParsing(input.csvContent, input.parserStrategy ?? "native");
+  const parsed = parseRows(parseResolution.content);
   const existingSponsors = await listSponsorOrganizationsForOrganization(input.organizationId);
   const existingEventSponsors = await listEventSponsorsForEvent(input.organizationId, input.eventId);
   const existingEventSponsorSet = new Set(existingEventSponsors.map((item) => item.sponsorOrganizationId));
@@ -693,6 +751,7 @@ export async function previewSponsorImportForEvent(input: {
 
   return {
     importTypeDetected: "sponsor_master_list",
+    parserUsed: parseResolution.parserUsed,
     eventId: input.eventId,
     fileName: input.fileName ?? "uploaded.csv",
     totalRows: parsed.rows.length,
@@ -719,7 +778,10 @@ export async function previewSponsorImportForEvent(input: {
       },
       historyRecordsToCreateOrUpdate: historyRecords,
       potentialFollowUps: followUps,
-      warnings,
+      warnings: [
+        ...parseResolution.parserWarnings.map((message) => ({ rowNumber: 0, code: "PARSER_FALLBACK", message })),
+        ...warnings,
+      ],
     },
   };
 }
@@ -730,13 +792,15 @@ export async function confirmSponsorImportForEvent(input: {
   createdByUserId: string;
   csvContent: string;
   fileName?: string;
+  parserStrategy?: SponsorImportParserStrategy;
 }) {
   const event = await getActiveEventForOrganization(input.organizationId, input.eventId);
   if (!event) {
     throw new EventureServiceError("Event not found.", 404);
   }
 
-  const parsed = parseRows(input.csvContent);
+  const parseResolution = await resolveCsvForParsing(input.csvContent, input.parserStrategy ?? "native");
+  const parsed = parseRows(parseResolution.content);
   const existingSponsors = await listSponsorOrganizationsForOrganization(input.organizationId);
 
   const importBatch = await createImportBatch({
@@ -751,6 +815,9 @@ export async function confirmSponsorImportForEvent(input: {
       mappedColumns: parsed.mapped,
       yearColumns: parsed.yearColumns,
       importType: "sponsor_master_list",
+      parserStrategyRequested: input.parserStrategy ?? "native",
+      parserUsed: parseResolution.parserUsed,
+      parserWarnings: parseResolution.parserWarnings,
     },
   });
 
@@ -970,6 +1037,8 @@ export async function confirmSponsorImportForEvent(input: {
         validRows,
         errorRows,
         duplicateRows,
+        parserUsed: parseResolution.parserUsed,
+        parserWarnings: parseResolution.parserWarnings,
         companiesCreated,
         companiesUpdated,
         contactsCreated,

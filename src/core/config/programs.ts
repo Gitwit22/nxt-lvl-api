@@ -8,7 +8,7 @@ export const programs: Record<string, ProgramDefinition> = {
   eventure: {
     displayName: "Eventure",
     routePrefix: "/api/eventure",
-    allowedOrigins: [],
+    allowedOrigins: ["https://eventure.nltops.com"],
   },
   "financial-hub": {
     displayName: "Financial Hub",

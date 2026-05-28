@@ -47,6 +47,7 @@ const DEFAULT_ALLOWED_ORIGINS = [
   "http://localhost:8080",
   "https://community-chronicle.ntlops.com",
   "https://community-chronicle.nltops.com",
+  "https://eventure.nltops.com",
   "https://ntlops.com",
   "https://nltops.com",
 ];
