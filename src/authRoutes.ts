@@ -47,12 +47,38 @@ const prismaUser = prisma as typeof prisma & {
         email: string;
         passwordHash: string;
         role: string;
+        platformRole?: string;
         displayName: string;
         identitySource?: string;
       };
     }) => Promise<AuthUserRecord>;
   };
 };
+
+function normalizeEmail(value: unknown): string {
+  return typeof value === "string" ? value.trim().toLowerCase() : "";
+}
+
+function slugifyOrganizationName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "organization";
+}
+
+async function generateUniqueOrganizationSlug(name: string): Promise<string> {
+  const baseSlug = slugifyOrganizationName(name);
+  let candidate = baseSlug;
+  let suffix = 1;
+
+  while (true) {
+    const existing = await prisma.organization.findUnique({ where: { slug: candidate } });
+    if (!existing) return candidate;
+    suffix += 1;
+    candidate = `${baseSlug}-${suffix}`;
+  }
+}
 
 /**
  * Derive AppInitState for the response.
@@ -417,6 +443,154 @@ router.post("/change-password", requireAuth, async (req, res) => {
   });
 
   res.status(204).send();
+});
+
+// POST /api/auth/organizer/signup
+// Public self-service organizer registration that creates an organization,
+// owner user, org membership, and returns an authenticated session token.
+router.post("/organizer/signup", async (req, res) => {
+  const programDomain = resolveAuthProgramDomain(req);
+  const body = req.body as Record<string, unknown>;
+
+  const orgName = typeof body.orgName === "string" ? body.orgName.trim() : "";
+  const contactName = typeof body.contactName === "string" ? body.contactName.trim() : "";
+  const contactEmail = normalizeEmail(body.contactEmail);
+  const phone = typeof body.phone === "string" ? body.phone.trim() : "";
+  const website = typeof body.website === "string" ? body.website.trim() : "";
+  const businessType = typeof body.businessType === "string" ? body.businessType.trim() : "";
+  const bio = typeof body.bio === "string" ? body.bio.trim() : "";
+  const password = typeof body.password === "string" ? body.password : "";
+
+  if (!orgName || !contactName || !contactEmail || !phone || !password) {
+    res.status(400).json({
+      error: "Organization name, contact name, contact email, phone, and password are required",
+    });
+    return;
+  }
+
+  if (password.length < 8) {
+    res.status(400).json({ error: "Password must be at least 8 characters" });
+    return;
+  }
+
+  const existingUser = await prisma.user.findUnique({ where: { email: contactEmail } });
+  if (existingUser) {
+    res.status(409).json({ error: "A user with that email already exists" });
+    return;
+  }
+
+  const slug = await generateUniqueOrganizationSlug(orgName);
+  const passwordHash = await hashPassword(password);
+
+  const result = await prisma.$transaction(async (tx) => {
+    const organization = await tx.organization.create({
+      data: {
+        name: orgName,
+        slug,
+        ownerEmail: contactEmail,
+        contactEmail,
+        phoneNumber: phone || undefined,
+        industryType: businessType || undefined,
+        notes: bio || undefined,
+        planType: "starter",
+        status: "active",
+        isActive: true,
+      },
+    });
+
+    const user = await tx.user.create({
+      data: {
+        organizationId: organization.id,
+        email: contactEmail,
+        passwordHash,
+        role: "uploader",
+        platformRole: "user",
+        displayName: contactName,
+        identitySource: "local",
+      },
+    });
+
+    await tx.membership.create({
+      data: {
+        organizationId: organization.id,
+        userId: user.id,
+        role: "owner",
+      },
+    });
+
+    return { organization, user };
+  });
+
+  try {
+    const accessResult = await provisionUserProgramAccessFromOrgSubscriptions(
+      result.organization.id,
+      result.user.id,
+    );
+    logger.info("[auth/organizer-signup] user program access provisioned", {
+      userId: result.user.id,
+      organizationId: result.organization.id,
+      granted: accessResult.granted,
+    });
+  } catch (error) {
+    logger.warn("[auth/organizer-signup] user program access provisioning failed", {
+      userId: result.user.id,
+      organizationId: result.organization.id,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  const token = signToken({
+    userId: result.user.id,
+    email: result.user.email,
+    role: result.user.role,
+    platformRole: result.user.platformRole ?? "user",
+    organizationId: result.organization.id,
+    programDomain,
+  });
+
+  const secureCookie = process.env.NODE_ENV === "production";
+  res.cookie("accessToken", token, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: secureCookie ? "none" : "lax",
+    maxAge: 8 * 60 * 60 * 1000,
+    path: "/",
+  });
+  res.cookie("token", token, {
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: secureCookie ? "none" : "lax",
+    maxAge: 8 * 60 * 60 * 1000,
+    path: "/",
+  });
+
+  logger.info("Organizer self-signup completed", {
+    userId: result.user.id,
+    organizationId: result.organization.id,
+    programDomain,
+  });
+
+  res.status(201).json({
+    token,
+    accessToken: token,
+    authToken: token,
+    auth: { token },
+    data: { token },
+    user: {
+      ...buildUserPayload(result.user, result.organization.id, programDomain),
+      organizationName: result.organization.name,
+      orgMemberships: [
+        {
+          orgId: result.organization.id,
+          orgName: result.organization.name,
+          role: "owner",
+          active: true,
+        },
+      ],
+    },
+    appInitialized: true,
+    appInitState: "ready",
+  });
 });
 
 // POST /api/auth/register
