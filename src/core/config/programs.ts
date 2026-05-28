@@ -5,6 +5,11 @@ export type ProgramDefinition = {
 };
 
 export const programs: Record<string, ProgramDefinition> = {
+  eventure: {
+    displayName: "Eventure",
+    routePrefix: "/api/eventure",
+    allowedOrigins: [],
+  },
   "financial-hub": {
     displayName: "Financial Hub",
     routePrefix: "/api/financial-hub",

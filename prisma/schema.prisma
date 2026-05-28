@@ -1198,6 +1198,322 @@ model MissionHubAuditLog {
 
 // ─── End Mission Hub ──────────────────────────────────────────────────────────
 
+// ─── Eventure ─────────────────────────────────────────────────────────────────
+
+model EventureEvent {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  title               String
+  description         String?  @db.Text
+  eventType           String   @default("general")
+  status              String   @default("draft")
+  startDateTime       DateTime
+  endDateTime         DateTime
+  timezone            String   @default("America/New_York")
+  venueName           String
+  addressLine1        String?
+  addressLine2        String?
+  city                String?
+  state               String?
+  zipCode             String?
+  capacity            Int?
+  expectedAttendance  Int?
+  linkedProgramId     String?
+  linkedCampaignId    String?
+  linkedSponsorId     String?
+  notes               String?  @db.Text
+  createdByUserId     String
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  archivedAt          DateTime?
+
+  ticketTypes         EventureTicketType[]
+  registrations       EventureRegistration[]
+  vendors             EventureEventVendor[]
+  importBatches       EventureImportBatch[]
+  checkInLogs         EventureCheckInLog[]
+
+  @@index([organizationId, programDomain])
+  @@index([organizationId, status, startDateTime])
+  @@index([organizationId, createdByUserId])
+}
+
+model EventureAttendee {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  firstName           String?
+  lastName            String?
+  fullName            String
+  email               String?
+  phone               String?
+  company             String?
+  title               String?
+  tags                Json     @default("[]")
+  source              String   @default("manual")
+  notes               String?  @db.Text
+  createdByUserId     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  registrations       EventureRegistration[]
+  checkInLogs         EventureCheckInLog[]
+
+  @@index([organizationId, programDomain])
+  @@index([organizationId, email])
+  @@index([organizationId, phone])
+  @@index([organizationId, fullName])
+  @@unique([organizationId, email, phone], map: "EventureAttendee_org_email_phone_key")
+}
+
+model EventureTicketType {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  name                String
+  description         String?  @db.Text
+  price               Float    @default(0)
+  capacity            Int?
+  quantityAvailable   Int      @default(0)
+  quantityReserved    Int      @default(0)
+  quantityIssued      Int      @default(0)
+  isPaid              Boolean  @default(false)
+  isPublic            Boolean  @default(true)
+  sortOrder           Int      @default(0)
+  createdByUserId     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event               EventureEvent          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  registrations       EventureRegistration[]
+
+  @@unique([eventId, name])
+  @@index([organizationId, eventId])
+  @@index([organizationId, isPublic, sortOrder])
+}
+
+model EventureRegistration {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  programDomain         String   @default("eventure")
+  eventId               String
+  attendeeId            String
+  registrationType      String   @default("registered")
+  registrationStatus    String   @default("registered")
+  paymentStatus         String   @default("unpaid")
+  ticketTypeId          String?
+  groupId               String?
+  householdId           String?
+  amountExpected        Float    @default(0)
+  amountPaid            Float    @default(0)
+  paymentMethod         String?
+  paymentReference      String?
+  paymentNotes          String?  @db.Text
+  paymentRecordedAt     DateTime?
+  paymentRecordedByUserId String?
+  checkedIn             Boolean  @default(false)
+  checkedInAt           DateTime?
+  checkedInByUserId     String?
+  source                String   @default("manual")
+  importBatchId         String?
+  notes                 String?  @db.Text
+  createdByUserId       String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  event                 EventureEvent           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  attendee              EventureAttendee        @relation(fields: [attendeeId], references: [id], onDelete: Cascade)
+  ticketType            EventureTicketType?     @relation(fields: [ticketTypeId], references: [id], onDelete: SetNull)
+  importBatch           EventureImportBatch?    @relation(fields: [importBatchId], references: [id], onDelete: SetNull)
+  checkInLogs           EventureCheckInLog[]
+  paymentLogs           EventureRegistrationPaymentLog[]
+
+  @@unique([eventId, attendeeId])
+  @@index([organizationId, eventId, registrationStatus])
+  @@index([organizationId, eventId, paymentStatus])
+  @@index([organizationId, eventId, checkedIn])
+  @@index([organizationId, ticketTypeId])
+  @@index([organizationId, importBatchId])
+}
+
+model EventureVendor {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  businessName        String
+  contactName         String?
+  email               String?
+  phone               String?
+  category            String?
+  description         String?  @db.Text
+  website             String?
+  socialLinks         Json     @default("[]")
+  notes               String?  @db.Text
+  createdByUserId     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  eventLinks          EventureEventVendor[]
+
+  @@index([organizationId, businessName])
+  @@index([organizationId, email])
+}
+
+model EventureEventVendor {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  vendorId            String
+  boothNumber         String?
+  boothType           String?
+  vendorStatus        String   @default("invited")
+  feeExpected         Float    @default(0)
+  feePaid             Float    @default(0)
+  paymentStatus       String   @default("unpaid")
+  paymentMethod       String?
+  paymentReference    String?
+  arrivalStatus       String   @default("not_arrived")
+  checkedInAt         DateTime?
+  checkedInByUserId   String?
+  documentsComplete   Boolean  @default(false)
+  notes               String?  @db.Text
+  createdByUserId     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event               EventureEvent  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  vendor              EventureVendor @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, vendorId])
+  @@index([organizationId, eventId, vendorStatus])
+  @@index([organizationId, eventId, arrivalStatus])
+  @@index([organizationId, eventId, paymentStatus])
+}
+
+model EventureImportBatch {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  fileName            String
+  fileType            String
+  fileUrl             String
+  sourceType          String   @default("upload")
+  status              String   @default("uploaded")
+  totalRows           Int      @default(0)
+  parsedRows          Int      @default(0)
+  validRows           Int      @default(0)
+  errorRows           Int      @default(0)
+  duplicateRows       Int      @default(0)
+  mappingConfig       Json     @default("{}")
+  createdByUserId     String
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  completedAt         DateTime?
+
+  event               EventureEvent                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  rows                EventureImportRow[]
+  registrations       EventureRegistration[]
+
+  @@index([organizationId, eventId, status])
+  @@index([organizationId, createdByUserId, createdAt])
+}
+
+model EventureImportRow {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  programDomain         String   @default("eventure")
+  importBatchId         String
+  eventId               String
+  rowNumber             Int
+  rawData               Json
+  normalizedData        Json     @default("{}")
+  detectedFirstName     String?
+  detectedLastName      String?
+  detectedEmail         String?
+  detectedPhone         String?
+  detectedPaymentStatus String?
+  detectedRegistrationType String?
+  status                String   @default("pending")
+  errorMessage          String?
+  matchedAttendeeId     String?
+  createdRegistrationId String?
+  createdAt             DateTime @default(now())
+
+  importBatch           EventureImportBatch @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
+
+  @@unique([importBatchId, rowNumber])
+  @@index([organizationId, eventId, status])
+  @@index([organizationId, importBatchId, status])
+  @@index([organizationId, matchedAttendeeId])
+}
+
+model EventureCheckInLog {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  registrationId      String
+  attendeeId          String
+  checkInType         String   @default("manual")
+  checkedInAt         DateTime @default(now())
+  checkedInByUserId   String?
+  deviceLabel         String?
+  notes               String?  @db.Text
+
+  event               EventureEvent        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  registration        EventureRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+  attendee            EventureAttendee     @relation(fields: [attendeeId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, eventId, checkedInAt])
+  @@index([organizationId, registrationId])
+  @@index([organizationId, attendeeId])
+}
+
+model EventureRegistrationPaymentLog {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  registrationId      String
+  paymentStatus       String
+  amountExpected      Float    @default(0)
+  amountPaid          Float    @default(0)
+  paymentMethod       String?
+  paymentReference    String?
+  paymentNotes        String?  @db.Text
+  recordedAt          DateTime @default(now())
+  recordedByUserId    String?
+
+  registration        EventureRegistration @relation(fields: [registrationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, registrationId, recordedAt])
+  @@index([organizationId, paymentStatus, recordedAt])
+}
+
+model EventureAuditLog {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  actorUserId         String?
+  actorRole           String   @default("")
+  action              String
+  resourceType        String
+  resourceId          String?
+  oldValue            Json?
+  newValue            Json?
+  metadata            Json     @default("{}")
+  createdAt           DateTime @default(now())
+
+  @@index([organizationId, createdAt])
+  @@index([organizationId, action])
+  @@index([organizationId, resourceType, resourceId])
+}
+
+// ─── End Eventure ───────────────────────────────────────────────────────────
+
 // ─── Financial Hub ───────────────────────────────────────────────────────────
 
 model FinancialHubUserProfile {
