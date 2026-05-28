@@ -1231,6 +1231,8 @@ model EventureEvent {
   ticketTypes         EventureTicketType[]
   registrations       EventureRegistration[]
   vendors             EventureEventVendor[]
+  sponsors            EventureEventSponsor[]
+  sponsorFollowUps    EventureSponsorFollowUp[]
   importBatches       EventureImportBatch[]
   checkInLogs         EventureCheckInLog[]
 
@@ -1391,6 +1393,138 @@ model EventureEventVendor {
   @@index([organizationId, eventId, vendorStatus])
   @@index([organizationId, eventId, arrivalStatus])
   @@index([organizationId, eventId, paymentStatus])
+}
+
+model EventureSponsorOrganization {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  name                String
+  normalizedName      String
+  addressLine1        String?
+  city                String?
+  state               String?
+  zipCode             String?
+  mainEmail           String?
+  mainPhone           String?
+  website             String?
+  notes               String?  @db.Text
+  sourceImportBatchId String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  contacts            EventureSponsorContact[]
+  eventSponsors       EventureEventSponsor[]
+  yearHistory         EventureSponsorYearHistory[]
+  followUps           EventureSponsorFollowUp[]
+
+  @@unique([organizationId, normalizedName])
+  @@index([organizationId, name])
+  @@index([organizationId, mainEmail])
+  @@index([organizationId, mainPhone])
+}
+
+model EventureSponsorContact {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  programDomain         String   @default("eventure")
+  sponsorOrganizationId String
+  name                  String
+  email                 String?
+  phone                 String?
+  role                  String?
+  isPrimary             Boolean  @default(false)
+  sourceImportBatchId   String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  sponsorOrganization   EventureSponsorOrganization @relation(fields: [sponsorOrganizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, sponsorOrganizationId], map: "EventureSponsorContact_org_sponsor_idx")
+  @@index([organizationId, sponsorOrganizationId, email], map: "EventureSponsorContact_org_sponsor_email_idx")
+  @@index([organizationId, sponsorOrganizationId, phone], map: "EventureSponsorContact_org_sponsor_phone_idx")
+}
+
+model EventureEventSponsor {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  programDomain         String   @default("eventure")
+  eventId               String
+  sponsorOrganizationId String
+  sponsorshipPackage    String?
+  committedAmount       Float?
+  amountPaid            Float?
+  paymentStatus         String   @default("unknown")
+  paymentMethod         String?
+  paymentReference      String?
+  paymentNotes          String?  @db.Text
+  flightPreference      String?
+  logoStatus            String?
+  attendeeNamesRaw      String?  @db.Text
+  statusRaw             String?
+  notes                 String?  @db.Text
+  pointPersonName       String?
+  pointPersonUserId     String?
+  sourceImportBatchId   String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  event                 EventureEvent               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  sponsorOrganization   EventureSponsorOrganization @relation(fields: [sponsorOrganizationId], references: [id], onDelete: Cascade)
+  followUps             EventureSponsorFollowUp[]
+
+  @@unique([organizationId, eventId, sponsorOrganizationId])
+  @@index([organizationId, eventId, paymentStatus])
+  @@index([organizationId, eventId, logoStatus])
+  @@index([organizationId, eventId, flightPreference])
+}
+
+model EventureSponsorYearHistory {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  programDomain         String   @default("eventure")
+  sponsorOrganizationId String
+  year                  Int
+  rawValue              String?
+  amount                Float?
+  participationStatus   String   @default("unknown")
+  sourceType            String   @default("sponsor_master_list")
+  sourceImportBatchId   String?
+  createdAt             DateTime @default(now())
+
+  sponsorOrganization   EventureSponsorOrganization @relation(fields: [sponsorOrganizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, sponsorOrganizationId, year, sourceType])
+  @@index([organizationId, sponsorOrganizationId, year])
+}
+
+model EventureSponsorFollowUp {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  programDomain         String   @default("eventure")
+  eventId               String
+  eventSponsorId        String?
+  sponsorOrganizationId String
+  type                  String
+  title                 String
+  description           String?
+  assignedToName        String?
+  assignedToUserId      String?
+  status                String   @default("open")
+  dueDate               DateTime?
+  source                String   @default("csv_import")
+  sourceImportBatchId   String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  event                 EventureEvent               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  eventSponsor          EventureEventSponsor?       @relation(fields: [eventSponsorId], references: [id], onDelete: SetNull)
+  sponsorOrganization   EventureSponsorOrganization @relation(fields: [sponsorOrganizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, eventId, status])
+  @@index([organizationId, eventSponsorId])
+  @@index([organizationId, sponsorOrganizationId])
+  @@index([organizationId, type, status])
 }
 
 model EventureImportBatch {

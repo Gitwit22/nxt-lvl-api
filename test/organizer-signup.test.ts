@@ -1,31 +1,33 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 
-const userFindUnique = vi.fn();
-const userCreate = vi.fn();
-const organizationFindUnique = vi.fn();
-const organizationCreate = vi.fn();
-const membershipCreate = vi.fn();
-const transactionMock = vi.fn();
+const prismaMocks = vi.hoisted(() => ({
+  userFindUnique: vi.fn(),
+  userCreate: vi.fn(),
+  organizationFindUnique: vi.fn(),
+  organizationCreate: vi.fn(),
+  membershipCreate: vi.fn(),
+  transactionMock: vi.fn(),
+}));
 
 vi.mock("../src/core/db/prisma.js", () => ({
   prisma: {
     user: {
-      findUnique: userFindUnique,
-      create: userCreate,
+      findUnique: prismaMocks.userFindUnique,
+      create: prismaMocks.userCreate,
       count: vi.fn().mockResolvedValue(1),
       update: vi.fn(),
       findFirst: vi.fn(),
     },
     organization: {
-      findUnique: organizationFindUnique,
-      create: organizationCreate,
+      findUnique: prismaMocks.organizationFindUnique,
+      create: prismaMocks.organizationCreate,
     },
     membership: {
-      create: membershipCreate,
+      create: prismaMocks.membershipCreate,
       findMany: vi.fn().mockResolvedValue([]),
     },
-    $transaction: transactionMock,
+    $transaction: prismaMocks.transactionMock,
   },
 }));
 
@@ -42,16 +44,16 @@ import { app } from "../src/app.js";
 beforeEach(() => {
   vi.clearAllMocks();
 
-  userFindUnique.mockResolvedValue(null);
-  organizationFindUnique.mockResolvedValue(null);
+  prismaMocks.userFindUnique.mockResolvedValue(null);
+  prismaMocks.organizationFindUnique.mockResolvedValue(null);
 
-  organizationCreate.mockResolvedValue({
+  prismaMocks.organizationCreate.mockResolvedValue({
     id: "org-skyline",
     name: "Skyline Events Co.",
     slug: "skyline-events-co",
   });
 
-  userCreate.mockResolvedValue({
+  prismaMocks.userCreate.mockResolvedValue({
     id: "usr-organizer-1",
     email: "owner@skyline.test",
     role: "uploader",
@@ -64,18 +66,18 @@ beforeEach(() => {
     mustChangePassword: false,
   });
 
-  membershipCreate.mockResolvedValue({
+  prismaMocks.membershipCreate.mockResolvedValue({
     id: "mem-1",
     organizationId: "org-skyline",
     userId: "usr-organizer-1",
     role: "owner",
   });
 
-  transactionMock.mockImplementation(async (callback: (tx: unknown) => unknown) =>
+  prismaMocks.transactionMock.mockImplementation(async (callback: (tx: unknown) => unknown) =>
     callback({
-      organization: { create: organizationCreate },
-      user: { create: userCreate },
-      membership: { create: membershipCreate },
+      organization: { create: prismaMocks.organizationCreate },
+      user: { create: prismaMocks.userCreate },
+      membership: { create: prismaMocks.membershipCreate },
     }),
   );
 });
@@ -110,7 +112,7 @@ describe("POST /api/auth/organizer/signup", () => {
     expect(response.body.token).toEqual(expect.any(String));
     expect(response.body.appInitState).toBe("ready");
 
-    expect(organizationCreate).toHaveBeenCalledWith(
+    expect(prismaMocks.organizationCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           name: "Skyline Events Co.",
@@ -120,7 +122,7 @@ describe("POST /api/auth/organizer/signup", () => {
         }),
       }),
     );
-    expect(userCreate).toHaveBeenCalledWith(
+    expect(prismaMocks.userCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           organizationId: "org-skyline",
@@ -130,7 +132,7 @@ describe("POST /api/auth/organizer/signup", () => {
         }),
       }),
     );
-    expect(membershipCreate).toHaveBeenCalledWith(
+    expect(prismaMocks.membershipCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         data: expect.objectContaining({
           organizationId: "org-skyline",
@@ -142,7 +144,7 @@ describe("POST /api/auth/organizer/signup", () => {
   });
 
   it("rejects duplicate organizer emails", async () => {
-    userFindUnique.mockResolvedValueOnce({
+    prismaMocks.userFindUnique.mockResolvedValueOnce({
       id: "existing-user",
       email: "owner@skyline.test",
     });
@@ -159,6 +161,6 @@ describe("POST /api/auth/organizer/signup", () => {
 
     expect(response.status).toBe(409);
     expect(response.body.error).toMatch(/already exists/i);
-    expect(transactionMock).not.toHaveBeenCalled();
+    expect(prismaMocks.transactionMock).not.toHaveBeenCalled();
   });
 });
