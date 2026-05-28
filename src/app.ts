@@ -30,6 +30,8 @@ app.use(
   cors({
     origin: getCorsOrigins(),
     credentials: true,
+    preflightContinue: false,
+    optionsSuccessStatus: 204,
   }),
 );
 app.use(express.json({ limit: "10mb" }));

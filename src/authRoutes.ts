@@ -445,6 +445,15 @@ router.post("/change-password", requireAuth, async (req, res) => {
   res.status(204).send();
 });
 
+// OPTIONS /api/auth/organizer/signup - CORS preflight
+router.options("/organizer/signup", (req, res) => {
+  res.setHeader("Access-Control-Allow-Origin", req.get("Origin") || "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+  res.sendStatus(204);
+});
+
 // POST /api/auth/organizer/signup
 // Public self-service organizer registration that creates an organization,
 // owner user, org membership, and returns an authenticated session token.
