@@ -9,6 +9,8 @@ import {
 } from "../services/sponsor-import.service.js";
 import { EventureServiceError } from "../services/eventure-error.js";
 
+type SponsorImportMode = "existing_event" | "master_contacts_only" | "create_event";
+
 const router = express.Router({ mergeParams: true });
 
 function readString(value: unknown): string | undefined {
@@ -43,6 +45,17 @@ function getParserStrategy(req: express.Request): SponsorImportParserStrategy | 
   throw new EventureServiceError("parserStrategy must be one of: native, llama_core.", 400);
 }
 
+function getImportMode(req: express.Request): SponsorImportMode | undefined {
+  const value = readString(req.body?.mode);
+  if (!value) return undefined;
+  if (value === "existing_event" || value === "master_contacts_only" || value === "create_event") return value;
+  throw new EventureServiceError("mode must be one of: existing_event, master_contacts_only, create_event.", 400);
+}
+
+function readImportBatchId(req: express.Request): string {
+  return readRouteParam(req.body?.importBatchId, "importBatchId");
+}
+
 function handleError(res: express.Response, error: unknown) {
   if (error instanceof EventureServiceError) {
     res.status(error.statusCode).json({ error: error.message });
@@ -63,9 +76,11 @@ router.post("/preview", upload.single("file"), async (req, res) => {
     const result = await previewSponsorImportForEvent({
       organizationId: user!.organizationId,
       eventId,
+      createdByUserId: user!.userId,
       csvContent: getCsvContent(req),
       fileName: getFileName(req),
       parserStrategy: getParserStrategy(req),
+      mode: getImportMode(req),
     });
 
     res.json(result);
@@ -83,9 +98,7 @@ router.post("/confirm", upload.single("file"), async (req, res) => {
       organizationId: user!.organizationId,
       eventId,
       createdByUserId: user!.userId,
-      csvContent: getCsvContent(req),
-      fileName: getFileName(req),
-      parserStrategy: getParserStrategy(req),
+      importBatchId: readImportBatchId(req),
     });
 
     res.status(201).json(result);

@@ -40,6 +40,7 @@ export async function createImportBatch(input: {
   createdByUserId: string;
   totalRows: number;
   mappingConfig: Record<string, unknown>;
+  status?: string;
 }) {
   return prisma.eventureImportBatch.create({
     data: {
@@ -49,7 +50,7 @@ export async function createImportBatch(input: {
       fileType: input.fileType,
       fileUrl: input.fileUrl,
       sourceType: "sponsor_master_list",
-      status: "processing",
+      status: input.status ?? "previewing",
       totalRows: input.totalRows,
       mappingConfig: input.mappingConfig as Prisma.InputJsonValue,
       createdByUserId: input.createdByUserId,
@@ -63,11 +64,12 @@ export async function completeImportBatch(input: {
   validRows: number;
   errorRows: number;
   duplicateRows: number;
+  status?: string;
 }) {
   return prisma.eventureImportBatch.update({
     where: { id: input.importBatchId },
     data: {
-      status: "completed",
+      status: input.status ?? "completed",
       parsedRows: input.parsedRows,
       validRows: input.validRows,
       errorRows: input.errorRows,
@@ -105,6 +107,34 @@ export async function createImportRow(input: {
       rowNumber: input.rowNumber,
       rawData: input.rawData as Prisma.InputJsonValue,
       normalizedData: input.normalizedData as Prisma.InputJsonValue,
+      status: input.status,
+      errorMessage: input.errorMessage,
+    },
+  });
+}
+
+export async function getImportBatchWithRows(importBatchId: string, organizationId: string) {
+  return prisma.eventureImportBatch.findFirst({
+    where: {
+      id: importBatchId,
+      organizationId,
+    },
+    include: {
+      rows: {
+        orderBy: { rowNumber: "asc" },
+      },
+    },
+  });
+}
+
+export async function updateImportRowStatus(input: {
+  id: string;
+  status: string;
+  errorMessage?: string;
+}) {
+  return prisma.eventureImportRow.update({
+    where: { id: input.id },
+    data: {
       status: input.status,
       errorMessage: input.errorMessage,
     },
@@ -285,6 +315,22 @@ export async function upsertSponsorYearHistory(input: {
       participationStatus: input.participationStatus,
       sourceType: input.sourceType,
       sourceImportBatchId: input.sourceImportBatchId,
+    },
+  });
+}
+
+export async function getSponsorYearHistory(input: {
+  organizationId: string;
+  sponsorOrganizationId: string;
+  year: number;
+  sourceType: string;
+}) {
+  return prisma.eventureSponsorYearHistory.findFirst({
+    where: {
+      organizationId: input.organizationId,
+      sponsorOrganizationId: input.sponsorOrganizationId,
+      year: input.year,
+      sourceType: input.sourceType,
     },
   });
 }
