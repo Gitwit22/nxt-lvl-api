@@ -22,13 +22,23 @@ export async function createEventForOrganization(input: CreateEventureEventInput
   if (!input.title.trim()) {
     throw new EventureServiceError("title is required.", 400);
   }
-  if (!input.venueName.trim()) {
-    throw new EventureServiceError("venueName is required.", 400);
-  }
 
-  ensureDateOrder(input.startDateTime, input.endDateTime);
+  const safeStart = Number.isNaN(input.startDateTime.getTime()) ? new Date() : input.startDateTime;
+  const safeEndCandidate = Number.isNaN(input.endDateTime.getTime())
+    ? new Date(safeStart.getTime() + 60 * 60 * 1000)
+    : input.endDateTime;
+  const safeEnd = safeEndCandidate <= safeStart
+    ? new Date(safeStart.getTime() + 60 * 60 * 1000)
+    : safeEndCandidate;
 
-  return createEventureEvent(input);
+  ensureDateOrder(safeStart, safeEnd);
+
+  return createEventureEvent({
+    ...input,
+    venueName: input.venueName.trim() || "TBD",
+    startDateTime: safeStart,
+    endDateTime: safeEnd,
+  });
 }
 
 export async function getEventForOrganization(organizationId: string, eventId: string) {
