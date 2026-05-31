@@ -5,7 +5,7 @@ const prisma = new PrismaClient();
 
 async function main() {
   const email = "jsteele@miroundtable.com";
-  const password = "ChangeMe123!";
+  const password = "4755Dett";
   const orgSlug = "michigan-roundtable";
   const orgName = "Michigan Roundtable";
 

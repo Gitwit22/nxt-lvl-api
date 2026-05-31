@@ -7,6 +7,7 @@ import {
   previewSponsorImportForEvent,
   type SponsorImportParserStrategy,
 } from "../services/sponsor-import.service.js";
+import { listImportBatchesForEvent } from "../repositories/sponsor-import.repository.js";
 import { EventureServiceError } from "../services/eventure-error.js";
 
 type SponsorImportMode = "existing_event" | "master_contacts_only" | "create_event";
@@ -67,6 +68,17 @@ function handleError(res: express.Response, error: unknown) {
 }
 
 router.use(requireAuth);
+
+router.get("/", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const items = await listImportBatchesForEvent(user!.organizationId, eventId);
+    res.json({ items });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
 
 router.post("/preview", upload.single("file"), async (req, res) => {
   try {

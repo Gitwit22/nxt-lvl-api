@@ -475,3 +475,22 @@ export async function createSponsorFollowUp(input: {
     },
   });
 }
+
+export async function listImportBatchesForEvent(organizationId: string, eventId: string) {
+  return prisma.eventureImportBatch.findMany({
+    where: { organizationId, eventId },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      fileName: true,
+      status: true,
+      totalRows: true,
+      parsedRows: true,
+      validRows: true,
+      errorRows: true,
+      duplicateRows: true,
+      createdAt: true,
+      completedAt: true,
+    },
+  });
+}

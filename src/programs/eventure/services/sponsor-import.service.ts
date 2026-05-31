@@ -205,7 +205,7 @@ function normalizeHeader(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
-function normalizeHeaders(headers: string[]): string[] {
+export function normalizeHeaders(headers: string[]): string[] {
   const seen = new Map<string, number>();
 
   return headers.map((header) => {
@@ -217,13 +217,13 @@ function normalizeHeaders(headers: string[]): string[] {
   });
 }
 
-function cleanCell(value: string | undefined): string {
+export function cleanCell(value: string | undefined): string {
   if (!value) return "";
   const trimmed = value.trim();
   return BLANK_MARKERS.has(trimmed.toLowerCase()) ? "" : trimmed;
 }
 
-function normalizeCompanyName(value: string): string {
+export function normalizeCompanyName(value: string): string {
   return value
     .toLowerCase()
     .replace(/[^a-z0-9\s]/g, " ")
@@ -298,10 +298,11 @@ function classifyRowStatus(input: {
   return "valid";
 }
 
-function inferPaymentStatus(input: { statusRaw?: string; notes?: string; sponsorshipPackage?: string }): string {
+export function inferPaymentStatus(input: { statusRaw?: string; notes?: string; sponsorshipPackage?: string }): string {
   const haystack = `${input.statusRaw ?? ""} ${input.notes ?? ""} ${input.sponsorshipPackage ?? ""}`.toLowerCase();
   if (!haystack.trim()) return "unknown";
-  if (haystack.includes("paid via kindful") || haystack.includes("paid")) return "paid_external";
+  if (haystack.includes("unpaid")) return "unknown";
+  if (haystack.includes("paid via kindful") || /\bpaid\b/.test(haystack)) return "paid_external";
   if (haystack.includes("invoiced")) return "invoiced";
   if (haystack.includes("need invoice") || haystack.includes("invoice needed") || haystack.includes("asked if we can invoice")) {
     return "invoice_needed";
@@ -311,7 +312,7 @@ function inferPaymentStatus(input: { statusRaw?: string; notes?: string; sponsor
   return "unknown";
 }
 
-function parseYearValue(rawValue: string): ParsedYearHistory {
+export function parseYearValue(rawValue: string): ParsedYearHistory {
   const normalized = rawValue.trim().toLowerCase();
   if (!normalized) {
     return { year: 0, rawValue, participationStatus: "no_known_participation" };
@@ -346,7 +347,7 @@ function namesAreClose(a: string, b: string): boolean {
   return intersection / union >= 0.6;
 }
 
-function detectFollowUps(row: {
+export function detectFollowUps(row: {
   logoStatus?: string;
   attendeeNamesRaw?: string;
   paymentStatus: string;

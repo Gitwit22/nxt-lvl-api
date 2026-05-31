@@ -1,0 +1,229 @@
+import { describe, it, expect } from "vitest";
+import {
+  inferPaymentStatus,
+  parseYearValue,
+  normalizeHeaders,
+  cleanCell,
+  normalizeCompanyName,
+  detectFollowUps,
+} from "../src/programs/eventure/services/sponsor-import.service.js";
+
+// ---------------------------------------------------------------------------
+// cleanCell / null marker normalization
+// ---------------------------------------------------------------------------
+describe("cleanCell", () => {
+  it.each(["", "n/a", "N/A", "na", "NA", "-", "--", "none", "None", "NONE", "null", "NULL"])(
+    "returns empty string for blank marker %s",
+    (marker) => {
+      expect(cleanCell(marker)).toBe("");
+    },
+  );
+
+  it("returns the value when it is meaningful", () => {
+    expect(cleanCell("Acme Corp")).toBe("Acme Corp");
+    expect(cleanCell("  trimmed  ")).toBe("trimmed");
+  });
+
+  it("returns empty string for undefined", () => {
+    expect(cleanCell(undefined)).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeCompanyName
+// ---------------------------------------------------------------------------
+describe("normalizeCompanyName", () => {
+  it("strips legal suffixes", () => {
+    expect(normalizeCompanyName("Acme Inc.")).toBe("acme");
+    expect(normalizeCompanyName("Acme LLC")).toBe("acme");
+    expect(normalizeCompanyName("Acme Corp")).toBe("acme");
+    expect(normalizeCompanyName("Acme Corporation")).toBe("acme");
+  });
+
+  it("lowercases and collapses whitespace", () => {
+    expect(normalizeCompanyName("  Blue  Sky   Labs  ")).toBe("blue sky labs");
+  });
+
+  it("strips punctuation", () => {
+    expect(normalizeCompanyName("O'Brien & Sons, Ltd.")).toBe("o brien sons");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// normalizeHeaders (duplicate detection)
+// ---------------------------------------------------------------------------
+describe("normalizeHeaders", () => {
+  it("returns headers unchanged when all are unique", () => {
+    const result = normalizeHeaders(["Company", "Email", "Phone"]);
+    expect(result).toEqual(["Company", "Email", "Phone"]);
+  });
+
+  it("appends __2 suffix to second occurrence of a duplicate header", () => {
+    const result = normalizeHeaders(["2026 YR", "Email", "2026 YR"]);
+    expect(result[0]).toBe("2026 YR");
+    expect(result[2]).toBe("2026 YR__2");
+  });
+
+  it("handles three duplicates sequentially", () => {
+    const result = normalizeHeaders(["A", "A", "A"]);
+    expect(result).toEqual(["A", "A__2", "A__3"]);
+  });
+
+  it("is case-sensitive on the returned value but case-insensitive for dedup counting", () => {
+    // normalizeHeader() lowercases before comparing
+    const result = normalizeHeaders(["Notes", "NOTES"]);
+    expect(result[0]).toBe("Notes");
+    expect(result[1]).toBe("NOTES__2");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// inferPaymentStatus
+// ---------------------------------------------------------------------------
+describe("inferPaymentStatus", () => {
+  it('returns "paid_external" for "paid"', () => {
+    expect(inferPaymentStatus({ statusRaw: "Paid" })).toBe("paid_external");
+  });
+
+  it('returns "paid_external" for "paid via kindful"', () => {
+    expect(inferPaymentStatus({ statusRaw: "Paid via Kindful" })).toBe("paid_external");
+  });
+
+  it('returns "unknown" for "unpaid" — not a false positive', () => {
+    expect(inferPaymentStatus({ statusRaw: "unpaid" })).toBe("unknown");
+    expect(inferPaymentStatus({ notes: "still unpaid" })).toBe("unknown");
+  });
+
+  it('returns "invoiced" for "invoiced"', () => {
+    expect(inferPaymentStatus({ statusRaw: "Invoiced" })).toBe("invoiced");
+  });
+
+  it('returns "invoice_needed" when notes say "need invoice"', () => {
+    expect(inferPaymentStatus({ notes: "need invoice" })).toBe("invoice_needed");
+    expect(inferPaymentStatus({ notes: "invoice needed" })).toBe("invoice_needed");
+    expect(inferPaymentStatus({ notes: "asked if we can invoice" })).toBe("invoice_needed");
+  });
+
+  it('returns "pending_event_payment" for "to pay at event"', () => {
+    expect(inferPaymentStatus({ statusRaw: "to pay at event" })).toBe("pending_event_payment");
+  });
+
+  it('returns "comped" for "comped"', () => {
+    expect(inferPaymentStatus({ statusRaw: "comped" })).toBe("comped");
+  });
+
+  it('returns "unknown" for empty input', () => {
+    expect(inferPaymentStatus({})).toBe("unknown");
+    expect(inferPaymentStatus({ statusRaw: "", notes: "" })).toBe("unknown");
+  });
+
+  it('does not treat "invoiced" as "paid" (order check)', () => {
+    // "invoiced" does NOT contain "paid", should resolve to "invoiced"
+    expect(inferPaymentStatus({ statusRaw: "invoiced" })).toBe("invoiced");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// parseYearValue
+// ---------------------------------------------------------------------------
+describe("parseYearValue", () => {
+  it('x → participated_unknown_amount', () => {
+    expect(parseYearValue("x").participationStatus).toBe("participated_unknown_amount");
+    expect(parseYearValue("X").participationStatus).toBe("participated_unknown_amount");
+  });
+
+  it('New → new_prospect', () => {
+    expect(parseYearValue("New").participationStatus).toBe("new_prospect");
+    expect(parseYearValue("new").participationStatus).toBe("new_prospect");
+    expect(parseYearValue("NEW").participationStatus).toBe("new_prospect");
+  });
+
+  it('dollar amount → participated_with_amount', () => {
+    const result = parseYearValue("$500");
+    expect(result.participationStatus).toBe("participated_with_amount");
+    expect(result.amount).toBe(500);
+  });
+
+  it('number without dollar sign → participated_with_amount', () => {
+    const result = parseYearValue("1000");
+    expect(result.participationStatus).toBe("participated_with_amount");
+    expect(result.amount).toBe(1000);
+  });
+
+  it('comma-formatted amount → participated_with_amount', () => {
+    const result = parseYearValue("$1,500.00");
+    expect(result.participationStatus).toBe("participated_with_amount");
+    expect(result.amount).toBe(1500);
+  });
+
+  it('blank → no_known_participation', () => {
+    expect(parseYearValue("").participationStatus).toBe("no_known_participation");
+    expect(parseYearValue("   ").participationStatus).toBe("no_known_participation");
+  });
+
+  it('unrecognized text → participated_text', () => {
+    expect(parseYearValue("TBD").participationStatus).toBe("participated_text");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectFollowUps
+// ---------------------------------------------------------------------------
+describe("detectFollowUps", () => {
+  const baseRow = {
+    logoStatus: "logo received",
+    attendeeNamesRaw: "John Doe, Jane Doe",
+    paymentStatus: "paid_external",
+    contactEmail: "sponsor@example.com",
+    contactPhone: "5555550100",
+    statusRaw: "",
+    notes: "",
+    pointPersonName: "Alice",
+  };
+
+  it("returns no follow-ups for a clean row", () => {
+    expect(detectFollowUps(baseRow)).toHaveLength(0);
+  });
+
+  it("detects need_logo when logo status is missing", () => {
+    const result = detectFollowUps({ ...baseRow, logoStatus: "" });
+    expect(result.some((f) => f.type === "need_logo")).toBe(true);
+  });
+
+  it("detects need_logo when logo status text says 'need logo'", () => {
+    const result = detectFollowUps({ ...baseRow, logoStatus: "need logo" });
+    expect(result.some((f) => f.type === "need_logo")).toBe(true);
+  });
+
+  it("detects need_names when attendee names are blank", () => {
+    const result = detectFollowUps({ ...baseRow, attendeeNamesRaw: "" });
+    expect(result.some((f) => f.type === "need_names")).toBe(true);
+  });
+
+  it("detects need_invoice when paymentStatus is invoice_needed", () => {
+    const result = detectFollowUps({ ...baseRow, paymentStatus: "invoice_needed" });
+    expect(result.some((f) => f.type === "need_invoice")).toBe(true);
+  });
+
+  it("detects need_payment when notes mention 'unpaid'", () => {
+    const result = detectFollowUps({ ...baseRow, notes: "still unpaid" });
+    expect(result.some((f) => f.type === "need_payment")).toBe(true);
+  });
+
+  it("detects need_contact_info when both email and phone are missing", () => {
+    const result = detectFollowUps({ ...baseRow, contactEmail: undefined, contactPhone: undefined });
+    expect(result.some((f) => f.type === "need_contact_info")).toBe(true);
+  });
+
+  it("detects waiting_response when notes say 'waiting'", () => {
+    const result = detectFollowUps({ ...baseRow, notes: "waiting on response" });
+    expect(result.some((f) => f.type === "waiting_response")).toBe(true);
+  });
+
+  it("deduplicates follow-up types", () => {
+    // Both empty logo + 'need logo' text would naively produce two need_logo entries
+    const result = detectFollowUps({ ...baseRow, logoStatus: "need logo" });
+    const logoFollowUps = result.filter((f) => f.type === "need_logo");
+    expect(logoFollowUps).toHaveLength(1);
+  });
+});
