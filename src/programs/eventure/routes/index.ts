@@ -7,6 +7,7 @@ import { eventureRegistrationsRouter } from "./registrations.routes.js";
 import { eventureCheckInsRouter } from "./checkins.routes.js";
 import { eventureSponsorImportsRouter } from "./sponsor-imports.routes.js";
 import { eventureSponsorsRouter } from "./sponsors.routes.js";
+import { ordersRouter } from "./orders.routes.js";
 
 const router = express.Router();
 
@@ -34,5 +35,6 @@ router.use("/events/:eventId/checkins", eventureCheckInsRouter);
 router.use("/events/:eventId/sponsor-imports", eventureSponsorImportsRouter);
 router.use("/events/:eventId/sponsors", eventureSponsorsRouter);
 router.use("/registrations", eventureRegistrationsRouter);
+router.use("/orders", ordersRouter);
 
 export { router as eventureRouter };

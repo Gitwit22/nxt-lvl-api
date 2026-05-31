@@ -154,4 +154,66 @@ router.delete("/:eventId", async (req, res) => {
   }
 });
 
+// Ticket Type Endpoints
+router.get("/:eventId/ticket-types", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const { prisma } = await import("../../../db.js");
+    
+    const event = await getEventForOrganization(user!.organizationId, req.params.eventId);
+    if (!event) {
+      return res.status(404).json({ error: "Event not found." });
+    }
+
+    const ticketTypes = await prisma.eventureTicketType.findMany({
+      where: {
+        eventId: req.params.eventId,
+        organizationId: user!.organizationId,
+      },
+      orderBy: { sortOrder: "asc" },
+    });
+
+    res.json({ items: ticketTypes });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.post("/:eventId/ticket-types", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const { prisma } = await import("../../../db.js");
+
+    const event = await getEventForOrganization(user!.organizationId, req.params.eventId);
+    if (!event) {
+      return res.status(404).json({ error: "Event not found." });
+    }
+
+    const name = readString(req.body?.name);
+    if (!name) {
+      return res.status(400).json({ error: "Ticket type name is required." });
+    }
+
+    const ticketType = await prisma.eventureTicketType.create({
+      data: {
+        organizationId: user!.organizationId,
+        eventId: req.params.eventId,
+        name,
+        description: readString(req.body?.description),
+        price: req.body?.price ? parseFloat(req.body.price) : 0,
+        capacity: readInteger(req.body?.capacity),
+        quantityAvailable: readInteger(req.body?.quantityAvailable) ?? 100,
+        isPaid: req.body?.isPaid === true,
+        isPublic: req.body?.isPublic !== false,
+        sortOrder: readInteger(req.body?.sortOrder) ?? 0,
+        createdByUserId: user!.userId,
+      },
+    });
+
+    res.status(201).json({ item: ticketType });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
 export { router as eventureEventsRouter };
