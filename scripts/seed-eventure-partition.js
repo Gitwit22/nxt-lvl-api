@@ -16,8 +16,8 @@ import { PrismaClient } from "@prisma/client";
 const prisma = new PrismaClient();
 
 const PROGRAM_ID = "eventure";
-const ORG_SLUG = "nxt-lvl-technology-solutions";
-const USER_EMAIL = "nxtlvltechllc@gmail.com";
+const ORG_SLUG = "michigan-roundtable";
+const USER_EMAIL = "jsteele@miroundtable.com";
 
 async function main() {
   const org = await prisma.organization.findUniqueOrThrow({

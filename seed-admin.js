@@ -4,10 +4,10 @@ import bcrypt from "bcryptjs";
 const prisma = new PrismaClient();
 
 async function main() {
-  const email = "nxtlvltechllc@gmail.com";
+  const email = "jsteele@miroundtable.com";
   const password = "ChangeMe123!";
-  const orgSlug = "nxt-lvl-technology-solutions";
-  const orgName = "Nxt Lvl Technology Solutions";
+  const orgSlug = "michigan-roundtable";
+  const orgName = "Michigan Roundtable";
 
   const organization = await prisma.organization.upsert({
     where: { slug: orgSlug },
