@@ -1534,7 +1534,7 @@ model EventureImportBatch {
   id                  String   @id @default(cuid())
   organizationId      String
   programDomain       String   @default("eventure")
-  eventId             String
+  eventId             String?
   fileName            String
   fileType            String
   fileUrl             String
@@ -1551,7 +1551,7 @@ model EventureImportBatch {
   updatedAt           DateTime @updatedAt
   completedAt         DateTime?
 
-  event               EventureEvent                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event               EventureEvent?                @relation(fields: [eventId], references: [id], onDelete: Cascade)
   rows                EventureImportRow[]
   registrations       EventureRegistration[]
 
@@ -1564,7 +1564,7 @@ model EventureImportRow {
   organizationId        String
   programDomain         String   @default("eventure")
   importBatchId         String
-  eventId               String
+  eventId               String?
   rowNumber             Int
   rawData               Json
   normalizedData        Json     @default("{}")

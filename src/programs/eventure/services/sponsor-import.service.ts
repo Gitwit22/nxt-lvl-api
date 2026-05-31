@@ -9,9 +9,8 @@ import {
   createSponsorFollowUp,
   createSponsorOrganization,
   failImportBatch,
-  getImportBatchWithRows,
   findExistingOpenFollowUp,
-  findMatchingContact,
+  getImportBatchWithRows,
   getActiveEventForOrganization,
   getEventSponsorByComposite,
   listEventSponsorsForEvent,
@@ -24,6 +23,7 @@ import {
   upsertSponsorYearHistory,
 } from "../repositories/sponsor-import.repository.js";
 import { EventureServiceError } from "./eventure-error.js";
+import { createEventForOrganization } from "./event.service.js";
 import { canUseSharedParser, parseDocumentWithSharedService } from "../../../core/services/parse/documentParseService.js";
 
 type ImportWarning = {
@@ -32,7 +32,44 @@ type ImportWarning = {
   message: string;
 };
 
-type ImportMode = "existing_event" | "master_contacts_only" | "create_event";
+type LegacyImportMode = "existing_event" | "master_contacts_only" | "create_event";
+export type ImportMode =
+  | "master_list_only"
+  | "master_list_with_event_assignment"
+  | "create_event_then_assign";
+
+type ImportModeInput = ImportMode | LegacyImportMode;
+
+export type ConfirmRowDecision =
+  | "approve"
+  | "skip"
+  | "edit"
+  | "merge"
+  | "create_new"
+  | "needs_review";
+
+export type ConfirmRowDecisionInput = {
+  importRowId?: string;
+  rowNumber?: number;
+  decision: ConfirmRowDecision;
+  editableNormalized?: Partial<StoredSponsorImportRow>;
+  matchedRecords?: {
+    sponsorOrganizationId?: string;
+    sponsorContactId?: string;
+    eventSponsorId?: string;
+  };
+};
+
+export type ConfirmCreateEventInput = {
+  title?: string;
+  description?: string;
+  startDateTime?: string;
+  endDateTime?: string;
+  venueName?: string;
+  timezone?: string;
+  status?: string;
+  eventType?: string;
+};
 
 type SuggestedFollowUp = {
   type: string;
@@ -83,8 +120,27 @@ type ImportPreviewRow = {
   importRowId: string;
   rowNumber: number;
   status: "valid" | "warning" | "error" | "duplicate";
+  decision: ConfirmRowDecision;
   raw: Record<string, unknown>;
   normalized: {
+    companyName?: string;
+    representativeName?: string;
+    email?: string;
+    phone?: string;
+    addressLine1?: string;
+    city?: string;
+    state?: string;
+    zipCode?: string;
+    sponsorshipPackage?: string;
+    committedAmount?: number;
+    paymentStatus?: string;
+    logoStatus?: string;
+    flightPreference?: string;
+    attendeeNamesRaw?: string;
+    pointPersonName?: string;
+    notes?: string;
+  };
+  editableNormalized: {
     companyName?: string;
     representativeName?: string;
     email?: string;
@@ -115,6 +171,10 @@ type ImportPreviewRow = {
     sponsorOrganizationId?: string;
     sponsorContactId?: string;
     eventSponsorId?: string;
+  };
+  duplicateCandidates?: {
+    sponsorOrganizations?: Array<{ id: string; name: string; reason: string }>;
+    sponsorContacts?: Array<{ id: string; name: string; email?: string; phone?: string; reason: string }>;
   };
 };
 
@@ -162,8 +222,76 @@ type StoredSponsorImportRow = {
     sponsorContactId?: string;
     eventSponsorId?: string;
   };
+  duplicateCandidates?: {
+    sponsorOrganizations?: Array<{ id: string; name: string; reason: string }>;
+    sponsorContacts?: Array<{ id: string; name: string; email?: string; phone?: string; reason: string }>;
+  };
   rowStatus: ImportPreviewRow["status"];
 };
+
+function toCanonicalImportMode(mode?: ImportModeInput): ImportMode {
+  if (!mode || mode === "master_list_only" || mode === "master_contacts_only") {
+    return "master_list_only";
+  }
+  if (mode === "master_list_with_event_assignment" || mode === "existing_event") {
+    return "master_list_with_event_assignment";
+  }
+  return "create_event_then_assign";
+}
+
+function usesEventAssignment(mode: ImportMode): boolean {
+  return mode !== "master_list_only";
+}
+
+function requiresExistingEventIdForPreview(mode: ImportMode): boolean {
+  return mode === "master_list_with_event_assignment";
+}
+
+function defaultDecisionForStoredRow(stored: StoredSponsorImportRow): ConfirmRowDecision {
+  if (stored.rowStatus === "error" || stored.rowStatus === "duplicate") return "skip";
+  if (
+    stored.targets.sponsorOrganization === "review" ||
+    stored.targets.sponsorContact === "review" ||
+    stored.targets.eventSponsor === "review" ||
+    stored.targets.sponsorYearHistory === "review" ||
+    stored.targets.sponsorFollowUp === "review"
+  ) {
+    return "needs_review";
+  }
+  return "approve";
+}
+
+function mergeEditableNormalized(
+  base: StoredSponsorImportRow,
+  editable?: Partial<StoredSponsorImportRow>,
+): StoredSponsorImportRow {
+  if (!editable) return base;
+
+  const merged: StoredSponsorImportRow = {
+    ...base,
+    ...editable,
+    yearHistory: editable.yearHistory ?? base.yearHistory,
+    suggestedFollowUps: editable.suggestedFollowUps ?? base.suggestedFollowUps,
+    warnings: editable.warnings ?? base.warnings,
+    errors: editable.errors ?? base.errors,
+    targets: {
+      ...base.targets,
+      ...(editable.targets ?? {}),
+    },
+    matchedRecords: {
+      ...(base.matchedRecords ?? {}),
+      ...(editable.matchedRecords ?? {}),
+    },
+  };
+
+  merged.companyName = merged.companyName?.trim();
+  merged.normalizedCompanyName = normalizeCompanyName(merged.companyName ?? merged.normalizedCompanyName ?? "");
+  merged.representativeName = merged.representativeName?.trim();
+  merged.email = merged.email?.trim();
+  merged.phone = merged.phone?.trim();
+
+  return merged;
+}
 
 type PreviewItem = {
   rowNumber: number;
@@ -758,8 +886,16 @@ function parseRows(content: string): {
 
 type OrganizationMatchResult = {
   action: "create" | "update" | "review";
-  matchedBy: "normalized_name" | "email_domain_close" | "phone_close" | "new" | "ambiguous";
+  matchedBy: "normalized_name" | "name_phone" | "name_email_domain" | "new" | "ambiguous";
   sponsorOrganizationId?: string;
+  candidates?: Array<{ id: string; name: string; reason: string }>;
+};
+
+type ContactMatchResult = {
+  action: "create" | "update" | "review";
+  matchedBy: "email" | "phone" | "name_company" | "new" | "ambiguous";
+  sponsorContactId?: string;
+  candidates?: Array<{ id: string; name: string; email?: string; phone?: string; reason: string }>;
 };
 
 function findSponsorMatch(args: {
@@ -777,42 +913,21 @@ function findSponsorMatch(args: {
     return { action: "update", matchedBy: "normalized_name", sponsorOrganizationId: byName.id };
   }
 
-  const rowDomain = extractDomain(row.contactEmail);
-  if (rowDomain) {
-    const domainCandidates = existingSponsors.filter((item) => {
-      const existingDomain = extractDomain(item.mainEmail ?? undefined);
-      return existingDomain === rowDomain && namesAreClose(item.normalizedName, row.normalizedCompanyName);
-    });
-
-    if (domainCandidates.length === 1) {
-      return {
-        action: "update",
-        matchedBy: "email_domain_close",
-        sponsorOrganizationId: domainCandidates[0].id,
-      };
-    }
-
-    if (domainCandidates.length > 1) {
-      warnings.push({
-        rowNumber: row.rowNumber,
-        code: "SPONSOR_MATCH_REVIEW",
-        message: "Multiple sponsor organizations matched by email domain. Created as a new sponsor for manual review.",
-      });
-      return { action: "review", matchedBy: "ambiguous" };
-    }
-  }
+  const closeNameCandidates = existingSponsors.filter((item) =>
+    namesAreClose(item.normalizedName, row.normalizedCompanyName),
+  );
 
   const rowPhone = normalizePhone(row.contactPhone);
   if (rowPhone) {
-    const phoneCandidates = existingSponsors.filter((item) => {
+    const phoneCandidates = closeNameCandidates.filter((item) => {
       const existingPhone = normalizePhone(item.mainPhone ?? undefined);
-      return existingPhone === rowPhone && namesAreClose(item.normalizedName, row.normalizedCompanyName);
+      return existingPhone === rowPhone;
     });
 
     if (phoneCandidates.length === 1) {
       return {
         action: "update",
-        matchedBy: "phone_close",
+        matchedBy: "name_phone",
         sponsorOrganizationId: phoneCandidates[0].id,
       };
     }
@@ -821,9 +936,169 @@ function findSponsorMatch(args: {
       warnings.push({
         rowNumber: row.rowNumber,
         code: "SPONSOR_MATCH_REVIEW",
-        message: "Multiple sponsor organizations matched by phone. Created as a new sponsor for manual review.",
+        message: "Multiple sponsor organizations matched by name+phone. Row requires review.",
       });
       return { action: "review", matchedBy: "ambiguous" };
+    }
+  }
+
+  const rowDomain = extractDomain(row.contactEmail);
+  if (rowDomain) {
+    const domainCandidates = closeNameCandidates.filter((item) => {
+      const existingDomain = extractDomain(item.mainEmail ?? undefined);
+      return existingDomain === rowDomain;
+    });
+
+    if (domainCandidates.length === 1) {
+      return {
+        action: "update",
+        matchedBy: "name_email_domain",
+        sponsorOrganizationId: domainCandidates[0].id,
+      };
+    }
+
+    if (domainCandidates.length > 1) {
+      warnings.push({
+        rowNumber: row.rowNumber,
+        code: "SPONSOR_MATCH_REVIEW",
+        message: "Multiple sponsor organizations matched by name+email domain. Row requires review.",
+      });
+      return {
+        action: "review",
+        matchedBy: "ambiguous",
+        candidates: domainCandidates.map((item) => ({ id: item.id, name: item.name, reason: "name_email_domain" })),
+      };
+    }
+  }
+
+  if (closeNameCandidates.length > 0) {
+    warnings.push({
+      rowNumber: row.rowNumber,
+      code: "SPONSOR_MATCH_REVIEW",
+      message: "Similar sponsor organization names found, but no unique phone/email-domain match. Row requires review.",
+    });
+    return {
+      action: "review",
+      matchedBy: "ambiguous",
+      candidates: closeNameCandidates.map((item) => ({ id: item.id, name: item.name, reason: "similar_name" })),
+    };
+  }
+
+  return { action: "create", matchedBy: "new" };
+}
+
+function findContactMatch(args: {
+  row: ParsedSponsorRow;
+  matchedSponsor?: Awaited<ReturnType<typeof listSponsorOrganizationsForOrganization>>[number];
+  warnings: ImportWarning[];
+  allowNameCompanyMatch?: boolean;
+}): ContactMatchResult {
+  const { row, matchedSponsor, warnings, allowNameCompanyMatch = false } = args;
+  if (!matchedSponsor) return { action: "create", matchedBy: "new" };
+
+  if (row.contactEmail) {
+    const byEmail = matchedSponsor.contacts.filter((contact) =>
+      !!contact.email && contact.email.toLowerCase() === row.contactEmail?.toLowerCase(),
+    );
+    if (byEmail.length === 1) {
+      return { action: "update", matchedBy: "email", sponsorContactId: byEmail[0].id };
+    }
+    if (byEmail.length > 1) {
+      warnings.push({
+        rowNumber: row.rowNumber,
+        code: "CONTACT_MATCH_REVIEW",
+        message: "Multiple sponsor contacts matched by email. Row requires review.",
+      });
+      return {
+        action: "review",
+        matchedBy: "ambiguous",
+        candidates: byEmail.map((item) => ({
+          id: item.id,
+          name: item.name,
+          email: item.email ?? undefined,
+          phone: item.phone ?? undefined,
+          reason: "email",
+        })),
+      };
+    }
+  }
+
+  const rowPhone = normalizePhone(row.contactPhone);
+  if (rowPhone) {
+    const byPhone = matchedSponsor.contacts.filter((contact) =>
+      normalizePhone(contact.phone ?? undefined) === rowPhone,
+    );
+    if (byPhone.length === 1) {
+      return { action: "update", matchedBy: "phone", sponsorContactId: byPhone[0].id };
+    }
+    if (byPhone.length > 1) {
+      warnings.push({
+        rowNumber: row.rowNumber,
+        code: "CONTACT_MATCH_REVIEW",
+        message: "Multiple sponsor contacts matched by phone. Row requires review.",
+      });
+      return {
+        action: "review",
+        matchedBy: "ambiguous",
+        candidates: byPhone.map((item) => ({
+          id: item.id,
+          name: item.name,
+          email: item.email ?? undefined,
+          phone: item.phone ?? undefined,
+          reason: "phone",
+        })),
+      };
+    }
+  }
+
+  if (allowNameCompanyMatch && row.contactName) {
+    const byName = matchedSponsor.contacts.filter((contact) =>
+      normalizeName(contact.name) === normalizeName(row.contactName),
+    );
+    if (byName.length === 1) {
+      return { action: "update", matchedBy: "name_company", sponsorContactId: byName[0].id };
+    }
+    if (byName.length > 1) {
+      warnings.push({
+        rowNumber: row.rowNumber,
+        code: "CONTACT_MATCH_REVIEW",
+        message: "Multiple sponsor contacts matched by name within company. Row requires review.",
+      });
+      return {
+        action: "review",
+        matchedBy: "ambiguous",
+        candidates: byName.map((item) => ({
+          id: item.id,
+          name: item.name,
+          email: item.email ?? undefined,
+          phone: item.phone ?? undefined,
+          reason: "name_company",
+        })),
+      };
+    }
+  }
+
+  if (row.contactName && !row.contactEmail && !row.contactPhone) {
+    const possibleNameMatches = matchedSponsor.contacts.filter((contact) =>
+      normalizeName(contact.name).includes(normalizeName(row.contactName)),
+    );
+    if (possibleNameMatches.length > 0) {
+      warnings.push({
+        rowNumber: row.rowNumber,
+        code: "CONTACT_MATCH_REVIEW",
+        message: "Name-only contact data cannot be auto-merged. Row requires review.",
+      });
+      return {
+        action: "review",
+        matchedBy: "ambiguous",
+        candidates: possibleNameMatches.map((item) => ({
+          id: item.id,
+          name: item.name,
+          email: item.email ?? undefined,
+          phone: item.phone ?? undefined,
+          reason: "name_only_requires_review",
+        })),
+      };
     }
   }
 
@@ -846,28 +1121,35 @@ function mergeNotes(existing?: string | null, incoming?: string): string | undef
 
 export async function previewSponsorImportForEvent(input: {
   organizationId: string;
-  eventId: string;
+  eventId?: string;
   createdByUserId: string;
   csvContent: string;
   fileName?: string;
   parserStrategy?: SponsorImportParserStrategy;
-  mode?: ImportMode;
+  mode?: ImportModeInput;
 }) {
-  const event = await getActiveEventForOrganization(input.organizationId, input.eventId);
-  if (!event) {
-    throw new EventureServiceError("Event not found.", 404);
+  const canonicalMode = toCanonicalImportMode(input.mode);
+  if (input.eventId) {
+    const event = await getActiveEventForOrganization(input.organizationId, input.eventId);
+    if (!event) {
+      throw new EventureServiceError("Event not found.", 404);
+    }
+  } else if (requiresExistingEventIdForPreview(canonicalMode)) {
+    throw new EventureServiceError("eventId is required for this import mode during preview.", 400);
   }
 
   const parseResolution = await resolveCsvForParsing(input.csvContent, input.parserStrategy ?? "native");
   const parsed = parseRows(parseResolution.content);
   const existingSponsors = await listSponsorOrganizationsForOrganization(input.organizationId);
 
+  const mode = toCanonicalImportMode(input.mode);
+
   const importBatch = await createImportBatch({
     organizationId: input.organizationId,
     eventId: input.eventId,
     fileName: input.fileName ?? `eventure-sponsor-import-${Date.now()}.csv`,
     fileType: "text/csv",
-    fileUrl: `inline://eventure/${input.eventId}/${Date.now()}`,
+    fileUrl: `inline://eventure/${input.eventId ?? input.organizationId}/${Date.now()}`,
     createdByUserId: input.createdByUserId,
     totalRows: parsed.rows.length,
     status: "previewing",
@@ -876,14 +1158,16 @@ export async function previewSponsorImportForEvent(input: {
       yearColumns: parsed.yearColumns,
       columnMapping: parsed.columnMapping,
       importType: "sponsor_master_list",
-      mode: input.mode ?? "existing_event",
+      mode,
       parserStrategyRequested: input.parserStrategy ?? "native",
       parserUsed: parseResolution.parserUsed,
       parserWarnings: parseResolution.parserWarnings,
     },
   });
 
-  const existingEventSponsorRows = await listEventSponsorsForEvent(input.organizationId, input.eventId);
+  const existingEventSponsorRows = input.eventId
+    ? await listEventSponsorsForEvent(input.organizationId, input.eventId)
+    : [];
   const existingEventSponsorSet = new Set(existingEventSponsorRows.map((item) => item.sponsorOrganizationId));
   const seenCompanies = new Set<string>();
 
@@ -928,15 +1212,15 @@ export async function previewSponsorImportForEvent(input: {
         : undefined;
 
       const matchedContact = matchedSponsor
-        ? matchedSponsor.contacts.find((contact) => {
-          if (row.contactEmail && contact.email && row.contactEmail.toLowerCase() === contact.email.toLowerCase()) return true;
-          if (row.contactPhone && normalizePhone(row.contactPhone) && normalizePhone(contact.phone ?? undefined) === normalizePhone(row.contactPhone)) return true;
-          if (row.contactName && normalizeName(contact.name) === normalizeName(row.contactName)) return true;
-          return false;
+        ? findContactMatch({
+          row,
+          matchedSponsor,
+          warnings: rowWarnings,
+          allowNameCompanyMatch: sponsorMatch.matchedBy === "normalized_name",
         })
-        : undefined;
+        : { action: "create" as const, matchedBy: "new" as const };
 
-      const existingEventSponsor = sponsorMatch.sponsorOrganizationId
+      const existingEventSponsor = usesEventAssignment(mode) && input.eventId && sponsorMatch.sponsorOrganizationId
         ? await getEventSponsorByComposite({
           organizationId: input.organizationId,
           eventId: input.eventId,
@@ -944,7 +1228,11 @@ export async function previewSponsorImportForEvent(input: {
         })
         : undefined;
 
-      const targetReview = rowErrors.length > 0 || duplicateWithinFile || sponsorMatch.action === "review";
+      const targetReview =
+        rowErrors.length > 0 ||
+        duplicateWithinFile ||
+        sponsorMatch.action === "review" ||
+        matchedContact.action === "review";
       const sponsorOrganizationTarget: PreviewRowTarget = rowErrors.length > 0
         ? "skip"
         : targetReview
@@ -954,10 +1242,10 @@ export async function previewSponsorImportForEvent(input: {
         ? "skip"
         : targetReview
           ? "review"
-          : matchedContact
+          : matchedContact.action === "update"
             ? "update"
             : "create";
-      const eventSponsorTarget: PreviewRowTarget = input.mode === "master_contacts_only"
+      const eventSponsorTarget: PreviewRowTarget = !usesEventAssignment(mode)
         ? "skip"
         : rowErrors.length > 0
           ? "skip"
@@ -973,7 +1261,7 @@ export async function previewSponsorImportForEvent(input: {
           : sponsorMatch.action === "update"
             ? "update"
             : "create";
-      const sponsorFollowUpTarget: PreviewRowTarget = input.mode === "master_contacts_only"
+      const sponsorFollowUpTarget: PreviewRowTarget = !usesEventAssignment(mode)
         ? "skip"
         : row.suggestedFollowUps.length === 0
           ? "skip"
@@ -997,14 +1285,33 @@ export async function previewSponsorImportForEvent(input: {
       if (sponsorContactTarget !== "skip") contactsDetected += 1;
       if (eventSponsorTarget !== "skip") eventSponsorsDetected += 1;
       historyRecordsDetected += row.yearHistory.length;
-      followUpsDetected += input.mode === "master_contacts_only" ? 0 : row.suggestedFollowUps.length;
+      followUpsDetected += usesEventAssignment(mode) ? row.suggestedFollowUps.length : 0;
 
       const previewRow: ImportPreviewRow = {
-        importRowId: `preview-${row.rowNumber}`,
+        importRowId: "",
         rowNumber: row.rowNumber,
         status: rowStatus,
+        decision: targetReview ? "needs_review" : "approve",
         raw: row.raw,
         normalized: {
+          companyName: row.companyName || undefined,
+          representativeName: row.contactName || undefined,
+          email: row.contactEmail || undefined,
+          phone: row.contactPhone || undefined,
+          addressLine1: row.addressLine1,
+          city: row.city,
+          state: row.state,
+          zipCode: row.zipCode,
+          sponsorshipPackage: row.sponsorshipPackage,
+          committedAmount: row.committedAmount,
+          paymentStatus: row.paymentStatus,
+          logoStatus: row.logoStatus,
+          flightPreference: row.flightPreference,
+          attendeeNamesRaw: row.attendeeNamesRaw,
+          pointPersonName: row.pointPersonName,
+          notes: row.notes,
+        },
+        editableNormalized: {
           companyName: row.companyName || undefined,
           representativeName: row.contactName || undefined,
           email: row.contactEmail || undefined,
@@ -1033,14 +1340,16 @@ export async function previewSponsorImportForEvent(input: {
         errors: rowErrors,
         matchedRecords: {
           sponsorOrganizationId: sponsorMatch.sponsorOrganizationId,
-          sponsorContactId: matchedContact?.id,
+          sponsorContactId: matchedContact.sponsorContactId,
           eventSponsorId: existingEventSponsor?.id,
+        },
+        duplicateCandidates: {
+          sponsorOrganizations: sponsorMatch.candidates,
+          sponsorContacts: matchedContact.candidates,
         },
       };
 
-      rows.push(previewRow);
-
-      await createImportRow({
+      const savedRow = await createImportRow({
         organizationId: input.organizationId,
         eventId: input.eventId,
         importBatchId: importBatch.id,
@@ -1053,6 +1362,7 @@ export async function previewSponsorImportForEvent(input: {
           errors: previewRow.errors,
           targets: previewRow.targets,
           matchedRecords: previewRow.matchedRecords,
+          duplicateCandidates: previewRow.duplicateCandidates,
           yearHistory: row.yearHistory,
           suggestedFollowUps: row.suggestedFollowUps,
           paymentNotes: row.paymentNotes,
@@ -1061,6 +1371,9 @@ export async function previewSponsorImportForEvent(input: {
         status: previewRow.status,
         errorMessage: previewRow.errors.length > 0 ? previewRow.errors.join(" | ") : previewRow.warnings.join(" | ") || undefined,
       });
+
+      previewRow.importRowId = savedRow.id;
+      rows.push(previewRow);
     }
 
     const status = errorRows > 0 || warningRows > 0 || duplicateRows > 0 ? "needs_review" : "preview_ready";
@@ -1077,7 +1390,7 @@ export async function previewSponsorImportForEvent(input: {
     return {
       importBatchId: importBatch.id,
       importType: "sponsor_master_list",
-      mode: input.mode ?? "existing_event",
+      mode,
       eventId: input.eventId,
       fileName: input.fileName ?? "uploaded.csv",
       status,
@@ -1104,17 +1417,21 @@ export async function previewSponsorImportForEvent(input: {
 
 export async function confirmSponsorImportForEvent(input: {
   organizationId: string;
-  eventId: string;
+  eventId?: string;
   createdByUserId: string;
   importBatchId: string;
+  rowDecisions?: ConfirmRowDecisionInput[];
+  createEvent?: ConfirmCreateEventInput;
 }) {
-  const event = await getActiveEventForOrganization(input.organizationId, input.eventId);
-  if (!event) {
-    throw new EventureServiceError("Event not found.", 404);
+  if (input.eventId) {
+    const event = await getActiveEventForOrganization(input.organizationId, input.eventId);
+    if (!event) {
+      throw new EventureServiceError("Event not found.", 404);
+    }
   }
 
   const importBatch = await getImportBatchWithRows(input.importBatchId, input.organizationId);
-  if (!importBatch || importBatch.eventId !== input.eventId) {
+  if (!importBatch || (input.eventId && importBatch.eventId !== input.eventId)) {
     throw new EventureServiceError("Import batch not found.", 404);
   }
 
@@ -1122,9 +1439,47 @@ export async function confirmSponsorImportForEvent(input: {
     throw new EventureServiceError("Import batch is not ready to confirm.", 400);
   }
 
-  const mappingConfig = importBatch.mappingConfig as { mode?: ImportMode };
-  const mode = mappingConfig.mode ?? "existing_event";
+  const mappingConfig = importBatch.mappingConfig as { mode?: ImportModeInput };
+  const mode = toCanonicalImportMode(mappingConfig.mode);
+  let effectiveEventId = input.eventId ?? importBatch.eventId ?? undefined;
+
+  if (mode === "create_event_then_assign" && input.createEvent) {
+    const fallbackStart = new Date(Date.now() + 60 * 60 * 1000);
+    const fallbackEnd = new Date(Date.now() + 2 * 60 * 60 * 1000);
+    const parsedStart = input.createEvent.startDateTime ? new Date(input.createEvent.startDateTime) : fallbackStart;
+    const parsedEnd = input.createEvent.endDateTime ? new Date(input.createEvent.endDateTime) : fallbackEnd;
+
+    const createdEvent = await createEventForOrganization({
+      organizationId: input.organizationId,
+      createdByUserId: input.createdByUserId,
+      title: (input.createEvent.title ?? "Sponsor Import Event").trim(),
+      description: input.createEvent.description?.trim() || "Auto-created at sponsor import confirmation.",
+      status: input.createEvent.status,
+      eventType: input.createEvent.eventType,
+      timezone: input.createEvent.timezone,
+      venueName: (input.createEvent.venueName ?? "TBD").trim(),
+      startDateTime: Number.isNaN(parsedStart.getTime()) ? fallbackStart : parsedStart,
+      endDateTime: Number.isNaN(parsedEnd.getTime()) ? fallbackEnd : parsedEnd,
+    });
+    effectiveEventId = createdEvent.id;
+  }
+
+  if (usesEventAssignment(mode) && !effectiveEventId) {
+    throw new EventureServiceError("eventId is required for this import mode.", 400);
+  }
   const existingSponsors = await listSponsorOrganizationsForOrganization(input.organizationId);
+
+  const decisionByImportRowId = new Map<string, ConfirmRowDecisionInput>();
+  const decisionByRowNumber = new Map<number, ConfirmRowDecisionInput>();
+
+  for (const decision of input.rowDecisions ?? []) {
+    if (decision.importRowId) {
+      decisionByImportRowId.set(decision.importRowId, decision);
+    }
+    if (typeof decision.rowNumber === "number" && Number.isFinite(decision.rowNumber)) {
+      decisionByRowNumber.set(decision.rowNumber, decision);
+    }
+  }
 
   let sponsorOrganizationsCreated = 0;
   let sponsorOrganizationsUpdated = 0;
@@ -1142,7 +1497,21 @@ export async function confirmSponsorImportForEvent(input: {
 
   try {
     for (const row of importBatch.rows) {
-      const stored = row.normalizedData as unknown as StoredSponsorImportRow;
+      const rowDecision = decisionByImportRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
+      const baseStored = row.normalizedData as unknown as StoredSponsorImportRow;
+      const resolvedDecision = rowDecision?.decision ?? defaultDecisionForStoredRow(baseStored);
+      const stored = mergeEditableNormalized(baseStored, rowDecision?.editableNormalized);
+
+      if (resolvedDecision === "skip" || resolvedDecision === "needs_review") {
+        skippedRows += 1;
+        await updateImportRowStatus({
+          id: row.id,
+          status: "skipped",
+          errorMessage: resolvedDecision === "skip" ? "Row skipped by decision." : "Row marked for review.",
+        });
+        continue;
+      }
+
       if (stored.rowStatus === "error" || stored.errors.length > 0 || !stored.companyName || !stored.normalizedCompanyName) {
         failedRows += 1;
         await updateImportRowStatus({
@@ -1191,7 +1560,9 @@ export async function confirmSponsorImportForEvent(input: {
       };
 
       const sponsorWarnings: ImportWarning[] = [];
-      const sponsorMatch = findSponsorMatch({ row: rowForMatch, existingSponsors, warnings: sponsorWarnings });
+      const sponsorMatch = resolvedDecision === "create_new"
+        ? { action: "create" as const, matchedBy: "new" as const }
+        : findSponsorMatch({ row: rowForMatch, existingSponsors, warnings: sponsorWarnings });
       let sponsorOrganization = sponsorMatch.sponsorOrganizationId
         ? existingSponsors.find((item) => item.id === sponsorMatch.sponsorOrganizationId)
         : undefined;
@@ -1231,15 +1602,28 @@ export async function confirmSponsorImportForEvent(input: {
       }
 
       if (rowForMatch.contactName || rowForMatch.contactEmail || rowForMatch.contactPhone) {
-        const matchedContact = await findMatchingContact({
-          organizationId: input.organizationId,
-          sponsorOrganizationId: sponsorOrganization.id,
-          email: rowForMatch.contactEmail,
-          phone: rowForMatch.contactPhone,
-          name: rowForMatch.contactName,
+        const contactMatch = findContactMatch({
+          row: rowForMatch,
+          matchedSponsor: sponsorOrganization,
+          warnings: sponsorWarnings,
+          allowNameCompanyMatch: sponsorMatch.matchedBy === "normalized_name",
         });
 
-        if (matchedContact) {
+        if (contactMatch.action === "review") {
+          skippedRows += 1;
+          await updateImportRowStatus({
+            id: row.id,
+            status: "skipped",
+            errorMessage: "Contact match requires manual review.",
+          });
+          continue;
+        }
+
+        const matchedContact = contactMatch.sponsorContactId
+          ? sponsorOrganization.contacts.find((contact) => contact.id === contactMatch.sponsorContactId)
+          : undefined;
+
+        if (contactMatch.action === "update" && matchedContact) {
           await updateSponsorContact({
             id: matchedContact.id,
             name: preferExisting(matchedContact.name, rowForMatch.contactName),
@@ -1263,16 +1647,16 @@ export async function confirmSponsorImportForEvent(input: {
       }
 
       let eventSponsor: Awaited<ReturnType<typeof getEventSponsorByComposite>> | undefined;
-      if (mode !== "master_contacts_only") {
+      if (usesEventAssignment(mode)) {
         eventSponsor = await getEventSponsorByComposite({
           organizationId: input.organizationId,
-          eventId: input.eventId,
+          eventId: effectiveEventId!,
           sponsorOrganizationId: sponsorOrganization.id,
         });
 
         eventSponsor = await upsertEventSponsor({
           organizationId: input.organizationId,
-          eventId: input.eventId,
+          eventId: effectiveEventId!,
           sponsorOrganizationId: sponsorOrganization.id,
           sponsorshipPackage: preferExisting(eventSponsor?.sponsorshipPackage, rowForMatch.sponsorshipPackage),
           committedAmount: eventSponsor?.committedAmount ?? rowForMatch.committedAmount,
@@ -1316,11 +1700,11 @@ export async function confirmSponsorImportForEvent(input: {
         else yearHistoryCreated += 1;
       }
 
-      if (mode !== "master_contacts_only" && eventSponsor) {
+      if (usesEventAssignment(mode) && eventSponsor) {
         for (const suggestion of rowForMatch.suggestedFollowUps) {
           const existingFollowUp = await findExistingOpenFollowUp({
             organizationId: input.organizationId,
-            eventId: input.eventId,
+            eventId: effectiveEventId!,
             eventSponsorId: eventSponsor.id,
             sponsorOrganizationId: sponsorOrganization.id,
             type: suggestion.type,
@@ -1330,7 +1714,7 @@ export async function confirmSponsorImportForEvent(input: {
 
           await createSponsorFollowUp({
             organizationId: input.organizationId,
-            eventId: input.eventId,
+            eventId: effectiveEventId!,
             eventSponsorId: eventSponsor.id,
             sponsorOrganizationId: sponsorOrganization.id,
             type: suggestion.type,
@@ -1345,11 +1729,11 @@ export async function confirmSponsorImportForEvent(input: {
 
       await updateImportRowStatus({
         id: row.id,
-        status: stored.rowStatus === "warning" ? "imported_with_warnings" : "imported",
+        status: stored.rowStatus === "warning" || resolvedDecision === "edit" ? "imported_with_warnings" : "imported",
         errorMessage: stored.warnings.length > 0 ? stored.warnings.join(" | ") : undefined,
       });
 
-      if (stored.rowStatus === "warning") {
+      if (stored.rowStatus === "warning" || resolvedDecision === "edit") {
         importedRowsWithWarnings += 1;
       } else {
         importedRows += 1;
@@ -1369,6 +1753,7 @@ export async function confirmSponsorImportForEvent(input: {
 
     return {
       importBatchId: importBatch.id,
+      eventId: effectiveEventId,
       status,
       summary: {
         sponsorOrganizationsCreated,
@@ -1385,7 +1770,7 @@ export async function confirmSponsorImportForEvent(input: {
       },
       nextActions: [
         { label: "View Contacts & Sponsors", href: "/contacts" },
-        { label: "View Event Sponsors", href: `/events/${input.eventId}/sponsors` },
+        ...(effectiveEventId ? [{ label: "View Event Sponsors", href: `/events/${effectiveEventId}/sponsors` }] : []),
         { label: "View Follow-Ups", href: "/follow-ups" },
       ],
     };

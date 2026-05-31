@@ -6,6 +6,7 @@ import { eventureAttendeesRouter } from "./attendees.routes.js";
 import { eventureRegistrationsRouter } from "./registrations.routes.js";
 import { eventureCheckInsRouter } from "./checkins.routes.js";
 import { eventureSponsorImportsRouter } from "./sponsor-imports.routes.js";
+import { eventureSponsorImportsOrgRouter } from "./sponsor-imports-org.routes.js";
 import { eventureSponsorsRouter } from "./sponsors.routes.js";
 import { ordersRouter } from "./orders.routes.js";
 
@@ -34,6 +35,7 @@ router.use("/events/:eventId/attendees", eventureAttendeesRouter);
 router.use("/events/:eventId/checkins", eventureCheckInsRouter);
 router.use("/events/:eventId/sponsor-imports", eventureSponsorImportsRouter);
 router.use("/events/:eventId/sponsors", eventureSponsorsRouter);
+router.use("/sponsor-imports", eventureSponsorImportsOrgRouter);
 router.use("/registrations", eventureRegistrationsRouter);
 router.use("/orders", ordersRouter);
 

@@ -33,7 +33,7 @@ export async function listEventSponsorsForEvent(organizationId: string, eventId:
 
 export async function createImportBatch(input: {
   organizationId: string;
-  eventId: string;
+  eventId?: string;
   fileName: string;
   fileType: string;
   fileUrl: string;
@@ -91,7 +91,7 @@ export async function failImportBatch(importBatchId: string) {
 
 export async function createImportRow(input: {
   organizationId: string;
-  eventId: string;
+  eventId?: string;
   importBatchId: string;
   rowNumber: number;
   rawData: Record<string, unknown>;
@@ -494,3 +494,24 @@ export async function listImportBatchesForEvent(organizationId: string, eventId:
     },
   });
 }
+
+export async function listImportBatchesForOrg(organizationId: string) {
+  return prisma.eventureImportBatch.findMany({
+    where: { organizationId },
+    orderBy: { createdAt: "desc" },
+    select: {
+      id: true,
+      eventId: true,
+      fileName: true,
+      status: true,
+      totalRows: true,
+      parsedRows: true,
+      validRows: true,
+      errorRows: true,
+      duplicateRows: true,
+      createdAt: true,
+      completedAt: true,
+    },
+  });
+}
+

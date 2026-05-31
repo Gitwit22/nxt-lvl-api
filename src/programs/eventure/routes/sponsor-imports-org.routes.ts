@@ -9,7 +9,7 @@ import {
   previewSponsorImportForEvent,
   type SponsorImportParserStrategy,
 } from "../services/sponsor-import.service.js";
-import { listImportBatchesForEvent } from "../repositories/sponsor-import.repository.js";
+import { listImportBatchesForOrg } from "../repositories/sponsor-import.repository.js";
 import { EventureServiceError } from "../services/eventure-error.js";
 
 type SponsorImportMode =
@@ -26,19 +26,12 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function readRouteParam(value: unknown, fieldName: string): string {
-  if (typeof value === "string" && value.trim()) return value.trim();
-  throw new EventureServiceError(`${fieldName} is required.`, 400);
-}
-
 function getCsvContent(req: express.Request): string {
   if (req.file?.buffer) {
     return req.file.buffer.toString("utf8");
   }
-
   const csvText = readString(req.body?.csvText);
   if (csvText) return csvText;
-
   throw new EventureServiceError("Provide a CSV file upload or csvText in the request body.", 400);
 }
 
@@ -123,7 +116,9 @@ function readCreateEvent(req: express.Request): ConfirmCreateEventInput | undefi
 }
 
 function readImportBatchId(req: express.Request): string {
-  return readRouteParam(req.body?.importBatchId, "importBatchId");
+  const value = readString(req.body?.importBatchId);
+  if (!value) throw new EventureServiceError("importBatchId is required.", 400);
+  return value;
 }
 
 function handleError(res: express.Response, error: unknown) {
@@ -131,7 +126,6 @@ function handleError(res: express.Response, error: unknown) {
     res.status(error.statusCode).json({ error: error.message });
     return;
   }
-
   const message = error instanceof Error ? error.message : "Unknown server error";
   res.status(500).json({ error: message });
 }
@@ -141,8 +135,7 @@ router.use(requireAuth);
 router.get("/", async (req, res) => {
   try {
     const user = getRequestUser(req);
-    const eventId = readRouteParam(req.params["eventId"], "eventId");
-    const items = await listImportBatchesForEvent(user!.organizationId, eventId);
+    const items = await listImportBatchesForOrg(user!.organizationId);
     res.json({ items });
   } catch (error) {
     handleError(res, error);
@@ -152,11 +145,9 @@ router.get("/", async (req, res) => {
 router.post("/preview", upload.single("file"), async (req, res) => {
   try {
     const user = getRequestUser(req);
-    const eventId = readRouteParam(req.params["eventId"], "eventId");
 
     const result = await previewSponsorImportForEvent({
       organizationId: user!.organizationId,
-      eventId,
       createdByUserId: user!.userId,
       csvContent: getCsvContent(req),
       fileName: getFileName(req),
@@ -173,11 +164,9 @@ router.post("/preview", upload.single("file"), async (req, res) => {
 router.post("/confirm", upload.single("file"), async (req, res) => {
   try {
     const user = getRequestUser(req);
-    const eventId = readRouteParam(req.params["eventId"], "eventId");
 
     const result = await confirmSponsorImportForEvent({
       organizationId: user!.organizationId,
-      eventId,
       createdByUserId: user!.userId,
       importBatchId: readImportBatchId(req),
       rowDecisions: readRowDecisions(req),
@@ -190,4 +179,4 @@ router.post("/confirm", upload.single("file"), async (req, res) => {
   }
 });
 
-export { router as eventureSponsorImportsRouter };
+export { router as eventureSponsorImportsOrgRouter };
