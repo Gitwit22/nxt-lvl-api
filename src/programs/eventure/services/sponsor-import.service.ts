@@ -1,8 +1,11 @@
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import XLSX from "xlsx";
 import {
   completeImportBatch,
+  createEventFlightSlot,
+  createEventVolunteerNeed,
   createImportBatch,
   createImportRow,
   createSponsorContact,
@@ -19,12 +22,14 @@ import {
   updateImportRowStatus,
   updateSponsorContact,
   updateSponsorOrganization,
+  upsertSponsorshipPackage,
   upsertEventSponsor,
   upsertSponsorYearHistory,
 } from "../repositories/sponsor-import.repository.js";
 import { EventureServiceError } from "./eventure-error.js";
 import { createEventForOrganization } from "./event.service.js";
 import { canUseSharedParser, parseDocumentWithSharedService } from "../../../core/services/parse/documentParseService.js";
+import { prisma } from "../../../core/db/prisma.js";
 
 type ImportWarning = {
   rowNumber: number;
@@ -71,6 +76,54 @@ export type ConfirmCreateEventInput = {
   eventType?: string;
 };
 
+export type SponsorImportRollbackMode = "archive" | "hard_delete";
+
+export type SponsorImportRollbackPreviewResponse = {
+  importBatchId: string;
+  status: string;
+  canRollback: boolean;
+  warnings: string[];
+  counts: {
+    sponsorOrganizations: number;
+    sponsorContacts: number;
+    eventSponsors: number;
+    sponsorYearHistory: number;
+    sponsorFollowUps: number;
+    sponsorshipPackages: number;
+    eventFlightSlots: number;
+    eventVolunteerNeeds: number;
+  };
+  records: {
+    sponsorOrganizations: Array<{ id: string; name: string; archivedAt: string | null }>;
+    sponsorContacts: Array<{ id: string; name: string; sponsorOrganizationId: string; archivedAt: string | null }>;
+    eventSponsors: Array<{ id: string; eventId: string; sponsorOrganizationId: string; archivedAt: string | null }>;
+    sponsorYearHistory: Array<{ id: string; sponsorOrganizationId: string; year: number; archivedAt: string | null }>;
+    sponsorFollowUps: Array<{ id: string; title: string; status: string; archivedAt: string | null }>;
+  };
+  recommendedMode: "archive";
+  hardDeleteAllowed: boolean;
+};
+
+export type SponsorImportRollbackResponse = {
+  importBatchId: string;
+  status: "rolled_back" | "rollback_partial";
+  mode: SponsorImportRollbackMode;
+  warnings: string[];
+  affectedCounts: SponsorImportRollbackPreviewResponse["counts"];
+};
+
+function isRollbackHardDeletePrivileged(role?: string, platformRole?: string): boolean {
+  return role === "admin" || platformRole === "suite_admin" || platformRole === "dev";
+}
+
+export function isImportRecordManuallyEdited(createdAt: Date, updatedAt: Date): boolean {
+  return updatedAt.getTime() - createdAt.getTime() > 1000;
+}
+
+export function validateRollbackConfirmationText(confirmationText: string): boolean {
+  return confirmationText === "ROLLBACK IMPORT";
+}
+
 type SuggestedFollowUp = {
   type: string;
   title: string;
@@ -112,6 +165,59 @@ type ParsedSponsorRow = {
   yearHistory: ParsedYearHistory[];
   warnings: ImportWarning[];
   suggestedFollowUps: SuggestedFollowUp[];
+};
+
+type WorkbookImportSheetKey = "sponsorLevels" | "sponsorsList" | "amFlight" | "pmFlight" | "volunteers";
+
+type WorkbookSheetPreview = {
+  key: WorkbookImportSheetKey;
+  sheetName: string;
+  rowsDetected: number;
+  warnings: string[];
+};
+
+type SponsorshipPackageRow = {
+  name: string;
+  earlyBirdPrice?: number;
+  regularPrice?: number;
+  bannerBenefit?: string;
+  signBenefit?: string;
+  foursomeIncluded?: string;
+  websiteBenefit?: string;
+  programBookBenefit?: string;
+  coscBenefit?: string;
+  tributeBenefit?: string;
+};
+
+type FlightSlotRow = {
+  flight: "AM" | "PM";
+  slotNumber?: number;
+  companyName?: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  startHole?: string;
+  status: "empty" | "assigned" | "needs_review";
+};
+
+type VolunteerNeedRow = {
+  roleName: string;
+  neededCountText?: string;
+  flight?: string;
+  startingAt?: string;
+  rotationTime?: string;
+  notes?: string;
+  status: "open" | "needs_review";
+};
+
+type WorkbookParseResult = {
+  sponsorLevels: SponsorshipPackageRow[];
+  sponsorsListCsv: string;
+  flightSlots: FlightSlotRow[];
+  volunteerNeeds: VolunteerNeedRow[];
+  sheetPreview: WorkbookSheetPreview[];
+  warnings: string[];
 };
 
 type PreviewRowTarget = "create" | "update" | "skip" | "review";
@@ -655,6 +761,67 @@ async function resolveCsvForParsing(
   }
 }
 
+function inferFileTypeFromName(fileName?: string, fileMimeType?: string): "csv" | "xlsx" | "unknown" {
+  if (fileName) {
+    const normalized = fileName.toLowerCase();
+    if (normalized.endsWith(".csv")) return "csv";
+    if (normalized.endsWith(".xlsx")) return "xlsx";
+  }
+  if (fileMimeType === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") return "xlsx";
+  if (fileMimeType === "text/csv") return "csv";
+  return "unknown";
+}
+
+async function resolveImportSource(input: {
+  csvContent?: string;
+  fileBuffer?: Buffer;
+  fileName?: string;
+  fileMimeType?: string;
+  parserStrategy: SponsorImportParserStrategy;
+}): Promise<{
+  sponsorsCsv: string;
+  parserUsed: SponsorImportParserStrategy;
+  parserWarnings: string[];
+  importFormat: "csv" | "xlsx";
+  workbook?: WorkbookParseResult;
+}> {
+  if (input.csvContent && input.csvContent.trim()) {
+    const parseResolution = await resolveCsvForParsing(input.csvContent, input.parserStrategy);
+    return {
+      sponsorsCsv: parseResolution.content,
+      parserUsed: parseResolution.parserUsed,
+      parserWarnings: parseResolution.parserWarnings,
+      importFormat: "csv",
+    };
+  }
+
+  if (!input.fileBuffer) {
+    throw new EventureServiceError("Provide CSV text or upload a CSV/XLSX file.", 400);
+  }
+
+  const inferredType = inferFileTypeFromName(input.fileName, input.fileMimeType);
+  if (inferredType === "xlsx") {
+    const workbook = parseWorkbook(input.fileBuffer);
+    const parseResolution = await resolveCsvForParsing(workbook.sponsorsListCsv, input.parserStrategy);
+    return {
+      sponsorsCsv: parseResolution.content,
+      parserUsed: parseResolution.parserUsed,
+      parserWarnings: [...parseResolution.parserWarnings, ...workbook.warnings],
+      importFormat: "xlsx",
+      workbook,
+    };
+  }
+
+  const csvContent = input.fileBuffer.toString("utf8");
+  const parseResolution = await resolveCsvForParsing(csvContent, input.parserStrategy);
+  return {
+    sponsorsCsv: parseResolution.content,
+    parserUsed: parseResolution.parserUsed,
+    parserWarnings: parseResolution.parserWarnings,
+    importFormat: "csv",
+  };
+}
+
 function extractDomain(email?: string): string | undefined {
   if (!email) return undefined;
   const at = email.indexOf("@");
@@ -747,6 +914,15 @@ function getCell(row: string[], index?: number): string {
   return cleanCell(row[index]);
 }
 
+function isBlankRow(cells: string[]): boolean {
+  return cells.every((cell) => cleanCell(cell) === "");
+}
+
+function isSeparatorCompanyValue(value: string): boolean {
+  const normalized = value.toLowerCase().replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+  return normalized === "new contacts below";
+}
+
 function parseRows(content: string): {
   headers: string[];
   mapped: Record<string, number | undefined>;
@@ -761,11 +937,18 @@ function parseRows(content: string): {
     throw new EventureServiceError("CSV must include a Company column.", 400);
   }
 
-  const parsedRows: ParsedSponsorRow[] = rows.map((row, rowOffset) => {
+  const parsedRows: ParsedSponsorRow[] = rows.flatMap((row, rowOffset) => {
     const rowNumber = rowOffset + 2;
+    if (isBlankRow(row)) return [];
+
+    const companyCell = getCell(row, mapped.company);
+    if (isSeparatorCompanyValue(companyCell)) {
+      return [];
+    }
+
     const warnings: ImportWarning[] = [];
 
-    const companyName = getCell(row, mapped.company);
+    const companyName = companyCell;
     const normalizedCompanyName = normalizeCompanyName(companyName);
     const addressLine1 = getCell(row, mapped.addressLine1) || undefined;
     const cityStateZipRaw = getCell(row, mapped.cityStateZip);
@@ -847,7 +1030,7 @@ function parseRows(content: string): {
       raw[header] = cleanCell(row[index]);
     });
 
-    return {
+    return [{
       rowNumber,
       raw,
       companyName,
@@ -872,7 +1055,7 @@ function parseRows(content: string): {
       yearHistory,
       warnings,
       suggestedFollowUps,
-    };
+    }];
   });
 
   return {
@@ -881,6 +1064,235 @@ function parseRows(content: string): {
     yearColumns,
     columnMapping,
     rows: parsedRows,
+  };
+}
+
+function normalizeSheetName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function escapeCsvCell(value: string): string {
+  if (/[",\n\r]/.test(value)) {
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+  return value;
+}
+
+function gridToCsv(grid: string[][]): string {
+  return grid.map((row) => row.map((cell) => escapeCsvCell(cell)).join(",")).join("\n");
+}
+
+function sheetToGrid(worksheet: XLSX.WorkSheet): string[][] {
+  const rows = XLSX.utils.sheet_to_json<(string | number | boolean | Date | null)[]>(worksheet, {
+    header: 1,
+    raw: false,
+    defval: "",
+  });
+
+  return rows.map((row) => row.map((value) => cleanCell(value === null || value === undefined ? "" : String(value))));
+}
+
+function findWorkbookSheet(workbook: XLSX.WorkBook, aliases: string[]): string | undefined {
+  const normalizedAliases = new Set(aliases.map((alias) => normalizeSheetName(alias)));
+  return workbook.SheetNames.find((name) => normalizedAliases.has(normalizeSheetName(name)));
+}
+
+function parseSponsorLevelsSheet(grid: string[][]): { rows: SponsorshipPackageRow[]; warnings: string[] } {
+  if (grid.length === 0) return { rows: [], warnings: [] };
+  const [header, ...body] = grid;
+  const mappedName = resolveMappedHeaderIndex(header, ["Level", "Name", "Sponsor Level"]);
+  const mappedEarlyBird = resolveMappedHeaderIndex(header, ["Early Bird", "EarlyBird", "Early Bird Price"]);
+  const mappedRegular = resolveMappedHeaderIndex(header, ["Regular", "Regular Price"]);
+  const mappedBanner = resolveMappedHeaderIndex(header, ["Banner"]);
+  const mappedSign = resolveMappedHeaderIndex(header, ["Sign"]);
+  const mappedFoursome = resolveMappedHeaderIndex(header, ["Foursome"]);
+  const mappedWebsite = resolveMappedHeaderIndex(header, ["Website"]);
+  const mappedProgramBook = resolveMappedHeaderIndex(header, ["Program Book", "ProgramBook"]);
+  const mappedCosc = resolveMappedHeaderIndex(header, ["COSC"]);
+  const mappedTribute = resolveMappedHeaderIndex(header, ["2026 Tribute", "Tribute"]);
+
+  const rows: SponsorshipPackageRow[] = [];
+  for (const row of body) {
+    if (isBlankRow(row)) continue;
+    const name = getCell(row, mappedName);
+    if (!name) continue;
+    rows.push({
+      name,
+      earlyBirdPrice: parseMoney(getCell(row, mappedEarlyBird)),
+      regularPrice: parseMoney(getCell(row, mappedRegular)),
+      bannerBenefit: getCell(row, mappedBanner) || undefined,
+      signBenefit: getCell(row, mappedSign) || undefined,
+      foursomeIncluded: getCell(row, mappedFoursome) || undefined,
+      websiteBenefit: getCell(row, mappedWebsite) || undefined,
+      programBookBenefit: getCell(row, mappedProgramBook) || undefined,
+      coscBenefit: getCell(row, mappedCosc) || undefined,
+      tributeBenefit: getCell(row, mappedTribute) || undefined,
+    });
+  }
+
+  return {
+    rows,
+    warnings: mappedName === undefined ? ["Sponsor Levels sheet is missing a Level/Name column."] : [],
+  };
+}
+
+function parseFlightSheet(grid: string[][], flight: "AM" | "PM"): { rows: FlightSlotRow[]; warnings: string[] } {
+  if (grid.length === 0) return { rows: [], warnings: [] };
+  const [header, ...body] = grid;
+  const mappedNo = resolveMappedHeaderIndex(header, ["No.", "No", "Slot", "Slot #"]);
+  const mappedCompany = resolveMappedHeaderIndex(header, ["Company"]);
+  const mappedFirstName = resolveMappedHeaderIndex(header, ["First Name", "First"]);
+  const mappedLastName = resolveMappedHeaderIndex(header, ["Last Name", "Last"]);
+  const mappedEmail = resolveMappedHeaderIndex(header, ["Email"]);
+  const mappedPhone = resolveMappedHeaderIndex(header, ["Phone"]);
+  const mappedStartHole = resolveMappedHeaderIndex(header, ["Start Hole", "Hole"]);
+
+  const rows: FlightSlotRow[] = [];
+  for (const row of body) {
+    if (isBlankRow(row)) continue;
+
+    const slotText = getCell(row, mappedNo);
+    const slotNumber = slotText ? Number.parseInt(slotText, 10) : undefined;
+    const companyName = getCell(row, mappedCompany) || undefined;
+    const firstName = getCell(row, mappedFirstName) || undefined;
+    const lastName = getCell(row, mappedLastName) || undefined;
+    const email = getCell(row, mappedEmail) || undefined;
+    const phone = getCell(row, mappedPhone) || undefined;
+    const startHole = getCell(row, mappedStartHole) || undefined;
+
+    const hasNameOrCompany = !!(companyName || firstName || lastName);
+    const hasContact = !!(email || phone);
+
+    let status: FlightSlotRow["status"] = "empty";
+    if (hasNameOrCompany || hasContact) {
+      status = "assigned";
+    }
+    if (phone && !hasNameOrCompany && !email) {
+      status = "needs_review";
+    }
+
+    rows.push({
+      flight,
+      slotNumber: Number.isFinite(slotNumber) ? slotNumber : undefined,
+      companyName,
+      firstName,
+      lastName,
+      email,
+      phone,
+      startHole,
+      status,
+    });
+  }
+
+  return {
+    rows,
+    warnings: mappedNo === undefined ? ["Flight sheet does not include a slot number column."] : [],
+  };
+}
+
+function parseVolunteersSheet(grid: string[][]): { rows: VolunteerNeedRow[]; warnings: string[] } {
+  if (grid.length === 0) return { rows: [], warnings: [] };
+  const [header, ...body] = grid;
+  const mappedRole = resolveMappedHeaderIndex(header, ["Role", "Task", "Volunteer Task", "Need"]);
+  const mappedNeed = resolveMappedHeaderIndex(header, ["Need", "Needed", "Count", "Needed Count"]);
+  const mappedFlight = resolveMappedHeaderIndex(header, ["Flight"]);
+  const mappedStart = resolveMappedHeaderIndex(header, ["Starting At", "Start", "Time"]);
+  const mappedRotation = resolveMappedHeaderIndex(header, ["Rotation", "Rotation Time"]);
+  const mappedNotes = resolveMappedHeaderIndex(header, ["Notes", "Note"]);
+
+  const rows: VolunteerNeedRow[] = [];
+  for (const row of body) {
+    if (isBlankRow(row)) continue;
+
+    const roleName = getCell(row, mappedRole) || row.find((cell) => cleanCell(cell)) || "";
+    if (!roleName) continue;
+
+    rows.push({
+      roleName,
+      neededCountText: getCell(row, mappedNeed) || undefined,
+      flight: getCell(row, mappedFlight) || undefined,
+      startingAt: getCell(row, mappedStart) || undefined,
+      rotationTime: getCell(row, mappedRotation) || undefined,
+      notes: getCell(row, mappedNotes) || undefined,
+      status: /need|tbd|pending|review/i.test(roleName) ? "open" : "needs_review",
+    });
+  }
+
+  return {
+    rows,
+    warnings: mappedRole === undefined ? ["Volunteers sheet has no explicit Role column; first populated cell per row is used."] : [],
+  };
+}
+
+function parseWorkbook(buffer: Buffer): WorkbookParseResult {
+  const workbook = XLSX.read(buffer, { type: "buffer", cellDates: false, raw: false });
+
+  const sponsorLevelsName = findWorkbookSheet(workbook, ["Sponsor Levels"]);
+  const sponsorsListName = findWorkbookSheet(workbook, ["Sponsors List", "Sponsor List"]);
+  const amFlightName = findWorkbookSheet(workbook, ["AM Flight"]);
+  const pmFlightName = findWorkbookSheet(workbook, ["PM Flight"]);
+  const volunteersName = findWorkbookSheet(workbook, ["Volunteers", "Volunteer"]);
+
+  const warnings: string[] = [];
+  const sheetPreview: WorkbookSheetPreview[] = [];
+
+  if (!sponsorsListName) {
+    throw new EventureServiceError("Workbook is missing the Sponsors List sheet.", 400);
+  }
+
+  const sponsorLevelsGrid = sponsorLevelsName ? sheetToGrid(workbook.Sheets[sponsorLevelsName]) : [];
+  const sponsorsListGrid = sheetToGrid(workbook.Sheets[sponsorsListName]);
+  const amFlightGrid = amFlightName ? sheetToGrid(workbook.Sheets[amFlightName]) : [];
+  const pmFlightGrid = pmFlightName ? sheetToGrid(workbook.Sheets[pmFlightName]) : [];
+  const volunteersGrid = volunteersName ? sheetToGrid(workbook.Sheets[volunteersName]) : [];
+
+  const sponsorLevels = parseSponsorLevelsSheet(sponsorLevelsGrid);
+  const amFlight = parseFlightSheet(amFlightGrid, "AM");
+  const pmFlight = parseFlightSheet(pmFlightGrid, "PM");
+  const volunteers = parseVolunteersSheet(volunteersGrid);
+
+  warnings.push(...sponsorLevels.warnings, ...amFlight.warnings, ...pmFlight.warnings, ...volunteers.warnings);
+
+  sheetPreview.push(
+    {
+      key: "sponsorLevels",
+      sheetName: sponsorLevelsName ?? "not found",
+      rowsDetected: sponsorLevels.rows.length,
+      warnings: sponsorLevelsName ? sponsorLevels.warnings : ["Sheet not found."],
+    },
+    {
+      key: "sponsorsList",
+      sheetName: sponsorsListName,
+      rowsDetected: Math.max(0, sponsorsListGrid.length - 1),
+      warnings: [],
+    },
+    {
+      key: "amFlight",
+      sheetName: amFlightName ?? "not found",
+      rowsDetected: amFlight.rows.length,
+      warnings: amFlightName ? amFlight.warnings : ["Sheet not found."],
+    },
+    {
+      key: "pmFlight",
+      sheetName: pmFlightName ?? "not found",
+      rowsDetected: pmFlight.rows.length,
+      warnings: pmFlightName ? pmFlight.warnings : ["Sheet not found."],
+    },
+    {
+      key: "volunteers",
+      sheetName: volunteersName ?? "not found",
+      rowsDetected: volunteers.rows.length,
+      warnings: volunteersName ? volunteers.warnings : ["Sheet not found."],
+    },
+  );
+
+  return {
+    sponsorLevels: sponsorLevels.rows,
+    sponsorsListCsv: gridToCsv(sponsorsListGrid),
+    flightSlots: [...amFlight.rows, ...pmFlight.rows],
+    volunteerNeeds: volunteers.rows,
+    sheetPreview,
+    warnings,
   };
 }
 
@@ -1123,7 +1535,9 @@ export async function previewSponsorImportForEvent(input: {
   organizationId: string;
   eventId?: string;
   createdByUserId: string;
-  csvContent: string;
+  csvContent?: string;
+  fileBuffer?: Buffer;
+  fileMimeType?: string;
   fileName?: string;
   parserStrategy?: SponsorImportParserStrategy;
   mode?: ImportModeInput;
@@ -1138,8 +1552,14 @@ export async function previewSponsorImportForEvent(input: {
     throw new EventureServiceError("eventId is required for this import mode during preview.", 400);
   }
 
-  const parseResolution = await resolveCsvForParsing(input.csvContent, input.parserStrategy ?? "native");
-  const parsed = parseRows(parseResolution.content);
+  const importSource = await resolveImportSource({
+    csvContent: input.csvContent,
+    fileBuffer: input.fileBuffer,
+    fileName: input.fileName,
+    fileMimeType: input.fileMimeType,
+    parserStrategy: input.parserStrategy ?? "native",
+  });
+  const parsed = parseRows(importSource.sponsorsCsv);
   const existingSponsors = await listSponsorOrganizationsForOrganization(input.organizationId);
 
   const mode = toCanonicalImportMode(input.mode);
@@ -1148,7 +1568,9 @@ export async function previewSponsorImportForEvent(input: {
     organizationId: input.organizationId,
     eventId: input.eventId,
     fileName: input.fileName ?? `eventure-sponsor-import-${Date.now()}.csv`,
-    fileType: "text/csv",
+    fileType: importSource.importFormat === "xlsx"
+      ? "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      : "text/csv",
     fileUrl: `inline://eventure/${input.eventId ?? input.organizationId}/${Date.now()}`,
     createdByUserId: input.createdByUserId,
     totalRows: parsed.rows.length,
@@ -1160,8 +1582,17 @@ export async function previewSponsorImportForEvent(input: {
       importType: "sponsor_master_list",
       mode,
       parserStrategyRequested: input.parserStrategy ?? "native",
-      parserUsed: parseResolution.parserUsed,
-      parserWarnings: parseResolution.parserWarnings,
+      parserUsed: importSource.parserUsed,
+      parserWarnings: importSource.parserWarnings,
+      importFormat: importSource.importFormat,
+      workbook: importSource.workbook
+        ? {
+          sheets: importSource.workbook.sheetPreview,
+          sponsorLevels: importSource.workbook.sponsorLevels,
+          flightSlots: importSource.workbook.flightSlots,
+          volunteerNeeds: importSource.workbook.volunteerNeeds,
+        }
+        : undefined,
     },
   });
 
@@ -1169,6 +1600,9 @@ export async function previewSponsorImportForEvent(input: {
     ? await listEventSponsorsForEvent(input.organizationId, input.eventId)
     : [];
   const existingEventSponsorSet = new Set(existingEventSponsorRows.map((item) => item.sponsorOrganizationId));
+  const allowedWorkbookPackages = new Set(
+    (importSource.workbook?.sponsorLevels ?? []).map((pkg) => normalizeHeader(pkg.name)).filter(Boolean),
+  );
   const seenCompanies = new Set<string>();
 
   const rows: ImportPreviewRow[] = [];
@@ -1186,6 +1620,18 @@ export async function previewSponsorImportForEvent(input: {
     for (const row of parsed.rows) {
       const rowWarnings = [...row.warnings];
       const rowErrors: string[] = [];
+
+      if (row.sponsorshipPackage && allowedWorkbookPackages.size > 0) {
+        const normalizedPackage = normalizeHeader(row.sponsorshipPackage);
+        if (!allowedWorkbookPackages.has(normalizedPackage)) {
+          rowWarnings.push({
+            rowNumber: row.rowNumber,
+            code: "UNKNOWN_PACKAGE",
+            message: `Sponsorship package '${row.sponsorshipPackage}' was not found in Sponsor Levels.`,
+          });
+        }
+      }
+
       const duplicateWithinFile = row.normalizedCompanyName ? seenCompanies.has(row.normalizedCompanyName) : false;
       if (row.normalizedCompanyName) {
         seenCompanies.add(row.normalizedCompanyName);
@@ -1390,10 +1836,12 @@ export async function previewSponsorImportForEvent(input: {
     return {
       importBatchId: importBatch.id,
       importType: "sponsor_master_list",
+      importFormat: importSource.importFormat,
       mode,
       eventId: input.eventId,
-      fileName: input.fileName ?? "uploaded.csv",
+      fileName: input.fileName ?? (importSource.importFormat === "xlsx" ? "uploaded.xlsx" : "uploaded.csv"),
       status,
+      attendeePolicyMessage: "No attendee names found. Attendees were not created. Use Add Contact as Attendee or upload a filled flight sheet later.",
       summary: {
         totalRows: parsed.rows.length,
         validRows,
@@ -1405,9 +1853,22 @@ export async function previewSponsorImportForEvent(input: {
         eventSponsorsDetected,
         historyRecordsDetected,
         followUpsDetected,
+        sponsorshipPackagesDetected: importSource.workbook?.sponsorLevels.length ?? 0,
+        amFlightSlotsDetected: importSource.workbook?.flightSlots.filter((slot) => slot.flight === "AM").length ?? 0,
+        pmFlightSlotsDetected: importSource.workbook?.flightSlots.filter((slot) => slot.flight === "PM").length ?? 0,
+        volunteerNeedsDetected: importSource.workbook?.volunteerNeeds.length ?? 0,
+        attendeesDetected: 0,
       },
       columnMapping: parsed.columnMapping,
       rows,
+      workbookSheetPreview: importSource.workbook?.sheetPreview ?? [],
+      workbookWarnings: importSource.workbook?.warnings ?? [],
+      parserUsed: importSource.parserUsed,
+      warnings: importSource.parserWarnings.map((message) => ({
+        rowNumber: 0,
+        code: "PARSER_WARNING",
+        message,
+      })),
     };
   } catch (error) {
     await failImportBatch(importBatch.id);
@@ -1439,7 +1900,18 @@ export async function confirmSponsorImportForEvent(input: {
     throw new EventureServiceError("Import batch is not ready to confirm.", 400);
   }
 
-  const mappingConfig = importBatch.mappingConfig as { mode?: ImportModeInput };
+  const mappingConfig = importBatch.mappingConfig as {
+    mode?: ImportModeInput;
+    workbook?: {
+      sponsorLevels?: SponsorshipPackageRow[];
+      flightSlots?: FlightSlotRow[];
+      volunteerNeeds?: VolunteerNeedRow[];
+    };
+  };
+  const workbookConfig = mappingConfig.workbook ?? {};
+  const workbookPackages = Array.isArray(workbookConfig.sponsorLevels) ? workbookConfig.sponsorLevels : [];
+  const workbookFlightSlots = Array.isArray(workbookConfig.flightSlots) ? workbookConfig.flightSlots : [];
+  const workbookVolunteerNeeds = Array.isArray(workbookConfig.volunteerNeeds) ? workbookConfig.volunteerNeeds : [];
   const mode = toCanonicalImportMode(mappingConfig.mode);
   let effectiveEventId = input.eventId ?? importBatch.eventId ?? undefined;
 
@@ -1490,6 +1962,10 @@ export async function confirmSponsorImportForEvent(input: {
   let yearHistoryCreated = 0;
   let yearHistoryUpdated = 0;
   let followUpsCreated = 0;
+  let sponsorshipPackagesCreatedOrUpdated = 0;
+  let flightSlotsCreated = 0;
+  let volunteerNeedsCreated = 0;
+  let attendeesCreated = 0;
   let importedRows = 0;
   let importedRowsWithWarnings = 0;
   let skippedRows = 0;
@@ -1580,6 +2056,8 @@ export async function confirmSponsorImportForEvent(input: {
           mainPhone: rowForMatch.contactPhone,
           notes: rowForMatch.notes,
           sourceImportBatchId: importBatch.id,
+          sourceImportRowId: row.id,
+          importSource: "sponsor_import",
         });
         existingSponsors.push(sponsorOrganization);
         sponsorOrganizationsCreated += 1;
@@ -1595,6 +2073,8 @@ export async function confirmSponsorImportForEvent(input: {
           mainPhone: preferExisting(sponsorOrganization.mainPhone, rowForMatch.contactPhone),
           notes: mergeNotes(sponsorOrganization.notes, rowForMatch.notes),
           sourceImportBatchId: importBatch.id,
+          sourceImportRowId: row.id,
+          importSource: "sponsor_import",
         });
         const listIndex = existingSponsors.findIndex((item) => item.id === sponsorOrganization?.id);
         if (listIndex >= 0 && sponsorOrganization) existingSponsors[listIndex] = sponsorOrganization;
@@ -1630,6 +2110,8 @@ export async function confirmSponsorImportForEvent(input: {
             email: preferExisting(matchedContact.email, rowForMatch.contactEmail),
             phone: preferExisting(matchedContact.phone, rowForMatch.contactPhone),
             sourceImportBatchId: importBatch.id,
+            sourceImportRowId: row.id,
+            importSource: "sponsor_import",
           });
           sponsorContactsUpdated += 1;
         } else {
@@ -1641,6 +2123,8 @@ export async function confirmSponsorImportForEvent(input: {
             phone: rowForMatch.contactPhone,
             isPrimary: true,
             sourceImportBatchId: importBatch.id,
+            sourceImportRowId: row.id,
+            importSource: "sponsor_import",
           });
           sponsorContactsCreated += 1;
         }
@@ -1670,6 +2154,8 @@ export async function confirmSponsorImportForEvent(input: {
           notes: mergeNotes(eventSponsor?.notes, rowForMatch.notes),
           pointPersonName: preferExisting(eventSponsor?.pointPersonName, rowForMatch.pointPersonName),
           sourceImportBatchId: importBatch.id,
+          sourceImportRowId: row.id,
+          importSource: "sponsor_import",
         });
 
         if (eventSponsor && eventSponsor.createdAt.getTime() === eventSponsor.updatedAt.getTime()) {
@@ -1695,6 +2181,8 @@ export async function confirmSponsorImportForEvent(input: {
           participationStatus: history.participationStatus,
           sourceType: "sponsor_master_list",
           sourceImportBatchId: importBatch.id,
+          sourceImportRowId: row.id,
+          importSource: "sponsor_import",
         });
         if (existingHistory) yearHistoryUpdated += 1;
         else yearHistoryCreated += 1;
@@ -1722,6 +2210,8 @@ export async function confirmSponsorImportForEvent(input: {
             description: suggestion.description,
             assignedToName: suggestion.assignedToName,
             sourceImportBatchId: importBatch.id,
+            sourceImportRowId: row.id,
+            importSource: "sponsor_import",
           });
           followUpsCreated += 1;
         }
@@ -1737,6 +2227,66 @@ export async function confirmSponsorImportForEvent(input: {
         importedRowsWithWarnings += 1;
       } else {
         importedRows += 1;
+      }
+    }
+
+    for (const pkg of workbookPackages) {
+      if (!pkg.name?.trim()) continue;
+      await upsertSponsorshipPackage({
+        organizationId: input.organizationId,
+        eventId: effectiveEventId,
+        name: pkg.name.trim(),
+        earlyBirdPrice: pkg.earlyBirdPrice,
+        regularPrice: pkg.regularPrice,
+        bannerBenefit: pkg.bannerBenefit,
+        signBenefit: pkg.signBenefit,
+        foursomeIncluded: pkg.foursomeIncluded,
+        websiteBenefit: pkg.websiteBenefit,
+        programBookBenefit: pkg.programBookBenefit,
+        coscBenefit: pkg.coscBenefit,
+        tributeBenefit: pkg.tributeBenefit,
+        sourceImportBatchId: importBatch.id,
+        importSource: "sponsor_import",
+      });
+      sponsorshipPackagesCreatedOrUpdated += 1;
+    }
+
+    if (effectiveEventId) {
+      for (const slot of workbookFlightSlots) {
+        await createEventFlightSlot({
+          organizationId: input.organizationId,
+          eventId: effectiveEventId,
+          flight: slot.flight,
+          slotNumber: slot.slotNumber,
+          companyName: slot.companyName,
+          firstName: slot.firstName,
+          lastName: slot.lastName,
+          email: slot.email,
+          phone: slot.phone,
+          startHole: slot.startHole,
+          status: slot.status,
+          sourceImportBatchId: importBatch.id,
+          importSource: "sponsor_import",
+        });
+        flightSlotsCreated += 1;
+      }
+
+      for (const need of workbookVolunteerNeeds) {
+        if (!need.roleName?.trim()) continue;
+        await createEventVolunteerNeed({
+          organizationId: input.organizationId,
+          eventId: effectiveEventId,
+          roleName: need.roleName,
+          neededCountText: need.neededCountText,
+          flight: need.flight,
+          startingAt: need.startingAt,
+          rotationTime: need.rotationTime,
+          notes: need.notes,
+          status: need.status,
+          sourceImportBatchId: importBatch.id,
+          importSource: "sponsor_import",
+        });
+        volunteerNeedsCreated += 1;
       }
     }
 
@@ -1765,6 +2315,10 @@ export async function confirmSponsorImportForEvent(input: {
         yearHistoryCreated,
         yearHistoryUpdated,
         followUpsCreated,
+        sponsorshipPackagesCreatedOrUpdated,
+        flightSlotsCreated,
+        volunteerNeedsCreated,
+        attendeesCreated,
         skippedRows,
         failedRows,
       },
@@ -1778,4 +2332,569 @@ export async function confirmSponsorImportForEvent(input: {
     await failImportBatch(importBatch.id);
     throw error;
   }
+}
+
+type RollbackAnalysis = {
+  importBatch: {
+    id: string;
+    organizationId: string;
+    eventId: string | null;
+    status: string;
+  };
+  warnings: string[];
+  canRollback: boolean;
+  hardDeleteAllowed: boolean;
+  sponsorOrganizations: Array<{ id: string; name: string; createdAt: Date; updatedAt: Date; archivedAt: Date | null }>;
+  sponsorContacts: Array<{ id: string; name: string; sponsorOrganizationId: string; createdAt: Date; updatedAt: Date; archivedAt: Date | null }>;
+  eventSponsors: Array<{ id: string; eventId: string; sponsorOrganizationId: string; createdAt: Date; updatedAt: Date; archivedAt: Date | null }>;
+  sponsorYearHistory: Array<{ id: string; sponsorOrganizationId: string; year: number; createdAt: Date; archivedAt: Date | null }>;
+  sponsorFollowUps: Array<{ id: string; title: string; status: string; createdAt: Date; updatedAt: Date; archivedAt: Date | null }>;
+  sponsorshipPackages: Array<{ id: string; createdAt: Date; updatedAt: Date; archivedAt: Date | null }>;
+  eventFlightSlots: Array<{ id: string; createdAt: Date; updatedAt: Date; archivedAt: Date | null }>;
+  eventVolunteerNeeds: Array<{ id: string; createdAt: Date; updatedAt: Date; archivedAt: Date | null }>;
+  safeSponsorOrganizationIds: string[];
+  retainedSponsorOrganizationWarnings: string[];
+  safeHardDeleteIds: {
+    sponsorOrganizations: string[];
+    sponsorContacts: string[];
+    eventSponsors: string[];
+    sponsorYearHistory: string[];
+    sponsorFollowUps: string[];
+    sponsorshipPackages: string[];
+    eventFlightSlots: string[];
+    eventVolunteerNeeds: string[];
+  };
+};
+
+async function buildRollbackAnalysis(input: {
+  organizationId: string;
+  importBatchId: string;
+  eventId?: string;
+  canHardDelete: boolean;
+}): Promise<RollbackAnalysis> {
+  const importBatch = await prisma.eventureImportBatch.findFirst({
+    where: {
+      id: input.importBatchId,
+      organizationId: input.organizationId,
+    },
+    select: {
+      id: true,
+      organizationId: true,
+      eventId: true,
+      status: true,
+    },
+  });
+
+  if (!importBatch || (input.eventId && importBatch.eventId !== input.eventId)) {
+    throw new EventureServiceError("Import batch not found.", 404);
+  }
+
+  const [
+    sponsorOrganizations,
+    sponsorContacts,
+    eventSponsors,
+    sponsorYearHistory,
+    sponsorFollowUps,
+    sponsorshipPackages,
+    eventFlightSlots,
+    eventVolunteerNeeds,
+  ] = await Promise.all([
+    prisma.eventureSponsorOrganization.findMany({
+      where: {
+        organizationId: input.organizationId,
+        sourceImportBatchId: importBatch.id,
+      },
+      select: {
+        id: true,
+        name: true,
+        createdAt: true,
+        updatedAt: true,
+        archivedAt: true,
+      },
+      orderBy: { name: "asc" },
+    }),
+    prisma.eventureSponsorContact.findMany({
+      where: {
+        organizationId: input.organizationId,
+        sourceImportBatchId: importBatch.id,
+      },
+      select: {
+        id: true,
+        name: true,
+        sponsorOrganizationId: true,
+        createdAt: true,
+        updatedAt: true,
+        archivedAt: true,
+      },
+      orderBy: { name: "asc" },
+    }),
+    prisma.eventureEventSponsor.findMany({
+      where: {
+        organizationId: input.organizationId,
+        sourceImportBatchId: importBatch.id,
+      },
+      select: {
+        id: true,
+        eventId: true,
+        sponsorOrganizationId: true,
+        createdAt: true,
+        updatedAt: true,
+        archivedAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.eventureSponsorYearHistory.findMany({
+      where: {
+        organizationId: input.organizationId,
+        sourceImportBatchId: importBatch.id,
+      },
+      select: {
+        id: true,
+        sponsorOrganizationId: true,
+        year: true,
+        createdAt: true,
+        archivedAt: true,
+      },
+      orderBy: [{ year: "desc" }, { createdAt: "desc" }],
+    }),
+    prisma.eventureSponsorFollowUp.findMany({
+      where: {
+        organizationId: input.organizationId,
+        sourceImportBatchId: importBatch.id,
+      },
+      select: {
+        id: true,
+        title: true,
+        status: true,
+        createdAt: true,
+        updatedAt: true,
+        archivedAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.eventureSponsorshipPackage.findMany({
+      where: {
+        organizationId: input.organizationId,
+        sourceImportBatchId: importBatch.id,
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        updatedAt: true,
+        archivedAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.eventureEventFlightSlot.findMany({
+      where: {
+        organizationId: input.organizationId,
+        sourceImportBatchId: importBatch.id,
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        updatedAt: true,
+        archivedAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+    prisma.eventureEventVolunteerNeed.findMany({
+      where: {
+        organizationId: input.organizationId,
+        sourceImportBatchId: importBatch.id,
+      },
+      select: {
+        id: true,
+        createdAt: true,
+        updatedAt: true,
+        archivedAt: true,
+      },
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+
+  const warnings: string[] = [];
+  const manualEditDetected =
+    sponsorOrganizations.some((item) => isImportRecordManuallyEdited(item.createdAt, item.updatedAt)) ||
+    sponsorContacts.some((item) => isImportRecordManuallyEdited(item.createdAt, item.updatedAt)) ||
+    eventSponsors.some((item) => isImportRecordManuallyEdited(item.createdAt, item.updatedAt)) ||
+    sponsorFollowUps.some((item) => isImportRecordManuallyEdited(item.createdAt, item.updatedAt)) ||
+    sponsorshipPackages.some((item) => isImportRecordManuallyEdited(item.createdAt, item.updatedAt)) ||
+    eventFlightSlots.some((item) => isImportRecordManuallyEdited(item.createdAt, item.updatedAt)) ||
+    eventVolunteerNeeds.some((item) => isImportRecordManuallyEdited(item.createdAt, item.updatedAt));
+
+  if (manualEditDetected) {
+    warnings.push("Some records have been manually edited after import.");
+  }
+
+  const importedSponsorOrgIds = sponsorOrganizations.map((item) => item.id);
+  const retainedSponsorOrganizationWarnings: string[] = [];
+  const safeSponsorOrganizationIds: string[] = [];
+
+  for (const sponsorOrganization of sponsorOrganizations) {
+    const [externalContacts, externalEventSponsors, externalHistory, externalFollowUps] = await Promise.all([
+      prisma.eventureSponsorContact.count({
+        where: {
+          organizationId: input.organizationId,
+          sponsorOrganizationId: sponsorOrganization.id,
+          archivedAt: null,
+          OR: [
+            { sourceImportBatchId: null },
+            { sourceImportBatchId: { not: importBatch.id } },
+          ],
+        },
+      }),
+      prisma.eventureEventSponsor.count({
+        where: {
+          organizationId: input.organizationId,
+          sponsorOrganizationId: sponsorOrganization.id,
+          archivedAt: null,
+          OR: [
+            { sourceImportBatchId: null },
+            { sourceImportBatchId: { not: importBatch.id } },
+          ],
+        },
+      }),
+      prisma.eventureSponsorYearHistory.count({
+        where: {
+          organizationId: input.organizationId,
+          sponsorOrganizationId: sponsorOrganization.id,
+          archivedAt: null,
+          OR: [
+            { sourceImportBatchId: null },
+            { sourceImportBatchId: { not: importBatch.id } },
+          ],
+        },
+      }),
+      prisma.eventureSponsorFollowUp.count({
+        where: {
+          organizationId: input.organizationId,
+          sponsorOrganizationId: sponsorOrganization.id,
+          archivedAt: null,
+          OR: [
+            { sourceImportBatchId: null },
+            { sourceImportBatchId: { not: importBatch.id } },
+          ],
+        },
+      }),
+    ]);
+
+    const hasManualEdits = isImportRecordManuallyEdited(sponsorOrganization.createdAt, sponsorOrganization.updatedAt);
+    const hasExternalLinks = externalContacts + externalEventSponsors + externalHistory + externalFollowUps > 0;
+
+    if (!hasManualEdits && !hasExternalLinks) {
+      safeSponsorOrganizationIds.push(sponsorOrganization.id);
+      continue;
+    }
+
+    retainedSponsorOrganizationWarnings.push(
+      `${sponsorOrganization.name}: Company retained because it has records outside this import.`,
+    );
+  }
+
+  if (retainedSponsorOrganizationWarnings.length > 0) {
+    warnings.push("Some records are linked to event data.");
+    warnings.push("Some records have dependent contacts/history.");
+  }
+
+  if (!["confirmed", "confirmed_with_warnings", "completed", "failed", "needs_review"].includes(importBatch.status)) {
+    warnings.push("This import batch is not in a rollback-ready state.");
+  }
+
+  if (["rolled_back", "rollback_partial"].includes(importBatch.status)) {
+    warnings.push("This import batch has already been rolled back.");
+  }
+
+  const safeHardDeleteIds = {
+    sponsorOrganizations: sponsorOrganizations
+      .filter((item) => safeSponsorOrganizationIds.includes(item.id) && !isImportRecordManuallyEdited(item.createdAt, item.updatedAt))
+      .map((item) => item.id),
+    sponsorContacts: sponsorContacts
+      .filter((item) => !isImportRecordManuallyEdited(item.createdAt, item.updatedAt))
+      .map((item) => item.id),
+    eventSponsors: eventSponsors
+      .filter((item) => !isImportRecordManuallyEdited(item.createdAt, item.updatedAt))
+      .map((item) => item.id),
+    sponsorYearHistory: sponsorYearHistory.map((item) => item.id),
+    sponsorFollowUps: sponsorFollowUps
+      .filter((item) => !isImportRecordManuallyEdited(item.createdAt, item.updatedAt))
+      .map((item) => item.id),
+    sponsorshipPackages: sponsorshipPackages
+      .filter((item) => !isImportRecordManuallyEdited(item.createdAt, item.updatedAt))
+      .map((item) => item.id),
+    eventFlightSlots: eventFlightSlots
+      .filter((item) => !isImportRecordManuallyEdited(item.createdAt, item.updatedAt))
+      .map((item) => item.id),
+    eventVolunteerNeeds: eventVolunteerNeeds
+      .filter((item) => !isImportRecordManuallyEdited(item.createdAt, item.updatedAt))
+      .map((item) => item.id),
+  };
+
+  const hardDeleteSafetyPass =
+    safeHardDeleteIds.sponsorOrganizations.length === sponsorOrganizations.length &&
+    safeHardDeleteIds.sponsorContacts.length === sponsorContacts.length &&
+    safeHardDeleteIds.eventSponsors.length === eventSponsors.length &&
+    safeHardDeleteIds.sponsorFollowUps.length === sponsorFollowUps.length &&
+    safeHardDeleteIds.sponsorshipPackages.length === sponsorshipPackages.length &&
+    safeHardDeleteIds.eventFlightSlots.length === eventFlightSlots.length &&
+    safeHardDeleteIds.eventVolunteerNeeds.length === eventVolunteerNeeds.length;
+
+  if (!hardDeleteSafetyPass) {
+    warnings.push("Hard delete is not safe; archive recommended.");
+  }
+
+  return {
+    importBatch,
+    warnings: [...new Set(warnings)],
+    canRollback: !["rolled_back", "rollback_partial"].includes(importBatch.status),
+    hardDeleteAllowed: input.canHardDelete && hardDeleteSafetyPass,
+    sponsorOrganizations,
+    sponsorContacts,
+    eventSponsors,
+    sponsorYearHistory,
+    sponsorFollowUps,
+    sponsorshipPackages,
+    eventFlightSlots,
+    eventVolunteerNeeds,
+    safeSponsorOrganizationIds,
+    retainedSponsorOrganizationWarnings,
+    safeHardDeleteIds,
+  };
+}
+
+export async function previewSponsorImportRollback(input: {
+  organizationId: string;
+  importBatchId: string;
+  eventId?: string;
+  role?: string;
+  platformRole?: string;
+}): Promise<SponsorImportRollbackPreviewResponse> {
+  const analysis = await buildRollbackAnalysis({
+    organizationId: input.organizationId,
+    importBatchId: input.importBatchId,
+    eventId: input.eventId,
+    canHardDelete: isRollbackHardDeletePrivileged(input.role, input.platformRole),
+  });
+
+  return {
+    importBatchId: analysis.importBatch.id,
+    status: analysis.importBatch.status,
+    canRollback: analysis.canRollback,
+    warnings: [...analysis.warnings, ...analysis.retainedSponsorOrganizationWarnings],
+    counts: {
+      sponsorOrganizations: analysis.sponsorOrganizations.length,
+      sponsorContacts: analysis.sponsorContacts.length,
+      eventSponsors: analysis.eventSponsors.length,
+      sponsorYearHistory: analysis.sponsorYearHistory.length,
+      sponsorFollowUps: analysis.sponsorFollowUps.length,
+      sponsorshipPackages: analysis.sponsorshipPackages.length,
+      eventFlightSlots: analysis.eventFlightSlots.length,
+      eventVolunteerNeeds: analysis.eventVolunteerNeeds.length,
+    },
+    records: {
+      sponsorOrganizations: analysis.sponsorOrganizations.slice(0, 200).map((item) => ({
+        id: item.id,
+        name: item.name,
+        archivedAt: item.archivedAt ? item.archivedAt.toISOString() : null,
+      })),
+      sponsorContacts: analysis.sponsorContacts.slice(0, 200).map((item) => ({
+        id: item.id,
+        name: item.name,
+        sponsorOrganizationId: item.sponsorOrganizationId,
+        archivedAt: item.archivedAt ? item.archivedAt.toISOString() : null,
+      })),
+      eventSponsors: analysis.eventSponsors.slice(0, 200).map((item) => ({
+        id: item.id,
+        eventId: item.eventId,
+        sponsorOrganizationId: item.sponsorOrganizationId,
+        archivedAt: item.archivedAt ? item.archivedAt.toISOString() : null,
+      })),
+      sponsorYearHistory: analysis.sponsorYearHistory.slice(0, 200).map((item) => ({
+        id: item.id,
+        sponsorOrganizationId: item.sponsorOrganizationId,
+        year: item.year,
+        archivedAt: item.archivedAt ? item.archivedAt.toISOString() : null,
+      })),
+      sponsorFollowUps: analysis.sponsorFollowUps.slice(0, 200).map((item) => ({
+        id: item.id,
+        title: item.title,
+        status: item.status,
+        archivedAt: item.archivedAt ? item.archivedAt.toISOString() : null,
+      })),
+    },
+    recommendedMode: "archive",
+    hardDeleteAllowed: analysis.hardDeleteAllowed,
+  };
+}
+
+export async function rollbackSponsorImportBatch(input: {
+  organizationId: string;
+  importBatchId: string;
+  eventId?: string;
+  mode: SponsorImportRollbackMode;
+  confirmationText: string;
+  actorUserId?: string;
+  actorRole?: string;
+  actorPlatformRole?: string;
+}): Promise<SponsorImportRollbackResponse> {
+  if (!validateRollbackConfirmationText(input.confirmationText)) {
+    throw new EventureServiceError("confirmationText must equal 'ROLLBACK IMPORT'.", 400);
+  }
+
+  const canHardDelete = isRollbackHardDeletePrivileged(input.actorRole, input.actorPlatformRole);
+  if (input.mode === "hard_delete" && !canHardDelete) {
+    throw new EventureServiceError("Hard delete requires admin/dev permissions.", 403);
+  }
+
+  const analysis = await buildRollbackAnalysis({
+    organizationId: input.organizationId,
+    importBatchId: input.importBatchId,
+    eventId: input.eventId,
+    canHardDelete,
+  });
+
+  if (!analysis.canRollback) {
+    throw new EventureServiceError("This import batch cannot be rolled back.", 409);
+  }
+
+  if (input.mode === "hard_delete" && !analysis.hardDeleteAllowed) {
+    throw new EventureServiceError("Hard delete is not safe for this import batch. Use archive mode.", 409);
+  }
+
+  const now = new Date();
+
+  await prisma.$transaction(async (tx) => {
+    if (input.mode === "archive") {
+      await tx.eventureSponsorFollowUp.updateMany({
+        where: { organizationId: input.organizationId, sourceImportBatchId: input.importBatchId, archivedAt: null },
+        data: { archivedAt: now },
+      });
+
+      await tx.eventureEventSponsor.updateMany({
+        where: { organizationId: input.organizationId, sourceImportBatchId: input.importBatchId, archivedAt: null },
+        data: { archivedAt: now },
+      });
+
+      await tx.eventureSponsorYearHistory.updateMany({
+        where: { organizationId: input.organizationId, sourceImportBatchId: input.importBatchId, archivedAt: null },
+        data: { archivedAt: now },
+      });
+
+      await tx.eventureSponsorContact.updateMany({
+        where: { organizationId: input.organizationId, sourceImportBatchId: input.importBatchId, archivedAt: null },
+        data: { archivedAt: now },
+      });
+
+      await tx.eventureSponsorshipPackage.updateMany({
+        where: { organizationId: input.organizationId, sourceImportBatchId: input.importBatchId, archivedAt: null },
+        data: { archivedAt: now },
+      });
+
+      await tx.eventureEventFlightSlot.updateMany({
+        where: { organizationId: input.organizationId, sourceImportBatchId: input.importBatchId, archivedAt: null },
+        data: { archivedAt: now },
+      });
+
+      await tx.eventureEventVolunteerNeed.updateMany({
+        where: { organizationId: input.organizationId, sourceImportBatchId: input.importBatchId, archivedAt: null },
+        data: { archivedAt: now },
+      });
+
+      if (analysis.safeSponsorOrganizationIds.length > 0) {
+        await tx.eventureSponsorOrganization.updateMany({
+          where: {
+            organizationId: input.organizationId,
+            id: { in: analysis.safeSponsorOrganizationIds },
+            sourceImportBatchId: input.importBatchId,
+            archivedAt: null,
+          },
+          data: { archivedAt: now },
+        });
+      }
+    } else {
+      if (analysis.safeHardDeleteIds.sponsorFollowUps.length > 0) {
+        await tx.eventureSponsorFollowUp.deleteMany({ where: { id: { in: analysis.safeHardDeleteIds.sponsorFollowUps } } });
+      }
+      if (analysis.safeHardDeleteIds.eventSponsors.length > 0) {
+        await tx.eventureEventSponsor.deleteMany({ where: { id: { in: analysis.safeHardDeleteIds.eventSponsors } } });
+      }
+      if (analysis.safeHardDeleteIds.sponsorYearHistory.length > 0) {
+        await tx.eventureSponsorYearHistory.deleteMany({ where: { id: { in: analysis.safeHardDeleteIds.sponsorYearHistory } } });
+      }
+      if (analysis.safeHardDeleteIds.sponsorContacts.length > 0) {
+        await tx.eventureSponsorContact.deleteMany({ where: { id: { in: analysis.safeHardDeleteIds.sponsorContacts } } });
+      }
+      if (analysis.safeHardDeleteIds.sponsorshipPackages.length > 0) {
+        await tx.eventureSponsorshipPackage.deleteMany({ where: { id: { in: analysis.safeHardDeleteIds.sponsorshipPackages } } });
+      }
+      if (analysis.safeHardDeleteIds.eventFlightSlots.length > 0) {
+        await tx.eventureEventFlightSlot.deleteMany({ where: { id: { in: analysis.safeHardDeleteIds.eventFlightSlots } } });
+      }
+      if (analysis.safeHardDeleteIds.eventVolunteerNeeds.length > 0) {
+        await tx.eventureEventVolunteerNeed.deleteMany({ where: { id: { in: analysis.safeHardDeleteIds.eventVolunteerNeeds } } });
+      }
+      if (analysis.safeHardDeleteIds.sponsorOrganizations.length > 0) {
+        await tx.eventureSponsorOrganization.deleteMany({ where: { id: { in: analysis.safeHardDeleteIds.sponsorOrganizations } } });
+      }
+    }
+
+    await tx.eventureImportRow.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        importBatchId: input.importBatchId,
+        status: { in: ["imported", "imported_with_warnings"] },
+      },
+      data: {
+        status: "rolled_back",
+        rolledBackAt: now,
+      },
+    });
+
+    const rollbackStatus = analysis.retainedSponsorOrganizationWarnings.length > 0 ? "rollback_partial" : "rolled_back";
+    await tx.eventureImportBatch.update({
+      where: { id: input.importBatchId },
+      data: {
+        status: rollbackStatus,
+        rolledBackAt: now,
+        rollbackMode: input.mode,
+        rollbackSummary: {
+          warnings: [...analysis.warnings, ...analysis.retainedSponsorOrganizationWarnings],
+          retainedSponsorOrganizations: analysis.retainedSponsorOrganizationWarnings,
+          mode: input.mode,
+        },
+      },
+    });
+
+    await tx.eventureAuditLog.create({
+      data: {
+        organizationId: input.organizationId,
+        actorUserId: input.actorUserId,
+        actorRole: input.actorRole ?? "",
+        action: "import.rollback",
+        resourceType: "eventure_import_batch",
+        resourceId: input.importBatchId,
+        metadata: {
+          mode: input.mode,
+          warnings: [...analysis.warnings, ...analysis.retainedSponsorOrganizationWarnings],
+        },
+      },
+    });
+  });
+
+  return {
+    importBatchId: input.importBatchId,
+    status: analysis.retainedSponsorOrganizationWarnings.length > 0 ? "rollback_partial" : "rolled_back",
+    mode: input.mode,
+    warnings: [...analysis.warnings, ...analysis.retainedSponsorOrganizationWarnings],
+    affectedCounts: {
+      sponsorOrganizations: analysis.sponsorOrganizations.length,
+      sponsorContacts: analysis.sponsorContacts.length,
+      eventSponsors: analysis.eventSponsors.length,
+      sponsorYearHistory: analysis.sponsorYearHistory.length,
+      sponsorFollowUps: analysis.sponsorFollowUps.length,
+      sponsorshipPackages: analysis.sponsorshipPackages.length,
+      eventFlightSlots: analysis.eventFlightSlots.length,
+      eventVolunteerNeeds: analysis.eventVolunteerNeeds.length,
+    },
+  };
 }

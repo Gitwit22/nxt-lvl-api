@@ -6,6 +6,8 @@ import {
   cleanCell,
   normalizeCompanyName,
   detectFollowUps,
+  isImportRecordManuallyEdited,
+  validateRollbackConfirmationText,
 } from "../src/programs/eventure/services/sponsor-import.service.js";
 
 // ---------------------------------------------------------------------------
@@ -225,5 +227,27 @@ describe("detectFollowUps", () => {
     const result = detectFollowUps({ ...baseRow, logoStatus: "need logo" });
     const logoFollowUps = result.filter((f) => f.type === "need_logo");
     expect(logoFollowUps).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// rollback safety helpers
+// ---------------------------------------------------------------------------
+describe("rollback safety helpers", () => {
+  it("requires exact rollback confirmation text", () => {
+    expect(validateRollbackConfirmationText("ROLLBACK IMPORT")).toBe(true);
+    expect(validateRollbackConfirmationText("rollback import")).toBe(false);
+    expect(validateRollbackConfirmationText("ROLLBACK IMPORT NOW")).toBe(false);
+  });
+
+  it("detects manual edits only when updated timestamp is meaningfully later", () => {
+    const createdAt = new Date("2026-01-01T10:00:00.000Z");
+    const sameTime = new Date("2026-01-01T10:00:00.000Z");
+    const oneSecondLater = new Date("2026-01-01T10:00:01.000Z");
+    const twoSecondsLater = new Date("2026-01-01T10:00:02.000Z");
+
+    expect(isImportRecordManuallyEdited(createdAt, sameTime)).toBe(false);
+    expect(isImportRecordManuallyEdited(createdAt, oneSecondLater)).toBe(false);
+    expect(isImportRecordManuallyEdited(createdAt, twoSecondsLater)).toBe(true);
   });
 });

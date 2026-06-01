@@ -6,7 +6,10 @@ import {
   type ConfirmCreateEventInput,
   confirmSponsorImportForEvent,
   type ConfirmRowDecisionInput,
+  previewSponsorImportRollback,
   previewSponsorImportForEvent,
+  rollbackSponsorImportBatch,
+  type SponsorImportRollbackMode,
   type SponsorImportParserStrategy,
 } from "../services/sponsor-import.service.js";
 import { listImportBatchesForEvent } from "../repositories/sponsor-import.repository.js";
@@ -31,15 +34,21 @@ function readRouteParam(value: unknown, fieldName: string): string {
   throw new EventureServiceError(`${fieldName} is required.`, 400);
 }
 
-function getCsvContent(req: express.Request): string {
+function getImportPayload(req: express.Request): { csvContent?: string; fileBuffer?: Buffer; fileMimeType?: string } {
   if (req.file?.buffer) {
-    return req.file.buffer.toString("utf8");
+    return {
+      fileBuffer: req.file.buffer,
+      fileMimeType: req.file.mimetype,
+    };
+  }
+  const csvText = readString(req.body?.csvText);
+  if (csvText) {
+    return {
+      csvContent: csvText,
+    };
   }
 
-  const csvText = readString(req.body?.csvText);
-  if (csvText) return csvText;
-
-  throw new EventureServiceError("Provide a CSV file upload or csvText in the request body.", 400);
+  throw new EventureServiceError("Provide a file upload (.csv or .xlsx) or csvText in the request body.", 400);
 }
 
 function getFileName(req: express.Request): string | undefined {
@@ -126,6 +135,27 @@ function readImportBatchId(req: express.Request): string {
   return readRouteParam(req.body?.importBatchId, "importBatchId");
 }
 
+function readImportBatchIdParam(req: express.Request): string {
+  return readRouteParam(req.params["importBatchId"], "importBatchId");
+}
+
+function readRollbackMode(value: unknown): SponsorImportRollbackMode {
+  if (value === "archive" || value === "hard_delete") return value;
+  throw new EventureServiceError("mode must be one of: archive, hard_delete.", 400);
+}
+
+function readRollbackBody(req: express.Request): { mode: SponsorImportRollbackMode; confirmationText: string } {
+  const confirmationText = readString(req.body?.confirmationText);
+  if (!confirmationText) {
+    throw new EventureServiceError("confirmationText is required.", 400);
+  }
+
+  return {
+    mode: readRollbackMode(req.body?.mode),
+    confirmationText,
+  };
+}
+
 function handleError(res: express.Response, error: unknown) {
   if (error instanceof EventureServiceError) {
     res.status(error.statusCode).json({ error: error.message });
@@ -153,12 +183,15 @@ router.post("/preview", upload.single("file"), async (req, res) => {
   try {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const importPayload = getImportPayload(req);
 
     const result = await previewSponsorImportForEvent({
       organizationId: user!.organizationId,
       eventId,
       createdByUserId: user!.userId,
-      csvContent: getCsvContent(req),
+      csvContent: importPayload.csvContent,
+      fileBuffer: importPayload.fileBuffer,
+      fileMimeType: importPayload.fileMimeType,
       fileName: getFileName(req),
       parserStrategy: getParserStrategy(req),
       mode: getImportMode(req),
@@ -185,6 +218,50 @@ router.post("/confirm", upload.single("file"), async (req, res) => {
     });
 
     res.status(201).json(result);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.get("/:importBatchId/rollback-preview", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const importBatchId = readImportBatchIdParam(req);
+
+    const result = await previewSponsorImportRollback({
+      organizationId: user!.organizationId,
+      eventId,
+      importBatchId,
+      role: user?.role,
+      platformRole: user?.platformRole,
+    });
+
+    res.json(result);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.post("/:importBatchId/rollback", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const importBatchId = readImportBatchIdParam(req);
+    const body = readRollbackBody(req);
+
+    const result = await rollbackSponsorImportBatch({
+      organizationId: user!.organizationId,
+      eventId,
+      importBatchId,
+      mode: body.mode,
+      confirmationText: body.confirmationText,
+      actorUserId: user?.userId,
+      actorRole: user?.role,
+      actorPlatformRole: user?.platformRole,
+    });
+
+    res.status(200).json(result);
   } catch (error) {
     handleError(res, error);
   }

@@ -15,15 +15,19 @@ export async function getActiveEventForOrganization(organizationId: string, even
 
 export async function listSponsorOrganizationsForOrganization(organizationId: string) {
   return prisma.eventureSponsorOrganization.findMany({
-    where: { organizationId },
-    include: { contacts: true },
+    where: { organizationId, archivedAt: null },
+    include: {
+      contacts: {
+        where: { archivedAt: null },
+      },
+    },
     orderBy: { name: "asc" },
   });
 }
 
 export async function listEventSponsorsForEvent(organizationId: string, eventId: string) {
   return prisma.eventureEventSponsor.findMany({
-    where: { organizationId, eventId },
+    where: { organizationId, eventId, archivedAt: null },
     select: {
       id: true,
       sponsorOrganizationId: true,
@@ -154,6 +158,8 @@ export async function createSponsorOrganization(input: {
   website?: string;
   notes?: string;
   sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
 }) {
   return prisma.eventureSponsorOrganization.create({
     data: {
@@ -169,8 +175,15 @@ export async function createSponsorOrganization(input: {
       website: input.website,
       notes: input.notes,
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
-    include: { contacts: true },
+    include: {
+      contacts: {
+        where: { archivedAt: null },
+      },
+    },
   });
 }
 
@@ -186,6 +199,8 @@ export async function updateSponsorOrganization(input: {
   website?: string;
   notes?: string;
   sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
 }) {
   return prisma.eventureSponsorOrganization.update({
     where: { id: input.id },
@@ -200,8 +215,15 @@ export async function updateSponsorOrganization(input: {
       website: input.website,
       notes: input.notes,
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
-    include: { contacts: true },
+    include: {
+      contacts: {
+        where: { archivedAt: null },
+      },
+    },
   });
 }
 
@@ -222,6 +244,8 @@ export async function upsertEventSponsor(input: {
   pointPersonName?: string;
   pointPersonUserId?: string;
   sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
 }) {
   return prisma.eventureEventSponsor.upsert({
     where: {
@@ -245,6 +269,9 @@ export async function upsertEventSponsor(input: {
       pointPersonName: input.pointPersonName,
       pointPersonUserId: input.pointPersonUserId,
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
     create: {
       organizationId: input.organizationId,
@@ -263,6 +290,9 @@ export async function upsertEventSponsor(input: {
       pointPersonName: input.pointPersonName,
       pointPersonUserId: input.pointPersonUserId,
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
   });
 }
@@ -290,6 +320,8 @@ export async function upsertSponsorYearHistory(input: {
   participationStatus: string;
   sourceType: string;
   sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
 }) {
   return prisma.eventureSponsorYearHistory.upsert({
     where: {
@@ -305,6 +337,9 @@ export async function upsertSponsorYearHistory(input: {
       amount: input.amount,
       participationStatus: input.participationStatus,
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
     create: {
       organizationId: input.organizationId,
@@ -315,6 +350,9 @@ export async function upsertSponsorYearHistory(input: {
       participationStatus: input.participationStatus,
       sourceType: input.sourceType,
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
   });
 }
@@ -331,6 +369,7 @@ export async function getSponsorYearHistory(input: {
       sponsorOrganizationId: input.sponsorOrganizationId,
       year: input.year,
       sourceType: input.sourceType,
+      archivedAt: null,
     },
   });
 }
@@ -388,6 +427,8 @@ export async function createSponsorContact(input: {
   role?: string;
   isPrimary?: boolean;
   sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
 }) {
   return prisma.eventureSponsorContact.create({
     data: {
@@ -399,6 +440,9 @@ export async function createSponsorContact(input: {
       role: input.role,
       isPrimary: input.isPrimary ?? false,
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
   });
 }
@@ -411,6 +455,8 @@ export async function updateSponsorContact(input: {
   role?: string;
   isPrimary?: boolean;
   sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
 }) {
   return prisma.eventureSponsorContact.update({
     where: { id: input.id },
@@ -421,6 +467,9 @@ export async function updateSponsorContact(input: {
       role: input.role,
       isPrimary: input.isPrimary,
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
   });
 }
@@ -442,6 +491,7 @@ export async function findExistingOpenFollowUp(input: {
       status: {
         in: ["open", "in_progress"],
       },
+      archivedAt: null,
     },
   });
 }
@@ -458,6 +508,8 @@ export async function createSponsorFollowUp(input: {
   status?: string;
   source?: string;
   sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
 }) {
   return prisma.eventureSponsorFollowUp.create({
     data: {
@@ -472,6 +524,140 @@ export async function createSponsorFollowUp(input: {
       status: input.status ?? "open",
       source: input.source ?? "csv_import",
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
+    },
+  });
+}
+
+export async function upsertSponsorshipPackage(input: {
+  organizationId: string;
+  eventId?: string;
+  name: string;
+  earlyBirdPrice?: number;
+  regularPrice?: number;
+  bannerBenefit?: string;
+  signBenefit?: string;
+  foursomeIncluded?: string;
+  websiteBenefit?: string;
+  programBookBenefit?: string;
+  coscBenefit?: string;
+  tributeBenefit?: string;
+  sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
+}) {
+  return prisma.eventureSponsorshipPackage.upsert({
+    where: {
+      organizationId_eventId_name: {
+        organizationId: input.organizationId,
+        eventId: input.eventId ?? null,
+        name: input.name,
+      },
+    },
+    update: {
+      earlyBirdPrice: input.earlyBirdPrice,
+      regularPrice: input.regularPrice,
+      bannerBenefit: input.bannerBenefit,
+      signBenefit: input.signBenefit,
+      foursomeIncluded: input.foursomeIncluded,
+      websiteBenefit: input.websiteBenefit,
+      programBookBenefit: input.programBookBenefit,
+      coscBenefit: input.coscBenefit,
+      tributeBenefit: input.tributeBenefit,
+      sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
+    },
+    create: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      name: input.name,
+      earlyBirdPrice: input.earlyBirdPrice,
+      regularPrice: input.regularPrice,
+      bannerBenefit: input.bannerBenefit,
+      signBenefit: input.signBenefit,
+      foursomeIncluded: input.foursomeIncluded,
+      websiteBenefit: input.websiteBenefit,
+      programBookBenefit: input.programBookBenefit,
+      coscBenefit: input.coscBenefit,
+      tributeBenefit: input.tributeBenefit,
+      sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
+    },
+  });
+}
+
+export async function createEventFlightSlot(input: {
+  organizationId: string;
+  eventId: string;
+  flight: string;
+  slotNumber?: number;
+  companyName?: string;
+  firstName?: string;
+  lastName?: string;
+  email?: string;
+  phone?: string;
+  startHole?: string;
+  status: string;
+  sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
+}) {
+  return prisma.eventureEventFlightSlot.create({
+    data: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      flight: input.flight,
+      slotNumber: input.slotNumber,
+      companyName: input.companyName,
+      firstName: input.firstName,
+      lastName: input.lastName,
+      email: input.email,
+      phone: input.phone,
+      startHole: input.startHole,
+      status: input.status,
+      sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
+    },
+  });
+}
+
+export async function createEventVolunteerNeed(input: {
+  organizationId: string;
+  eventId: string;
+  roleName: string;
+  neededCountText?: string;
+  flight?: string;
+  startingAt?: string;
+  rotationTime?: string;
+  notes?: string;
+  status?: string;
+  sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
+}) {
+  return prisma.eventureEventVolunteerNeed.create({
+    data: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      roleName: input.roleName,
+      neededCountText: input.neededCountText,
+      flight: input.flight,
+      startingAt: input.startingAt,
+      rotationTime: input.rotationTime,
+      notes: input.notes,
+      status: input.status ?? "open",
+      sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
+      archivedAt: null,
     },
   });
 }
@@ -491,6 +677,8 @@ export async function listImportBatchesForEvent(organizationId: string, eventId:
       duplicateRows: true,
       createdAt: true,
       completedAt: true,
+      rolledBackAt: true,
+      rollbackMode: true,
     },
   });
 }
@@ -511,6 +699,8 @@ export async function listImportBatchesForOrg(organizationId: string) {
       duplicateRows: true,
       createdAt: true,
       completedAt: true,
+      rolledBackAt: true,
+      rollbackMode: true,
     },
   });
 }

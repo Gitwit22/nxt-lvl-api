@@ -1232,6 +1232,9 @@ model EventureEvent {
   registrations       EventureRegistration[]
   vendors             EventureEventVendor[]
   sponsors            EventureEventSponsor[]
+  sponsorshipPackages EventureSponsorshipPackage[]
+  flightSlots         EventureEventFlightSlot[]
+  volunteerNeeds      EventureEventVolunteerNeed[]
   sponsorFollowUps    EventureSponsorFollowUp[]
   importBatches       EventureImportBatch[]
   checkInLogs         EventureCheckInLog[]
@@ -1239,6 +1242,87 @@ model EventureEvent {
   @@index([organizationId, programDomain])
   @@index([organizationId, status, startDateTime])
   @@index([organizationId, createdByUserId])
+}
+
+model EventureSponsorshipPackage {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String?
+  name                String
+  earlyBirdPrice      Float?
+  regularPrice        Float?
+  bannerBenefit       String?
+  signBenefit         String?
+  foursomeIncluded    String?
+  websiteBenefit      String?
+  programBookBenefit  String?
+  coscBenefit         String?
+  tributeBenefit      String?
+  sourceImportBatchId String?
+  sourceImportRowId   String?
+  importSource        String?
+  archivedAt          DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event EventureEvent? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, eventId, name])
+  @@index([organizationId, name])
+  @@index([organizationId, eventId])
+}
+
+model EventureEventFlightSlot {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  flight              String
+  slotNumber          Int?
+  companyName         String?
+  firstName           String?
+  lastName            String?
+  email               String?
+  phone               String?
+  startHole           String?
+  status              String   @default("empty")
+  sourceImportBatchId String?
+  sourceImportRowId   String?
+  importSource        String?
+  archivedAt          DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event EventureEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, eventId, flight])
+  @@index([organizationId, eventId, status])
+}
+
+model EventureEventVolunteerNeed {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  roleName            String
+  neededCountText     String?
+  flight              String?
+  startingAt          String?
+  rotationTime        String?
+  notes               String?
+  status              String   @default("open")
+  sourceImportBatchId String?
+  sourceImportRowId   String?
+  importSource        String?
+  archivedAt          DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event EventureEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, eventId, status])
+  @@index([organizationId, eventId, roleName])
 }
 
 model EventureAttendee {
@@ -1410,6 +1494,8 @@ model EventureSponsorOrganization {
   website             String?
   notes               String?  @db.Text
   sourceImportBatchId String?
+  sourceImportRowId   String?
+  importSource        String?
   archivedAt          DateTime?
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
@@ -1436,6 +1522,8 @@ model EventureSponsorContact {
   role                  String?
   isPrimary             Boolean  @default(false)
   sourceImportBatchId   String?
+  sourceImportRowId     String?
+  importSource          String?
   archivedAt            DateTime?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -1468,6 +1556,8 @@ model EventureEventSponsor {
   pointPersonName       String?
   pointPersonUserId     String?
   sourceImportBatchId   String?
+  sourceImportRowId     String?
+  importSource          String?
   archivedAt            DateTime?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
@@ -1493,6 +1583,9 @@ model EventureSponsorYearHistory {
   participationStatus   String   @default("unknown")
   sourceType            String   @default("sponsor_master_list")
   sourceImportBatchId   String?
+  sourceImportRowId     String?
+  importSource          String?
+  archivedAt            DateTime?
   createdAt             DateTime @default(now())
 
   sponsorOrganization   EventureSponsorOrganization @relation(fields: [sponsorOrganizationId], references: [id], onDelete: Cascade)
@@ -1517,6 +1610,9 @@ model EventureSponsorFollowUp {
   dueDate               DateTime?
   source                String   @default("csv_import")
   sourceImportBatchId   String?
+  sourceImportRowId     String?
+  importSource          String?
+  archivedAt            DateTime?
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
@@ -1550,6 +1646,9 @@ model EventureImportBatch {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
   completedAt         DateTime?
+  rolledBackAt        DateTime?
+  rollbackMode        String?
+  rollbackSummary     Json     @default("{}")
 
   event               EventureEvent?                @relation(fields: [eventId], references: [id], onDelete: Cascade)
   rows                EventureImportRow[]
@@ -1578,6 +1677,7 @@ model EventureImportRow {
   errorMessage          String?
   matchedAttendeeId     String?
   createdRegistrationId String?
+  rolledBackAt          DateTime?
   createdAt             DateTime @default(now())
 
   importBatch           EventureImportBatch @relation(fields: [importBatchId], references: [id], onDelete: Cascade)
