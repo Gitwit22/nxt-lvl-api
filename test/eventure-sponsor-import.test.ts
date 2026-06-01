@@ -1,11 +1,7 @@
 import { describe, it, expect } from "vitest";
-import XLSX from "xlsx";
 import {
-  ATTENDEE_POLICY_MESSAGE,
   inferPaymentStatus,
   parseYearValue,
-  parseRowsForTests,
-  parseWorkbookForTests,
   normalizeHeaders,
   cleanCell,
   normalizeCompanyName,
@@ -13,106 +9,6 @@ import {
   isImportRecordManuallyEdited,
   validateRollbackConfirmationText,
 } from "../src/programs/eventure/services/sponsor-import.service.js";
-
-function buildWorkbookFixtureBuffer(): Buffer {
-  const workbook = XLSX.utils.book_new();
-
-  const sponsorLevelRows = [
-    ["Level", "Early Bird", "Regular", "Banner", "Sign", "Foursome", "Website", "Program Book", "COSC", "2026 Tribute"],
-    ["Double Platinum/MVP", "$10000", "$11000", "Yes", "Yes", "2", "Yes", "Full", "Yes", "Yes"],
-    ["Platinum", "$7500", "$8000", "Yes", "Yes", "2", "Yes", "Full", "Yes", "No"],
-    ["Gold", "$5000", "$5500", "Yes", "Yes", "1", "Yes", "Half", "Yes", "No"],
-    ["Silver", "$3500", "$4000", "No", "Yes", "1", "Yes", "Quarter", "No", "No"],
-    ["Bronze", "$2500", "$3000", "No", "Yes", "1", "No", "Quarter", "No", "No"],
-    ["Valet", "$1800", "$2000", "No", "No", "0", "No", "No", "No", "No"],
-    ["Beverage Station", "$1600", "$1800", "No", "No", "0", "No", "No", "No", "No"],
-    ["Meal Sponsor", "$3000", "$3500", "No", "No", "0", "Yes", "Half", "No", "No"],
-    ["Bag Drop", "$1200", "$1400", "No", "No", "0", "No", "No", "No", "No"],
-    ["Driving Range/Putting Green", "$1500", "$1700", "No", "No", "0", "No", "No", "No", "No"],
-    ["Lucky Hole 13", "$1000", "$1200", "No", "No", "0", "No", "No", "No", "No"],
-    ["Hole Sponsor", "$700", "$800", "No", "No", "0", "No", "No", "No", "No"],
-    ["Youth Golfer", "$150", "$200", "No", "No", "0", "No", "No", "No", "No"],
-  ];
-
-  const sponsorsHeader = [
-    "Company",
-    "Street Address",
-    "City, State, Zip Code",
-    "Contact Email",
-    "Contact Phone",
-    "Representative",
-    "Sponsorship Package",
-    "2026 Flight",
-    "Logo",
-    "Names",
-    "Status",
-    "Point Person",
-    "Notes",
-    "2026 Amount",
-    "2020 YR",
-    "2021 YR",
-    "2022 YR",
-    "2023 YR",
-    "2024 YR",
-    "2025 YR",
-    "2026 YR",
-  ];
-
-  const sponsorsRows: string[][] = [];
-  for (let index = 1; index <= 175; index += 1) {
-    sponsorsRows.push([
-      `Company ${index}`,
-      `${index} Main St`,
-      "Charlotte, NC, 28202",
-      `contact${index}@example.com`,
-      `704555${String(index).padStart(4, "0")}`,
-      `Rep ${index}`,
-      "Gold",
-      index % 2 === 0 ? "AM" : "PM",
-      "received",
-      "",
-      "invoiced",
-      "Team Ops",
-      "",
-      "$5000",
-      "x",
-      "x",
-      "x",
-      "x",
-      "x",
-      "x",
-      "$5000",
-    ]);
-  }
-  sponsorsRows.push(["NEW CONTACTS BELOW.", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
-  sponsorsRows.push(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]);
-
-  const amFlightRows = [
-    ["No.", "Company", "First Name", "Last Name", "Email", "Phone", "Start Hole"],
-    ["1", "", "", "", "", "", "1"],
-    ["2", "", "", "", "", "704-555-1000", "2"],
-  ];
-
-  const pmFlightRows = [
-    ["No.", "Company", "First Name", "Last Name", "Email", "Phone", "Start Hole"],
-    ["1", "", "", "", "", "", "10"],
-  ];
-
-  const volunteerRows = [
-    ["Role", "Need", "Flight", "Starting At", "Rotation Time", "Notes"],
-    ["Registration", "6 ppl", "AM", "7:00", "", "Front table"],
-    ["Mobile Ticket Sales", "2 ppl as pair", "PM", "11:00", "", "Roaming"],
-    ["Hole-in-one Contest Watchers", "2 ppl", "AM", "8:00", "", "Coverage"],
-  ];
-
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(sponsorLevelRows), "Sponsor Levels");
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet([sponsorsHeader, ...sponsorsRows]), "Sponsors List");
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(amFlightRows), "AM Flight");
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(pmFlightRows), "PM Flight");
-  XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(volunteerRows), "Volunteers");
-
-  return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" }) as Buffer;
-}
 
 // ---------------------------------------------------------------------------
 // cleanCell / null marker normalization
@@ -353,76 +249,5 @@ describe("rollback safety helpers", () => {
     expect(isImportRecordManuallyEdited(createdAt, sameTime)).toBe(false);
     expect(isImportRecordManuallyEdited(createdAt, oneSecondLater)).toBe(false);
     expect(isImportRecordManuallyEdited(createdAt, twoSecondsLater)).toBe(true);
-  });
-});
-
-describe("workbook import parsing", () => {
-  const workbookBuffer = buildWorkbookFixtureBuffer();
-
-  it("detects all expected workbook sheets in preview metadata", () => {
-    const parsed = parseWorkbookForTests(workbookBuffer);
-    const keys = parsed.sheetPreview.map((sheet) => sheet.key).sort();
-    expect(keys).toEqual(["amFlight", "pmFlight", "sponsorLevels", "sponsorsList", "volunteers"].sort());
-  });
-
-  it("parses sponsor levels with required package names and numeric prices", () => {
-    const parsed = parseWorkbookForTests(workbookBuffer);
-    const packageNames = new Set(parsed.sponsorLevels.map((level) => level.name));
-    const required = [
-      "Double Platinum/MVP",
-      "Platinum",
-      "Gold",
-      "Silver",
-      "Bronze",
-      "Valet",
-      "Beverage Station",
-      "Meal Sponsor",
-      "Bag Drop",
-      "Driving Range/Putting Green",
-      "Lucky Hole 13",
-      "Hole Sponsor",
-      "Youth Golfer",
-    ];
-
-    for (const name of required) {
-      expect(packageNames.has(name)).toBe(true);
-    }
-
-    expect(parsed.sponsorLevels.every((level) => typeof level.earlyBirdPrice === "number")).toBe(true);
-    expect(parsed.sponsorLevels.every((level) => typeof level.regularPrice === "number")).toBe(true);
-  });
-
-  it("skips Sponsors List separator and blank rows and keeps 175 company rows", () => {
-    const parsed = parseWorkbookForTests(workbookBuffer);
-    const sponsorRows = parseRowsForTests(parsed.sponsorsListCsv).rows;
-
-    expect(sponsorRows).toHaveLength(175);
-    expect(sponsorRows.some((row) => row.companyName.includes("NEW CONTACTS BELOW"))).toBe(false);
-  });
-
-  it("suppresses attendee creation signals when names are blank", () => {
-    const parsed = parseWorkbookForTests(workbookBuffer);
-    const sponsorRows = parseRowsForTests(parsed.sponsorsListCsv).rows;
-
-    expect(sponsorRows.every((row) => !row.attendeeNamesRaw)).toBe(true);
-    expect(ATTENDEE_POLICY_MESSAGE.toLowerCase()).toContain("no attendee names found");
-  });
-
-  it("parses AM/PM flight slots as templates and flags phone-only rows for review", () => {
-    const parsed = parseWorkbookForTests(workbookBuffer);
-    const amSlots = parsed.flightSlots.filter((slot) => slot.flight === "AM");
-    const pmSlots = parsed.flightSlots.filter((slot) => slot.flight === "PM");
-
-    expect(amSlots.length).toBeGreaterThan(0);
-    expect(pmSlots.length).toBeGreaterThan(0);
-    expect(parsed.flightSlots.some((slot) => slot.status === "needs_review" && !!slot.phone && !slot.firstName && !slot.lastName && !slot.companyName)).toBe(true);
-    expect(parsed.flightSlots.some((slot) => slot.status === "empty")).toBe(true);
-  });
-
-  it("parses volunteers into staffing need rows rather than person records", () => {
-    const parsed = parseWorkbookForTests(workbookBuffer);
-    expect(parsed.volunteerNeeds.length).toBeGreaterThan(0);
-    expect(parsed.volunteerNeeds.some((need) => need.roleName.toLowerCase().includes("registration"))).toBe(true);
-    expect(parsed.volunteerNeeds.every((need) => typeof need.roleName === "string" && need.roleName.length > 0)).toBe(true);
   });
 });

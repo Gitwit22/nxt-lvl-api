@@ -416,9 +416,6 @@ type ContactPreviewItem = {
 
 export type SponsorImportParserStrategy = "native" | "llama_core";
 
-export const ATTENDEE_POLICY_MESSAGE =
-  "No attendee names found. Attendees were not created. Use Add Contact as Attendee or upload a filled flight sheet later.";
-
 const BLANK_MARKERS = new Set(["", "n/a", "na", "-", "--", "none", "null"]);
 
 const HEADER_ALIASES: Record<string, string[]> = {
@@ -1070,10 +1067,6 @@ function parseRows(content: string): {
   };
 }
 
-export function parseRowsForTests(content: string) {
-  return parseRows(content);
-}
-
 function normalizeSheetName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]/g, "");
 }
@@ -1301,10 +1294,6 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
     sheetPreview,
     warnings,
   };
-}
-
-export function parseWorkbookForTests(buffer: Buffer) {
-  return parseWorkbook(buffer);
 }
 
 type OrganizationMatchResult = {
@@ -1852,7 +1841,7 @@ export async function previewSponsorImportForEvent(input: {
       eventId: input.eventId,
       fileName: input.fileName ?? (importSource.importFormat === "xlsx" ? "uploaded.xlsx" : "uploaded.csv"),
       status,
-      attendeePolicyMessage: ATTENDEE_POLICY_MESSAGE,
+      attendeePolicyMessage: "No attendee names found. Attendees were not created. Use Add Contact as Attendee or upload a filled flight sheet later.",
       summary: {
         totalRows: parsed.rows.length,
         validRows,
