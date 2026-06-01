@@ -6,6 +6,7 @@ import {
   type ConfirmCreateEventInput,
   confirmSponsorImportForEvent,
   type ConfirmRowDecisionInput,
+  type ImportSelectedTabsInput,
   previewSponsorImportRollback,
   previewSponsorImportForEvent,
   rollbackSponsorImportBatch,
@@ -131,6 +132,30 @@ function readCreateEvent(req: express.Request): ConfirmCreateEventInput | undefi
   throw new EventureServiceError("createEvent must be a JSON object.", 400);
 }
 
+function readSelectedTabs(req: express.Request): ImportSelectedTabsInput | undefined {
+  const rawValue = req.body?.selectedTabs;
+  if (rawValue === undefined || rawValue === null || rawValue === "") return undefined;
+
+  if (typeof rawValue === "string") {
+    try {
+      const parsed = JSON.parse(rawValue) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new EventureServiceError("selectedTabs must be a JSON object.", 400);
+      }
+      return parsed as ImportSelectedTabsInput;
+    } catch (error) {
+      if (error instanceof EventureServiceError) throw error;
+      throw new EventureServiceError("selectedTabs must be valid JSON.", 400);
+    }
+  }
+
+  if (typeof rawValue === "object" && !Array.isArray(rawValue)) {
+    return rawValue as ImportSelectedTabsInput;
+  }
+
+  throw new EventureServiceError("selectedTabs must be a JSON object.", 400);
+}
+
 function readImportBatchId(req: express.Request): string {
   return readRouteParam(req.body?.importBatchId, "importBatchId");
 }
@@ -220,6 +245,7 @@ router.post("/confirm", upload.single("file"), async (req, res) => {
       importBatchId: readImportBatchId(req),
       rowDecisions: readRowDecisions(req),
       createEvent: readCreateEvent(req),
+      selectedTabs: readSelectedTabs(req),
     });
 
     res.status(201).json(result);

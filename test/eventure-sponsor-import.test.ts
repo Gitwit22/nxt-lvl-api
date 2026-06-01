@@ -7,6 +7,7 @@ import {
   normalizeCompanyName,
   detectFollowUps,
   isImportRecordManuallyEdited,
+  resolveSelectedTabs,
   validateRollbackConfirmationText,
 } from "../src/programs/eventure/services/sponsor-import.service.js";
 
@@ -249,5 +250,33 @@ describe("rollback safety helpers", () => {
     expect(isImportRecordManuallyEdited(createdAt, sameTime)).toBe(false);
     expect(isImportRecordManuallyEdited(createdAt, oneSecondLater)).toBe(false);
     expect(isImportRecordManuallyEdited(createdAt, twoSecondsLater)).toBe(true);
+  });
+});
+
+describe("resolveSelectedTabs", () => {
+  it("preserves legacy behavior when selectedTabs is missing", () => {
+    const selected = resolveSelectedTabs();
+    expect(selected.legacyMode).toBe(true);
+    expect(selected.sponsorLevels).toBe(true);
+    expect(selected.sponsorsList).toBe(true);
+    expect(selected.amFlight).toBe(true);
+    expect(selected.pmFlight).toBe(true);
+    expect(selected.volunteers).toBe(true);
+    expect(selected.history).toBe(true);
+    expect(selected.followUps).toBe(true);
+    expect(selected.paymentStatus).toBe(true);
+  });
+
+  it("applies safe defaults for newly introduced tabs when payload is provided", () => {
+    const selected = resolveSelectedTabs({ sponsorsList: true });
+    expect(selected.legacyMode).toBe(false);
+    expect(selected.sponsorLevels).toBe(true);
+    expect(selected.sponsorsList).toBe(true);
+    expect(selected.amFlight).toBe(true);
+    expect(selected.pmFlight).toBe(true);
+    expect(selected.volunteers).toBe(true);
+    expect(selected.history).toBe(false);
+    expect(selected.followUps).toBe(false);
+    expect(selected.paymentStatus).toBe(false);
   });
 });

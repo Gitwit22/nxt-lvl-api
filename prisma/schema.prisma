@@ -1236,6 +1236,7 @@ model EventureEvent {
   flightSlots         EventureEventFlightSlot[]
   volunteerNeeds      EventureEventVolunteerNeed[]
   sponsorFollowUps    EventureSponsorFollowUp[]
+  participationHistory EventParticipationHistory[]
   importBatches       EventureImportBatch[]
   checkInLogs         EventureCheckInLog[]
 
@@ -1504,6 +1505,7 @@ model EventureSponsorOrganization {
   eventSponsors       EventureEventSponsor[]
   yearHistory         EventureSponsorYearHistory[]
   followUps           EventureSponsorFollowUp[]
+  participationHistory EventParticipationHistory[]
 
   @@unique([organizationId, normalizedName])
   @@index([organizationId, name])
@@ -1529,10 +1531,52 @@ model EventureSponsorContact {
   updatedAt             DateTime @updatedAt
 
   sponsorOrganization   EventureSponsorOrganization @relation(fields: [sponsorOrganizationId], references: [id], onDelete: Cascade)
+  participationHistory  EventParticipationHistory[]
 
   @@index([organizationId, sponsorOrganizationId], map: "EventureSponsorContact_org_sponsor_idx")
   @@index([organizationId, sponsorOrganizationId, email], map: "EventureSponsorContact_org_sponsor_email_idx")
   @@index([organizationId, sponsorOrganizationId, phone], map: "EventureSponsorContact_org_sponsor_phone_idx")
+}
+
+model EventParticipationHistory {
+  id                    String   @id @default(cuid())
+  organizationId        String
+  programDomain         String   @default("eventure")
+  eventId               String?
+  sponsorOrganizationId String?
+  sponsorContactId      String?
+  sourceEventName       String?
+  sourceEventYear       Int?
+  rawCompanyName        String?
+  rawContactName        String?
+  rawRole               String?
+  rawPackage            String?
+  rawPaymentStatus      String?
+  participationType     String   @default("unknown")
+  sponsorshipPackage    String?
+  amountCommitted       Decimal? @db.Decimal(18, 2)
+  amountPaid            Decimal? @db.Decimal(18, 2)
+  paymentStatus         String?
+  flight                String?
+  slot                  String?
+  notes                 String?  @db.Text
+  sourceImportBatchId   String?
+  sourceSheetName       String?
+  sourceRowNumber       Int?
+  sourceRowHash         String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  event                 EventureEvent?               @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  sponsorOrganization   EventureSponsorOrganization? @relation(fields: [sponsorOrganizationId], references: [id], onDelete: SetNull)
+  sponsorContact        EventureSponsorContact?      @relation(fields: [sponsorContactId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId])
+  @@index([eventId])
+  @@index([sponsorOrganizationId])
+  @@index([sponsorContactId])
+  @@index([sourceImportBatchId])
+  @@index([sourceEventYear])
 }
 
 model EventureEventSponsor {

@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { promises as fs } from "node:fs";
+import { createHash } from "node:crypto";
 import XLSX from "xlsx";
 import {
   completeImportBatch,
@@ -77,6 +78,57 @@ export type ConfirmCreateEventInput = {
   status?: string;
   eventType?: string;
 };
+
+export type ImportSelectedTabsInput = {
+  sponsorLevels?: boolean;
+  sponsorsList?: boolean;
+  amFlight?: boolean;
+  pmFlight?: boolean;
+  volunteers?: boolean;
+  history?: boolean;
+  followUps?: boolean;
+  paymentStatus?: boolean;
+};
+
+type ResolvedImportSelectedTabs = {
+  sponsorLevels: boolean;
+  sponsorsList: boolean;
+  amFlight: boolean;
+  pmFlight: boolean;
+  volunteers: boolean;
+  history: boolean;
+  followUps: boolean;
+  paymentStatus: boolean;
+  legacyMode: boolean;
+};
+
+export function resolveSelectedTabs(selectedTabs?: ImportSelectedTabsInput): ResolvedImportSelectedTabs {
+  if (!selectedTabs) {
+    return {
+      sponsorLevels: true,
+      sponsorsList: true,
+      amFlight: true,
+      pmFlight: true,
+      volunteers: true,
+      history: true,
+      followUps: true,
+      paymentStatus: true,
+      legacyMode: true,
+    };
+  }
+
+  return {
+    sponsorLevels: selectedTabs.sponsorLevels ?? true,
+    sponsorsList: selectedTabs.sponsorsList ?? true,
+    amFlight: selectedTabs.amFlight ?? true,
+    pmFlight: selectedTabs.pmFlight ?? true,
+    volunteers: selectedTabs.volunteers ?? true,
+    history: selectedTabs.history ?? false,
+    followUps: selectedTabs.followUps ?? false,
+    paymentStatus: selectedTabs.paymentStatus ?? false,
+    legacyMode: false,
+  };
+}
 
 export type SponsorImportRollbackMode = "archive" | "hard_delete";
 
@@ -169,7 +221,15 @@ type ParsedSponsorRow = {
   suggestedFollowUps: SuggestedFollowUp[];
 };
 
-type WorkbookImportSheetKey = "sponsorLevels" | "sponsorsList" | "amFlight" | "pmFlight" | "volunteers";
+type WorkbookImportSheetKey =
+  | "sponsorLevels"
+  | "sponsorsList"
+  | "amFlight"
+  | "pmFlight"
+  | "volunteers"
+  | "history"
+  | "followUps"
+  | "paymentStatus";
 
 type WorkbookSheetPreview = {
   key: WorkbookImportSheetKey;
@@ -213,11 +273,33 @@ type VolunteerNeedRow = {
   status: "open" | "needs_review";
 };
 
+type HistoryWorkbookRow = {
+  sourceEventName?: string;
+  sourceEventYear?: number;
+  rawCompanyName?: string;
+  rawContactName?: string;
+  rawRole?: string;
+  rawPackage?: string;
+  rawPaymentStatus?: string;
+  participationType: string;
+  sponsorshipPackage?: string;
+  amountCommitted?: number;
+  amountPaid?: number;
+  paymentStatus?: string;
+  flight?: string;
+  slot?: string;
+  notes?: string;
+  sourceSheetName: string;
+  sourceRowNumber: number;
+  sourceRowHash: string;
+};
+
 type WorkbookParseResult = {
   sponsorLevels: SponsorshipPackageRow[];
   sponsorsListCsv: string;
   flightSlots: FlightSlotRow[];
   volunteerNeeds: VolunteerNeedRow[];
+  historyRows: HistoryWorkbookRow[];
   sheetPreview: WorkbookSheetPreview[];
   warnings: string[];
 };
@@ -1230,6 +1312,81 @@ function parseVolunteersSheet(grid: string[][]): { rows: VolunteerNeedRow[]; war
   };
 }
 
+function parseHistorySheet(sheetName: string, grid: string[][]): { rows: HistoryWorkbookRow[]; warnings: string[] } {
+  if (grid.length === 0) return { rows: [], warnings: [] };
+  const [header, ...body] = grid;
+  const mappedYear = resolveMappedHeaderIndex(header, ["Year", "Event Year"]);
+  const mappedSourceEvent = resolveMappedHeaderIndex(header, ["Source Event", "Event", "Event Name"]);
+  const mappedCompany = resolveMappedHeaderIndex(header, ["Company", "Sponsor", "Organization"]);
+  const mappedContact = resolveMappedHeaderIndex(header, ["Contact", "Representative", "Name"]);
+  const mappedType = resolveMappedHeaderIndex(header, ["Type", "Participation Type", "Role Type"]);
+  const mappedRole = resolveMappedHeaderIndex(header, ["Role", "Position"]);
+  const mappedPackage = resolveMappedHeaderIndex(header, ["Package", "Sponsorship Package", "Level"]);
+  const mappedCommitted = resolveMappedHeaderIndex(header, ["Amount", "Committed", "Amount Committed"]);
+  const mappedPaid = resolveMappedHeaderIndex(header, ["Amount Paid", "Paid"]);
+  const mappedPaymentStatus = resolveMappedHeaderIndex(header, ["Payment Status", "Status"]);
+  const mappedFlight = resolveMappedHeaderIndex(header, ["Flight"]);
+  const mappedSlot = resolveMappedHeaderIndex(header, ["Slot", "Table", "Table/Slot"]);
+  const mappedNotes = resolveMappedHeaderIndex(header, ["Notes", "History Notes"]);
+
+  const rows: HistoryWorkbookRow[] = [];
+
+  for (const [offset, row] of body.entries()) {
+    if (isBlankRow(row)) continue;
+
+    const sourceRowNumber = offset + 2;
+    const sourceEventName = getCell(row, mappedSourceEvent) || undefined;
+    const yearRaw = getCell(row, mappedYear);
+    const sourceEventYear = yearRaw ? Number.parseInt(yearRaw, 10) : undefined;
+    const rawCompanyName = getCell(row, mappedCompany) || undefined;
+    const rawContactName = getCell(row, mappedContact) || undefined;
+    const rawRole = getCell(row, mappedRole) || undefined;
+    const rawPackage = getCell(row, mappedPackage) || undefined;
+    const rawPaymentStatus = getCell(row, mappedPaymentStatus) || undefined;
+    const participationType = normalizeHeader(getCell(row, mappedType) || "unknown") || "unknown";
+    const sponsorshipPackage = getCell(row, mappedPackage) || undefined;
+    const amountCommitted = parseMoney(getCell(row, mappedCommitted));
+    const amountPaid = parseMoney(getCell(row, mappedPaid));
+    const paymentStatus = inferPaymentStatus({
+      statusRaw: rawPaymentStatus,
+      notes: getCell(row, mappedNotes),
+      sponsorshipPackage,
+    });
+    const flight = normalizeFlightPreference(getCell(row, mappedFlight)) || undefined;
+    const slot = getCell(row, mappedSlot) || undefined;
+    const notes = getCell(row, mappedNotes) || undefined;
+    const sourceRowHash = createHash("sha1")
+      .update([sourceEventName, yearRaw, rawCompanyName, rawContactName, rawRole, rawPackage, rawPaymentStatus, notes].join("|"))
+      .digest("hex");
+
+    rows.push({
+      sourceEventName,
+      sourceEventYear: Number.isFinite(sourceEventYear) ? sourceEventYear : undefined,
+      rawCompanyName,
+      rawContactName,
+      rawRole,
+      rawPackage,
+      rawPaymentStatus,
+      participationType,
+      sponsorshipPackage,
+      amountCommitted,
+      amountPaid,
+      paymentStatus,
+      flight,
+      slot,
+      notes,
+      sourceSheetName: sheetName,
+      sourceRowNumber,
+      sourceRowHash,
+    });
+  }
+
+  return {
+    rows,
+    warnings: mappedCompany === undefined ? ["History sheet is missing a Company column."] : [],
+  };
+}
+
 function parseWorkbook(buffer: Buffer): WorkbookParseResult {
   const workbook = XLSX.read(buffer, { type: "buffer", cellDates: false, raw: false });
 
@@ -1238,6 +1395,9 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
   const amFlightName = findWorkbookSheet(workbook, ["AM Flight"]);
   const pmFlightName = findWorkbookSheet(workbook, ["PM Flight"]);
   const volunteersName = findWorkbookSheet(workbook, ["Volunteers", "Volunteer"]);
+  const historyName = findWorkbookSheet(workbook, ["History", "Historical Records", "Historical"]);
+  const followUpsName = findWorkbookSheet(workbook, ["Follow-Ups", "Follow Ups", "Followups"]);
+  const paymentStatusName = findWorkbookSheet(workbook, ["Payment Status", "Payments", "Payment Status Items"]);
 
   const warnings: string[] = [];
   const sheetPreview: WorkbookSheetPreview[] = [];
@@ -1251,13 +1411,17 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
   const amFlightGrid = amFlightName ? sheetToGrid(workbook.Sheets[amFlightName]) : [];
   const pmFlightGrid = pmFlightName ? sheetToGrid(workbook.Sheets[pmFlightName]) : [];
   const volunteersGrid = volunteersName ? sheetToGrid(workbook.Sheets[volunteersName]) : [];
+  const historyGrid = historyName ? sheetToGrid(workbook.Sheets[historyName]) : [];
+  const followUpsGrid = followUpsName ? sheetToGrid(workbook.Sheets[followUpsName]) : [];
+  const paymentStatusGrid = paymentStatusName ? sheetToGrid(workbook.Sheets[paymentStatusName]) : [];
 
   const sponsorLevels = parseSponsorLevelsSheet(sponsorLevelsGrid);
   const amFlight = parseFlightSheet(amFlightGrid, "AM");
   const pmFlight = parseFlightSheet(pmFlightGrid, "PM");
   const volunteers = parseVolunteersSheet(volunteersGrid);
+  const history = parseHistorySheet(historyName ?? "History", historyGrid);
 
-  warnings.push(...sponsorLevels.warnings, ...amFlight.warnings, ...pmFlight.warnings, ...volunteers.warnings);
+  warnings.push(...sponsorLevels.warnings, ...amFlight.warnings, ...pmFlight.warnings, ...volunteers.warnings, ...history.warnings);
 
   sheetPreview.push(
     {
@@ -1290,6 +1454,24 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
       rowsDetected: volunteers.rows.length,
       warnings: volunteersName ? volunteers.warnings : ["Sheet not found."],
     },
+    {
+      key: "history",
+      sheetName: historyName ?? "not found",
+      rowsDetected: history.rows.length,
+      warnings: historyName ? history.warnings : ["Sheet not found."],
+    },
+    {
+      key: "followUps",
+      sheetName: followUpsName ?? "not found",
+      rowsDetected: Math.max(0, followUpsGrid.length - 1),
+      warnings: followUpsName ? [] : ["Sheet not found."],
+    },
+    {
+      key: "paymentStatus",
+      sheetName: paymentStatusName ?? "not found",
+      rowsDetected: Math.max(0, paymentStatusGrid.length - 1),
+      warnings: paymentStatusName ? [] : ["Sheet not found."],
+    },
   );
 
   return {
@@ -1297,6 +1479,7 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
     sponsorsListCsv: gridToCsv(sponsorsListGrid),
     flightSlots: [...amFlight.rows, ...pmFlight.rows],
     volunteerNeeds: volunteers.rows,
+    historyRows: history.rows,
     sheetPreview,
     warnings,
   };
@@ -1597,6 +1780,7 @@ export async function previewSponsorImportForEvent(input: {
           sponsorLevels: importSource.workbook.sponsorLevels,
           flightSlots: importSource.workbook.flightSlots,
           volunteerNeeds: importSource.workbook.volunteerNeeds,
+          historyRows: importSource.workbook.historyRows,
         }
         : undefined,
     },
@@ -1858,7 +2042,7 @@ export async function previewSponsorImportForEvent(input: {
         companiesDetected,
         contactsDetected,
         eventSponsorsDetected,
-        historyRecordsDetected,
+        historyRecordsDetected: historyRecordsDetected + (importSource.workbook?.historyRows.length ?? 0),
         followUpsDetected,
         sponsorshipPackagesDetected: importSource.workbook?.sponsorLevels.length ?? 0,
         amFlightSlotsDetected: importSource.workbook?.flightSlots.filter((slot) => slot.flight === "AM").length ?? 0,
@@ -1890,6 +2074,7 @@ export async function confirmSponsorImportForEvent(input: {
   importBatchId: string;
   rowDecisions?: ConfirmRowDecisionInput[];
   createEvent?: ConfirmCreateEventInput;
+  selectedTabs?: ImportSelectedTabsInput;
 }) {
   if (input.eventId) {
     const event = await getActiveEventForOrganization(input.organizationId, input.eventId);
@@ -1913,13 +2098,16 @@ export async function confirmSponsorImportForEvent(input: {
       sponsorLevels?: SponsorshipPackageRow[];
       flightSlots?: FlightSlotRow[];
       volunteerNeeds?: VolunteerNeedRow[];
+      historyRows?: HistoryWorkbookRow[];
     };
   };
   const workbookConfig = mappingConfig.workbook ?? {};
   const workbookPackages = Array.isArray(workbookConfig.sponsorLevels) ? workbookConfig.sponsorLevels : [];
   const workbookFlightSlots = Array.isArray(workbookConfig.flightSlots) ? workbookConfig.flightSlots : [];
   const workbookVolunteerNeeds = Array.isArray(workbookConfig.volunteerNeeds) ? workbookConfig.volunteerNeeds : [];
+  const workbookHistoryRows = Array.isArray(workbookConfig.historyRows) ? workbookConfig.historyRows : [];
   const mode = toCanonicalImportMode(mappingConfig.mode);
+  const selectedTabs = resolveSelectedTabs(input.selectedTabs);
   let effectiveEventId = input.eventId ?? importBatch.eventId ?? undefined;
 
   if (mode === "create_event_then_assign" && input.createEvent) {
@@ -1980,6 +2168,16 @@ export async function confirmSponsorImportForEvent(input: {
 
   try {
     for (const row of importBatch.rows) {
+      if (!selectedTabs.sponsorsList) {
+        skippedRows += 1;
+        await updateImportRowStatus({
+          id: row.id,
+          status: "skipped",
+          errorMessage: "Sponsors List import is disabled for this confirmation.",
+        });
+        continue;
+      }
+
       const rowDecision = decisionByImportRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
       const baseStored = row.normalizedData as unknown as StoredSponsorImportRow;
       const resolvedDecision = rowDecision?.decision ?? defaultDecisionForStoredRow(baseStored);
@@ -2145,6 +2343,13 @@ export async function confirmSponsorImportForEvent(input: {
           sponsorOrganizationId: sponsorOrganization.id,
         });
 
+        const resolvedPaymentStatus = (!selectedTabs.paymentStatus && !selectedTabs.legacyMode)
+          ? (eventSponsor?.paymentStatus || "unknown")
+          : (rowForMatch.paymentStatus || eventSponsor?.paymentStatus || "unknown");
+        const resolvedPaymentNotes = (!selectedTabs.paymentStatus && !selectedTabs.legacyMode)
+          ? eventSponsor?.paymentNotes
+          : mergeNotes(eventSponsor?.paymentNotes, rowForMatch.paymentNotes);
+
         eventSponsor = await upsertEventSponsor({
           organizationId: input.organizationId,
           eventId: effectiveEventId!,
@@ -2152,8 +2357,8 @@ export async function confirmSponsorImportForEvent(input: {
           sponsorshipPackage: preferExisting(eventSponsor?.sponsorshipPackage, rowForMatch.sponsorshipPackage),
           committedAmount: eventSponsor?.committedAmount ?? rowForMatch.committedAmount,
           amountPaid: eventSponsor?.amountPaid,
-          paymentStatus: rowForMatch.paymentStatus || eventSponsor?.paymentStatus || "unknown",
-          paymentNotes: mergeNotes(eventSponsor?.paymentNotes, rowForMatch.paymentNotes),
+          paymentStatus: resolvedPaymentStatus,
+          paymentNotes: resolvedPaymentNotes,
           flightPreference: preferExisting(eventSponsor?.flightPreference, rowForMatch.flightPreference),
           logoStatus: preferExisting(eventSponsor?.logoStatus, rowForMatch.logoStatus),
           attendeeNamesRaw: preferExisting(eventSponsor?.attendeeNamesRaw, rowForMatch.attendeeNamesRaw),
@@ -2172,30 +2377,55 @@ export async function confirmSponsorImportForEvent(input: {
         }
       }
 
-      for (const history of rowForMatch.yearHistory) {
-        const existingHistory = await getSponsorYearHistory({
-          organizationId: input.organizationId,
-          sponsorOrganizationId: sponsorOrganization.id,
-          year: history.year,
-          sourceType: "sponsor_master_list",
-        });
-        await upsertSponsorYearHistory({
-          organizationId: input.organizationId,
-          sponsorOrganizationId: sponsorOrganization.id,
-          year: history.year,
-          rawValue: history.rawValue,
-          amount: history.amount,
-          participationStatus: history.participationStatus,
-          sourceType: "sponsor_master_list",
-          sourceImportBatchId: importBatch.id,
-          sourceImportRowId: row.id,
-          importSource: "sponsor_import",
-        });
-        if (existingHistory) yearHistoryUpdated += 1;
-        else yearHistoryCreated += 1;
+      if (selectedTabs.history) {
+        for (const history of rowForMatch.yearHistory) {
+          const existingHistory = await getSponsorYearHistory({
+            organizationId: input.organizationId,
+            sponsorOrganizationId: sponsorOrganization.id,
+            year: history.year,
+            sourceType: "sponsor_master_list",
+          });
+          await upsertSponsorYearHistory({
+            organizationId: input.organizationId,
+            sponsorOrganizationId: sponsorOrganization.id,
+            year: history.year,
+            rawValue: history.rawValue,
+            amount: history.amount,
+            participationStatus: history.participationStatus,
+            sourceType: "sponsor_master_list",
+            sourceImportBatchId: importBatch.id,
+            sourceImportRowId: row.id,
+            importSource: "sponsor_import",
+          });
+          if (existingHistory) yearHistoryUpdated += 1;
+          else yearHistoryCreated += 1;
+
+          await prisma.eventParticipationHistory.create({
+            data: {
+              organizationId: input.organizationId,
+              eventId: effectiveEventId,
+              sponsorOrganizationId: sponsorOrganization.id,
+              sourceEventYear: history.year,
+              rawCompanyName: rowForMatch.companyName,
+              rawContactName: rowForMatch.contactName,
+              rawRole: "sponsor",
+              rawPackage: rowForMatch.sponsorshipPackage,
+              rawPaymentStatus: rowForMatch.paymentStatus,
+              participationType: "sponsor",
+              sponsorshipPackage: rowForMatch.sponsorshipPackage,
+              amountCommitted: history.amount,
+              paymentStatus: rowForMatch.paymentStatus,
+              sourceImportBatchId: importBatch.id,
+              sourceSheetName: "Sponsors List",
+              sourceRowNumber: row.rowNumber,
+              sourceRowHash: createHash("sha1").update(`${row.id}|${history.year}|${history.rawValue}`).digest("hex"),
+              notes: rowForMatch.notes,
+            },
+          });
+        }
       }
 
-      if (usesEventAssignment(mode) && eventSponsor) {
+      if (usesEventAssignment(mode) && eventSponsor && selectedTabs.followUps) {
         for (const suggestion of rowForMatch.suggestedFollowUps) {
           const existingFollowUp = await findExistingOpenFollowUp({
             organizationId: input.organizationId,
@@ -2237,29 +2467,33 @@ export async function confirmSponsorImportForEvent(input: {
       }
     }
 
-    for (const pkg of workbookPackages) {
-      if (!pkg.name?.trim()) continue;
-      await upsertSponsorshipPackage({
-        organizationId: input.organizationId,
-        eventId: effectiveEventId,
-        name: pkg.name.trim(),
-        earlyBirdPrice: pkg.earlyBirdPrice,
-        regularPrice: pkg.regularPrice,
-        bannerBenefit: pkg.bannerBenefit,
-        signBenefit: pkg.signBenefit,
-        foursomeIncluded: pkg.foursomeIncluded,
-        websiteBenefit: pkg.websiteBenefit,
-        programBookBenefit: pkg.programBookBenefit,
-        coscBenefit: pkg.coscBenefit,
-        tributeBenefit: pkg.tributeBenefit,
-        sourceImportBatchId: importBatch.id,
-        importSource: "sponsor_import",
-      });
-      sponsorshipPackagesCreatedOrUpdated += 1;
+    if (selectedTabs.sponsorLevels) {
+      for (const pkg of workbookPackages) {
+        if (!pkg.name?.trim()) continue;
+        await upsertSponsorshipPackage({
+          organizationId: input.organizationId,
+          eventId: effectiveEventId,
+          name: pkg.name.trim(),
+          earlyBirdPrice: pkg.earlyBirdPrice,
+          regularPrice: pkg.regularPrice,
+          bannerBenefit: pkg.bannerBenefit,
+          signBenefit: pkg.signBenefit,
+          foursomeIncluded: pkg.foursomeIncluded,
+          websiteBenefit: pkg.websiteBenefit,
+          programBookBenefit: pkg.programBookBenefit,
+          coscBenefit: pkg.coscBenefit,
+          tributeBenefit: pkg.tributeBenefit,
+          sourceImportBatchId: importBatch.id,
+          importSource: "sponsor_import",
+        });
+        sponsorshipPackagesCreatedOrUpdated += 1;
+      }
     }
 
     if (effectiveEventId) {
       for (const slot of workbookFlightSlots) {
+        if (slot.flight === "AM" && !selectedTabs.amFlight) continue;
+        if (slot.flight === "PM" && !selectedTabs.pmFlight) continue;
         await createEventFlightSlot({
           organizationId: input.organizationId,
           eventId: effectiveEventId,
@@ -2278,22 +2512,68 @@ export async function confirmSponsorImportForEvent(input: {
         flightSlotsCreated += 1;
       }
 
-      for (const need of workbookVolunteerNeeds) {
-        if (!need.roleName?.trim()) continue;
-        await createEventVolunteerNeed({
-          organizationId: input.organizationId,
-          eventId: effectiveEventId,
-          roleName: need.roleName,
-          neededCountText: need.neededCountText,
-          flight: need.flight,
-          startingAt: need.startingAt,
-          rotationTime: need.rotationTime,
-          notes: need.notes,
-          status: need.status,
-          sourceImportBatchId: importBatch.id,
-          importSource: "sponsor_import",
+      if (selectedTabs.volunteers) {
+        for (const need of workbookVolunteerNeeds) {
+          if (!need.roleName?.trim()) continue;
+          await createEventVolunteerNeed({
+            organizationId: input.organizationId,
+            eventId: effectiveEventId,
+            roleName: need.roleName,
+            neededCountText: need.neededCountText,
+            flight: need.flight,
+            startingAt: need.startingAt,
+            rotationTime: need.rotationTime,
+            notes: need.notes,
+            status: need.status,
+            sourceImportBatchId: importBatch.id,
+            importSource: "sponsor_import",
+          });
+          volunteerNeedsCreated += 1;
+        }
+      }
+    }
+
+    if (selectedTabs.history) {
+      for (const historyRow of workbookHistoryRows) {
+        const normalizedCompany = normalizeCompanyName(historyRow.rawCompanyName ?? "");
+        const matchedSponsorOrganization = normalizedCompany
+          ? existingSponsors.find((item) => item.normalizedName === normalizedCompany)
+          : undefined;
+
+        let matchedSponsorContactId: string | undefined;
+        if (matchedSponsorOrganization && historyRow.rawContactName) {
+          const normalizedContact = normalizeName(historyRow.rawContactName);
+          const contact = matchedSponsorOrganization.contacts.find((item) => normalizeName(item.name) === normalizedContact);
+          matchedSponsorContactId = contact?.id;
+        }
+
+        await prisma.eventParticipationHistory.create({
+          data: {
+            organizationId: input.organizationId,
+            eventId: effectiveEventId,
+            sponsorOrganizationId: matchedSponsorOrganization?.id,
+            sponsorContactId: matchedSponsorContactId,
+            sourceEventName: historyRow.sourceEventName,
+            sourceEventYear: historyRow.sourceEventYear,
+            rawCompanyName: historyRow.rawCompanyName,
+            rawContactName: historyRow.rawContactName,
+            rawRole: historyRow.rawRole,
+            rawPackage: historyRow.rawPackage,
+            rawPaymentStatus: historyRow.rawPaymentStatus,
+            participationType: historyRow.participationType,
+            sponsorshipPackage: historyRow.sponsorshipPackage,
+            amountCommitted: historyRow.amountCommitted,
+            amountPaid: historyRow.amountPaid,
+            paymentStatus: historyRow.paymentStatus,
+            flight: historyRow.flight,
+            slot: historyRow.slot,
+            notes: historyRow.notes,
+            sourceImportBatchId: importBatch.id,
+            sourceSheetName: historyRow.sourceSheetName,
+            sourceRowNumber: historyRow.sourceRowNumber,
+            sourceRowHash: historyRow.sourceRowHash,
+          },
         });
-        volunteerNeedsCreated += 1;
       }
     }
 

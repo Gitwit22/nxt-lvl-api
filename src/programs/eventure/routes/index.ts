@@ -8,6 +8,8 @@ import { eventureCheckInsRouter } from "./checkins.routes.js";
 import { eventureSponsorImportsRouter } from "./sponsor-imports.routes.js";
 import { eventureSponsorImportsOrgRouter } from "./sponsor-imports-org.routes.js";
 import { eventureSponsorsRouter } from "./sponsors.routes.js";
+import { eventureHistoryRouter } from "./history.routes.js";
+import { eventureSharedRouter } from "./shared.routes.js";
 import { ordersRouter } from "./orders.routes.js";
 
 const router = express.Router();
@@ -35,7 +37,9 @@ router.use("/events/:eventId/attendees", eventureAttendeesRouter);
 router.use("/events/:eventId/checkins", eventureCheckInsRouter);
 router.use("/events/:eventId/sponsor-imports", eventureSponsorImportsRouter);
 router.use("/events/:eventId/sponsors", eventureSponsorsRouter);
+router.use("/events/:eventId/history", eventureHistoryRouter);
 router.use("/sponsor-imports", eventureSponsorImportsOrgRouter);
+router.use("/shared", eventureSharedRouter);
 router.use("/registrations", eventureRegistrationsRouter);
 router.use("/orders", ordersRouter);
 
