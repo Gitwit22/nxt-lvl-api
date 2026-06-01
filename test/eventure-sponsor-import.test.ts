@@ -6,6 +6,8 @@ import {
   cleanCell,
   normalizeCompanyName,
   detectFollowUps,
+  detectEmbeddedSponsorHistoryYears,
+  parseEmbeddedSponsorHistoryRowsFromSponsorsListGrid,
   isImportRecordManuallyEdited,
   resolveSelectedTabs,
   validateRollbackConfirmationText,
@@ -135,6 +137,12 @@ describe("parseYearValue", () => {
     expect(parseYearValue("X").participationStatus).toBe("participated_unknown_amount");
   });
 
+  it('yes-like markers → participated_unknown_amount', () => {
+    expect(parseYearValue("yes").participationStatus).toBe("participated_unknown_amount");
+    expect(parseYearValue("Y").participationStatus).toBe("participated_unknown_amount");
+    expect(parseYearValue("true").participationStatus).toBe("participated_unknown_amount");
+  });
+
   it('New → new_prospect', () => {
     expect(parseYearValue("New").participationStatus).toBe("new_prospect");
     expect(parseYearValue("new").participationStatus).toBe("new_prospect");
@@ -166,6 +174,43 @@ describe("parseYearValue", () => {
 
   it('unrecognized text → participated_text', () => {
     expect(parseYearValue("TBD").participationStatus).toBe("participated_text");
+  });
+});
+
+describe("embedded sponsor history detection/parsing", () => {
+  it("detects historical year headers with supported variants", () => {
+    const years = detectEmbeddedSponsorHistoryYears([
+      "Company",
+      "2020 YR",
+      "2021",
+      "2022 Year",
+      "2023 Yr.",
+      "Notes",
+    ]);
+
+    expect(years).toEqual([2020, 2021, 2022, 2023]);
+  });
+
+  it("parses embedded sponsors-list history rows and keeps source metadata", () => {
+    const parsed = parseEmbeddedSponsorHistoryRowsFromSponsorsListGrid({
+      sheetName: "Sponsors List",
+      grid: [
+        ["Company", "Representative", "2020 YR", "2021", "2022 Year", "Names"],
+        ["Acme Corp", "Eric", "x", "$4,000", "", ""],
+      ],
+    });
+
+    expect(parsed.yearsDetected).toEqual([2020, 2021, 2022]);
+    expect(parsed.rows).toHaveLength(2);
+    expect(parsed.rows[0]?.rawCompanyName).toBe("Acme Corp");
+    expect(parsed.rows[0]?.sourceSheetName).toBe("Sponsors List");
+    expect(parsed.rows[0]?.sourceRowNumber).toBe(2);
+    expect(parsed.rows[0]?.sourceEventYear).toBe(2020);
+    expect(parsed.rows[0]?.participationType).toBe("sponsor");
+    expect(parsed.rows[0]?.amountCommitted).toBeUndefined();
+    expect(parsed.rows[1]?.sourceEventYear).toBe(2021);
+    expect(parsed.rows[1]?.amountCommitted).toBe(4000);
+    expect(parsed.rows[1]?.sourceRowHash).toBeTruthy();
   });
 });
 
@@ -263,6 +308,7 @@ describe("resolveSelectedTabs", () => {
     expect(selected.pmFlight).toBe(true);
     expect(selected.volunteers).toBe(true);
     expect(selected.history).toBe(true);
+    expect(selected.historyFromSponsorsList).toBe(true);
     expect(selected.followUps).toBe(true);
     expect(selected.paymentStatus).toBe(true);
   });
@@ -276,6 +322,7 @@ describe("resolveSelectedTabs", () => {
     expect(selected.pmFlight).toBe(true);
     expect(selected.volunteers).toBe(true);
     expect(selected.history).toBe(false);
+    expect(selected.historyFromSponsorsList).toBe(false);
     expect(selected.followUps).toBe(false);
     expect(selected.paymentStatus).toBe(false);
   });

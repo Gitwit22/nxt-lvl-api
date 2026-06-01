@@ -86,6 +86,7 @@ export type ImportSelectedTabsInput = {
   pmFlight?: boolean;
   volunteers?: boolean;
   history?: boolean;
+  historyFromSponsorsList?: boolean;
   followUps?: boolean;
   paymentStatus?: boolean;
 };
@@ -97,6 +98,7 @@ type ResolvedImportSelectedTabs = {
   pmFlight: boolean;
   volunteers: boolean;
   history: boolean;
+  historyFromSponsorsList: boolean;
   followUps: boolean;
   paymentStatus: boolean;
   legacyMode: boolean;
@@ -111,6 +113,7 @@ export function resolveSelectedTabs(selectedTabs?: ImportSelectedTabsInput): Res
       pmFlight: true,
       volunteers: true,
       history: true,
+      historyFromSponsorsList: true,
       followUps: true,
       paymentStatus: true,
       legacyMode: true,
@@ -124,6 +127,7 @@ export function resolveSelectedTabs(selectedTabs?: ImportSelectedTabsInput): Res
     pmFlight: selectedTabs.pmFlight ?? true,
     volunteers: selectedTabs.volunteers ?? true,
     history: selectedTabs.history ?? false,
+    historyFromSponsorsList: selectedTabs.historyFromSponsorsList ?? false,
     followUps: selectedTabs.followUps ?? false,
     paymentStatus: selectedTabs.paymentStatus ?? false,
     legacyMode: false,
@@ -228,6 +232,7 @@ type WorkbookImportSheetKey =
   | "pmFlight"
   | "volunteers"
   | "history"
+  | "embeddedSponsorHistory"
   | "followUps"
   | "paymentStatus";
 
@@ -300,6 +305,8 @@ type WorkbookParseResult = {
   flightSlots: FlightSlotRow[];
   volunteerNeeds: VolunteerNeedRow[];
   historyRows: HistoryWorkbookRow[];
+  embeddedHistoryRows: HistoryWorkbookRow[];
+  embeddedHistoryYears: number[];
   sheetPreview: WorkbookSheetPreview[];
   warnings: string[];
 };
@@ -527,6 +534,31 @@ function normalizeHeader(value: string): string {
   return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
+function normalizeHeaderForYearDetection(value: string): string {
+  return normalizeHeader(value)
+    .replace(/__\d+$/, "")
+    .replace(/\./g, "")
+    .trim();
+}
+
+function parseEmbeddedHistoryYearFromHeader(value: string): number | undefined {
+  const normalized = normalizeHeaderForYearDetection(value);
+  const match = normalized.match(/^(20\d{2})(?:\s*(?:yr|year))?$/i);
+  if (!match) return undefined;
+  const year = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(year) || year < 2000 || year > 2099) return undefined;
+  return year;
+}
+
+export function detectEmbeddedSponsorHistoryYears(headers: string[]): number[] {
+  const years = new Set<number>();
+  for (const header of headers) {
+    const parsed = parseEmbeddedHistoryYearFromHeader(header);
+    if (parsed !== undefined) years.add(parsed);
+  }
+  return [...years].sort((a, b) => a - b);
+}
+
 export function normalizeHeaders(headers: string[]): string[] {
   const seen = new Map<string, number>();
 
@@ -640,7 +672,7 @@ export function parseYearValue(rawValue: string): ParsedYearHistory {
     return { year: 0, rawValue, participationStatus: "no_known_participation" };
   }
 
-  if (normalized === "x") {
+  if (normalized === "x" || normalized === "yes" || normalized === "y" || normalized === "true") {
     return { year: 0, rawValue, participationStatus: "participated_unknown_amount" };
   }
 
@@ -654,6 +686,90 @@ export function parseYearValue(rawValue: string): ParsedYearHistory {
   }
 
   return { year: 0, rawValue, participationStatus: "participated_text" };
+}
+
+export function parseEmbeddedSponsorHistoryRowsFromSponsorsListGrid(input: {
+  sheetName: string;
+  grid: string[][];
+}): {
+  rows: HistoryWorkbookRow[];
+  yearsDetected: number[];
+  warnings: string[];
+} {
+  if (input.grid.length === 0) {
+    return { rows: [], yearsDetected: [], warnings: [] };
+  }
+
+  const [header, ...body] = input.grid;
+  const mappedCompany = resolveMappedHeaderIndex(header, HEADER_ALIASES.company);
+  if (mappedCompany === undefined) {
+    return {
+      rows: [],
+      yearsDetected: [],
+      warnings: ["Sponsors List is missing a Company column for embedded history parsing."],
+    };
+  }
+
+  const mappedRepresentative = resolveMappedHeaderIndex(header, HEADER_ALIASES.representative);
+  const mappedPackage = resolveMappedHeaderIndex(header, HEADER_ALIASES.sponsorshipPackage);
+  const mappedStatus = resolveMappedHeaderIndex(header, HEADER_ALIASES.status);
+  const mappedNotes = resolveMappedHeaderIndex(header, HEADER_ALIASES.notes);
+
+  const yearColumns = header
+    .map((headerValue, index) => ({ index, year: parseEmbeddedHistoryYearFromHeader(headerValue) }))
+    .filter((item): item is { index: number; year: number } => item.year !== undefined);
+
+  const rows: HistoryWorkbookRow[] = [];
+
+  for (const [offset, row] of body.entries()) {
+    if (isBlankRow(row)) continue;
+
+    const sourceRowNumber = offset + 2;
+    const rawCompanyName = getCell(row, mappedCompany) || undefined;
+    if (!rawCompanyName || isSeparatorCompanyValue(rawCompanyName)) continue;
+
+    for (const yearColumn of yearColumns) {
+      const rawValue = getCell(row, yearColumn.index);
+      if (!rawValue) continue;
+
+      const parsedValue = parseYearValue(rawValue);
+      rows.push({
+        sourceEventName: undefined,
+        sourceEventYear: yearColumn.year,
+        rawCompanyName,
+        rawContactName: getCell(row, mappedRepresentative) || undefined,
+        rawRole: "sponsor",
+        rawPackage: getCell(row, mappedPackage) || undefined,
+        rawPaymentStatus: getCell(row, mappedStatus) || undefined,
+        participationType: "sponsor",
+        sponsorshipPackage: getCell(row, mappedPackage) || undefined,
+        amountCommitted: parsedValue.amount,
+        amountPaid: undefined,
+        paymentStatus: inferPaymentStatus({
+          statusRaw: getCell(row, mappedStatus) || undefined,
+          notes: getCell(row, mappedNotes) || undefined,
+          sponsorshipPackage: getCell(row, mappedPackage) || undefined,
+        }),
+        flight: undefined,
+        slot: undefined,
+        notes: [
+          getCell(row, mappedNotes),
+          `Embedded participation value: ${rawValue}`,
+        ].filter(Boolean).join(" | ") || undefined,
+        sourceSheetName: input.sheetName,
+        sourceRowNumber,
+        sourceRowHash: createHash("sha1")
+          .update(`${input.sheetName}|${sourceRowNumber}|${rawCompanyName}|${yearColumn.year}|${rawValue}`)
+          .digest("hex"),
+      });
+    }
+  }
+
+  return {
+    rows,
+    yearsDetected: [...new Set(yearColumns.map((item) => item.year))].sort((a, b) => a - b),
+    warnings: [],
+  };
 }
 
 function namesAreClose(a: string, b: string): boolean {
@@ -948,25 +1064,23 @@ function mapColumns(headers: string[]) {
   const yearOccurrence = new Map<number, number>();
   headers.forEach((header, index) => {
     const normalized = normalizeHeader(header);
-    const match = normalized.match(/\b(20\d{2})\b/);
-    if (!match) return;
-    if (normalized.includes("yr") || normalized === match[1]) {
-      const year = Number.parseInt(match[1], 10);
-      if (year >= 2000 && year <= 2099) {
-        const occurrence = (yearOccurrence.get(year) ?? 0) + 1;
-        yearOccurrence.set(year, occurrence);
-        yearColumns.push({ index, year, header, occurrence });
-        columnMapping.push({
-          sourceColumn: header,
-          normalizedColumn: normalized,
-          target: year === 2026 && occurrence > 1 ? "eventSponsor.committedAmount" : `sponsorYearHistory.${year}`,
-          confidence: occurrence === 1 ? 0.95 : 0.75,
-          warning: occurrence > 1 && year === 2026 ? "Duplicate 2026 YR column normalized for committed amount handling." : undefined,
-        });
-      }
+    const parsedYear = parseEmbeddedHistoryYearFromHeader(header);
+
+    if (parsedYear !== undefined) {
+      const occurrence = (yearOccurrence.get(parsedYear) ?? 0) + 1;
+      yearOccurrence.set(parsedYear, occurrence);
+      yearColumns.push({ index, year: parsedYear, header, occurrence });
+      columnMapping.push({
+        sourceColumn: header,
+        normalizedColumn: normalized,
+        target: parsedYear === 2026 && occurrence > 1 ? "eventSponsor.committedAmount" : `sponsorYearHistory.${parsedYear}`,
+        confidence: occurrence === 1 ? 0.95 : 0.75,
+        warning: occurrence > 1 && parsedYear === 2026 ? "Duplicate 2026 YR column normalized for committed amount handling." : undefined,
+      });
     }
 
-    if (mapped.currentAmount === undefined && normalized.includes(match[1]) && normalized.includes("amount")) {
+    const anyYearMatch = normalized.match(/\b(20\d{2})\b/);
+    if (mapped.currentAmount === undefined && anyYearMatch && normalized.includes(anyYearMatch[1]) && normalized.includes("amount")) {
       mapped.currentAmount = index;
       columnMapping.push({
         sourceColumn: header,
@@ -1420,8 +1534,19 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
   const pmFlight = parseFlightSheet(pmFlightGrid, "PM");
   const volunteers = parseVolunteersSheet(volunteersGrid);
   const history = parseHistorySheet(historyName ?? "History", historyGrid);
+  const embeddedHistory = parseEmbeddedSponsorHistoryRowsFromSponsorsListGrid({
+    sheetName: sponsorsListName,
+    grid: sponsorsListGrid,
+  });
 
-  warnings.push(...sponsorLevels.warnings, ...amFlight.warnings, ...pmFlight.warnings, ...volunteers.warnings, ...history.warnings);
+  warnings.push(
+    ...sponsorLevels.warnings,
+    ...amFlight.warnings,
+    ...pmFlight.warnings,
+    ...volunteers.warnings,
+    ...history.warnings,
+    ...embeddedHistory.warnings,
+  );
 
   sheetPreview.push(
     {
@@ -1458,7 +1583,19 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
       key: "history",
       sheetName: historyName ?? "not found",
       rowsDetected: history.rows.length,
-      warnings: historyName ? history.warnings : ["Sheet not found."],
+      warnings: historyName
+        ? history.warnings
+        : embeddedHistory.rows.length > 0
+          ? ["Sheet not found. Embedded sponsor history detected in Sponsors List year columns."]
+          : ["Sheet not found."],
+    },
+    {
+      key: "embeddedSponsorHistory",
+      sheetName: sponsorsListName,
+      rowsDetected: embeddedHistory.rows.length,
+      warnings: embeddedHistory.yearsDetected.length > 0
+        ? [`Historical year columns detected: ${embeddedHistory.yearsDetected.join(", ")}`]
+        : ["No embedded sponsor history columns detected."],
     },
     {
       key: "followUps",
@@ -1480,6 +1617,8 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
     flightSlots: [...amFlight.rows, ...pmFlight.rows],
     volunteerNeeds: volunteers.rows,
     historyRows: history.rows,
+    embeddedHistoryRows: embeddedHistory.rows,
+    embeddedHistoryYears: embeddedHistory.yearsDetected,
     sheetPreview,
     warnings,
   };
@@ -1781,6 +1920,8 @@ export async function previewSponsorImportForEvent(input: {
           flightSlots: importSource.workbook.flightSlots,
           volunteerNeeds: importSource.workbook.volunteerNeeds,
           historyRows: importSource.workbook.historyRows,
+          embeddedHistoryRows: importSource.workbook.embeddedHistoryRows,
+          embeddedHistoryYears: importSource.workbook.embeddedHistoryYears,
         }
         : undefined,
     },
@@ -1802,8 +1943,10 @@ export async function previewSponsorImportForEvent(input: {
   let duplicateRows = 0;
   let companiesDetected = 0;
   let contactsDetected = 0;
+  let representativeNamesDetected = 0;
+  let attendeeNamesDetected = 0;
   let eventSponsorsDetected = 0;
-  let historyRecordsDetected = 0;
+  let embeddedHistoryRecordsDetected = 0;
   let followUpsDetected = 0;
 
   try {
@@ -1919,8 +2062,10 @@ export async function previewSponsorImportForEvent(input: {
 
       if (sponsorOrganizationTarget !== "skip") companiesDetected += 1;
       if (sponsorContactTarget !== "skip") contactsDetected += 1;
+      if (row.contactName) representativeNamesDetected += 1;
+      if (row.attendeeNamesRaw && cleanCell(row.attendeeNamesRaw)) attendeeNamesDetected += 1;
       if (eventSponsorTarget !== "skip") eventSponsorsDetected += 1;
-      historyRecordsDetected += row.yearHistory.length;
+      embeddedHistoryRecordsDetected += row.yearHistory.length;
       followUpsDetected += usesEventAssignment(mode) ? row.suggestedFollowUps.length : 0;
 
       const previewRow: ImportPreviewRow = {
@@ -2032,7 +2177,9 @@ export async function previewSponsorImportForEvent(input: {
       eventId: input.eventId,
       fileName: input.fileName ?? (importSource.importFormat === "xlsx" ? "uploaded.xlsx" : "uploaded.csv"),
       status,
-      attendeePolicyMessage: "No attendee names found. Attendees were not created. Use Add Contact as Attendee or upload a filled flight sheet later.",
+      attendeePolicyMessage: attendeeNamesDetected > 0
+        ? undefined
+        : `No values found in the Names column. Attendees were not created. ${representativeNamesDetected} representative names were found and will be imported as sponsor contacts. To create attendees, upload a filled Names column or enable a future 'Create representatives as attendees' option.`,
       summary: {
         totalRows: parsed.rows.length,
         validRows,
@@ -2041,8 +2188,13 @@ export async function previewSponsorImportForEvent(input: {
         duplicateRows,
         companiesDetected,
         contactsDetected,
+        representativeNamesDetected,
+        attendeeNamesDetected,
         eventSponsorsDetected,
-        historyRecordsDetected: historyRecordsDetected + (importSource.workbook?.historyRows.length ?? 0),
+        embeddedHistoryRecordsDetected,
+        historySheetRecordsDetected: importSource.workbook?.historyRows.length ?? 0,
+        historicalYearColumnsDetected: importSource.workbook?.embeddedHistoryYears ?? [],
+        historyRecordsDetected: embeddedHistoryRecordsDetected + (importSource.workbook?.historyRows.length ?? 0),
         followUpsDetected,
         sponsorshipPackagesDetected: importSource.workbook?.sponsorLevels.length ?? 0,
         amFlightSlotsDetected: importSource.workbook?.flightSlots.filter((slot) => slot.flight === "AM").length ?? 0,
@@ -2099,6 +2251,8 @@ export async function confirmSponsorImportForEvent(input: {
       flightSlots?: FlightSlotRow[];
       volunteerNeeds?: VolunteerNeedRow[];
       historyRows?: HistoryWorkbookRow[];
+      embeddedHistoryRows?: HistoryWorkbookRow[];
+      embeddedHistoryYears?: number[];
     };
   };
   const workbookConfig = mappingConfig.workbook ?? {};
@@ -2108,6 +2262,7 @@ export async function confirmSponsorImportForEvent(input: {
   const workbookHistoryRows = Array.isArray(workbookConfig.historyRows) ? workbookConfig.historyRows : [];
   const mode = toCanonicalImportMode(mappingConfig.mode);
   const selectedTabs = resolveSelectedTabs(input.selectedTabs);
+  const shouldImportEmbeddedHistoryFromSponsorsList = selectedTabs.history && (selectedTabs.legacyMode || selectedTabs.historyFromSponsorsList);
   let effectiveEventId = input.eventId ?? importBatch.eventId ?? undefined;
 
   if (mode === "create_event_then_assign" && input.createEvent) {
@@ -2377,7 +2532,7 @@ export async function confirmSponsorImportForEvent(input: {
         }
       }
 
-      if (selectedTabs.history) {
+      if (shouldImportEmbeddedHistoryFromSponsorsList) {
         for (const history of rowForMatch.yearHistory) {
           const existingHistory = await getSponsorYearHistory({
             organizationId: input.organizationId,
