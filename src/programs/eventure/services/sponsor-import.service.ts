@@ -13,6 +13,7 @@ import {
   createSponsorFollowUp,
   createSponsorOrganization,
   failImportBatch,
+  getSponsorOrganizationByNormalizedName,
   findExistingOpenFollowUp,
   getImportBatchWithRows,
   getActiveEventForOrganization,
@@ -241,6 +242,17 @@ type WorkbookSheetPreview = {
   sheetName: string;
   rowsDetected: number;
   warnings: string[];
+};
+
+type ImportSectionPreview = {
+  key: WorkbookImportSheetKey;
+  label: string;
+  source: string;
+  destination: string;
+  detected: boolean;
+  rows: number;
+  warnings: string[];
+  defaultEnabled: boolean;
 };
 
 type SponsorshipPackageRow = {
@@ -1624,6 +1636,109 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
   };
 }
 
+function buildImportSections(sheetPreview: WorkbookSheetPreview[]): ImportSectionPreview[] {
+  const previewByKey = new Map(sheetPreview.map((sheet) => [sheet.key, sheet]));
+  const getSection = (key: WorkbookImportSheetKey) => previewByKey.get(key);
+  const hasDetectedRows = (key: WorkbookImportSheetKey) => (getSection(key)?.rowsDetected ?? 0) > 0;
+  const hasSourceSheet = (key: WorkbookImportSheetKey) => {
+    const sheetName = getSection(key)?.sheetName?.trim().toLowerCase();
+    return Boolean(sheetName) && sheetName !== "not found";
+  };
+
+  return [
+    {
+      key: "sponsorLevels",
+      label: "Sponsor Levels",
+      source: hasSourceSheet("sponsorLevels") ? (getSection("sponsorLevels")?.sheetName ?? "Sponsor Levels") : "Sponsor Levels sheet",
+      destination: "Event Packages",
+      detected: hasSourceSheet("sponsorLevels"),
+      rows: getSection("sponsorLevels")?.rowsDetected ?? 0,
+      warnings: getSection("sponsorLevels")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("sponsorLevels"),
+    },
+    {
+      key: "sponsorsList",
+      label: "Sponsors List",
+      source: getSection("sponsorsList")?.sheetName ?? "Sponsors List sheet",
+      destination: "Companies + Contacts + Event Sponsors",
+      detected: hasSourceSheet("sponsorsList"),
+      rows: getSection("sponsorsList")?.rowsDetected ?? 0,
+      warnings: getSection("sponsorsList")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("sponsorsList"),
+    },
+    {
+      key: "amFlight",
+      label: "AM Flight",
+      source: hasSourceSheet("amFlight") ? (getSection("amFlight")?.sheetName ?? "AM Flight") : "AM Flight sheet",
+      destination: "Event Assignments",
+      detected: hasSourceSheet("amFlight"),
+      rows: getSection("amFlight")?.rowsDetected ?? 0,
+      warnings: getSection("amFlight")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("amFlight"),
+    },
+    {
+      key: "pmFlight",
+      label: "PM Flight",
+      source: hasSourceSheet("pmFlight") ? (getSection("pmFlight")?.sheetName ?? "PM Flight") : "PM Flight sheet",
+      destination: "Event Assignments",
+      detected: hasSourceSheet("pmFlight"),
+      rows: getSection("pmFlight")?.rowsDetected ?? 0,
+      warnings: getSection("pmFlight")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("pmFlight"),
+    },
+    {
+      key: "volunteers",
+      label: "Volunteers",
+      source: hasSourceSheet("volunteers") ? (getSection("volunteers")?.sheetName ?? "Volunteers") : "Volunteers sheet",
+      destination: "Volunteer Assignments",
+      detected: hasSourceSheet("volunteers"),
+      rows: getSection("volunteers")?.rowsDetected ?? 0,
+      warnings: getSection("volunteers")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("volunteers"),
+    },
+    {
+      key: "history",
+      label: "History",
+      source: "History sheet",
+      destination: "Event Participation History",
+      detected: hasSourceSheet("history"),
+      rows: getSection("history")?.rowsDetected ?? 0,
+      warnings: getSection("history")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("history"),
+    },
+    {
+      key: "embeddedSponsorHistory",
+      label: "Embedded Sponsor History",
+      source: "Sponsors List year columns",
+      destination: "Event History",
+      detected: hasDetectedRows("embeddedSponsorHistory"),
+      rows: getSection("embeddedSponsorHistory")?.rowsDetected ?? 0,
+      warnings: getSection("embeddedSponsorHistory")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("embeddedSponsorHistory"),
+    },
+    {
+      key: "followUps",
+      label: "Follow-Ups",
+      source: "Follow-Ups sheet",
+      destination: "Event Follow-Ups",
+      detected: hasSourceSheet("followUps"),
+      rows: getSection("followUps")?.rowsDetected ?? 0,
+      warnings: getSection("followUps")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("followUps"),
+    },
+    {
+      key: "paymentStatus",
+      label: "Payment Status",
+      source: "Payment Status sheet",
+      destination: "Event Payments / Status Items",
+      detected: hasSourceSheet("paymentStatus"),
+      rows: getSection("paymentStatus")?.rowsDetected ?? 0,
+      warnings: getSection("paymentStatus")?.warnings ?? [],
+      defaultEnabled: hasDetectedRows("paymentStatus"),
+    },
+  ];
+}
+
 type OrganizationMatchResult = {
   action: "create" | "update" | "review";
   matchedBy: "normalized_name" | "name_phone" | "name_email_domain" | "new" | "ambiguous";
@@ -2168,6 +2283,7 @@ export async function previewSponsorImportForEvent(input: {
       status,
     });
 
+    const workbookSheetPreview = importSource.workbook?.sheetPreview ?? [];
     return {
       importBatchId: importBatch.id,
       importType: "sponsor_master_list",
@@ -2204,7 +2320,8 @@ export async function previewSponsorImportForEvent(input: {
       },
       columnMapping: parsed.columnMapping,
       rows,
-      workbookSheetPreview: importSource.workbook?.sheetPreview ?? [],
+      workbookSheetPreview,
+      importSections: buildImportSections(workbookSheetPreview),
       workbookWarnings: importSource.workbook?.warnings ?? [],
       parserUsed: importSource.parserUsed,
       warnings: importSource.parserWarnings.map((message) => ({
@@ -2262,7 +2379,10 @@ export async function confirmSponsorImportForEvent(input: {
   const workbookHistoryRows = Array.isArray(workbookConfig.historyRows) ? workbookConfig.historyRows : [];
   const mode = toCanonicalImportMode(mappingConfig.mode);
   const selectedTabs = resolveSelectedTabs(input.selectedTabs);
-  const shouldImportEmbeddedHistoryFromSponsorsList = selectedTabs.history && (selectedTabs.legacyMode || selectedTabs.historyFromSponsorsList);
+  const shouldImportStandaloneHistory = selectedTabs.history;
+  const shouldImportEmbeddedHistoryFromSponsorsList = selectedTabs.legacyMode
+    ? selectedTabs.history
+    : selectedTabs.historyFromSponsorsList;
   let effectiveEventId = input.eventId ?? importBatch.eventId ?? undefined;
 
   if (mode === "create_event_then_assign" && input.createEvent) {
@@ -2404,23 +2524,63 @@ export async function confirmSponsorImportForEvent(input: {
         : undefined;
 
       if (!sponsorOrganization) {
-        sponsorOrganization = await createSponsorOrganization({
-          organizationId: input.organizationId,
-          name: rowForMatch.companyName,
-          normalizedName: rowForMatch.normalizedCompanyName,
-          addressLine1: rowForMatch.addressLine1,
-          city: rowForMatch.city,
-          state: rowForMatch.state,
-          zipCode: rowForMatch.zipCode,
-          mainEmail: rowForMatch.contactEmail,
-          mainPhone: rowForMatch.contactPhone,
-          notes: rowForMatch.notes,
-          sourceImportBatchId: importBatch.id,
-          sourceImportRowId: row.id,
-          importSource: "sponsor_import",
-        });
+        try {
+          sponsorOrganization = await createSponsorOrganization({
+            organizationId: input.organizationId,
+            name: rowForMatch.companyName,
+            normalizedName: rowForMatch.normalizedCompanyName,
+            addressLine1: rowForMatch.addressLine1,
+            city: rowForMatch.city,
+            state: rowForMatch.state,
+            zipCode: rowForMatch.zipCode,
+            mainEmail: rowForMatch.contactEmail,
+            mainPhone: rowForMatch.contactPhone,
+            notes: rowForMatch.notes,
+            sourceImportBatchId: importBatch.id,
+            sourceImportRowId: row.id,
+            importSource: "sponsor_import",
+          });
+        } catch (error) {
+          // Recover from normalized-name unique races by reusing/updating existing org.
+          const message = error instanceof Error ? error.message : "";
+          const isUniqueNormalizedNameConflict =
+            message.includes("Unique constraint failed") &&
+            message.includes("organizationId") &&
+            message.includes("normalizedName");
+
+          if (!isUniqueNormalizedNameConflict) {
+            throw error;
+          }
+
+          const existingByNormalizedName = await getSponsorOrganizationByNormalizedName({
+            organizationId: input.organizationId,
+            normalizedName: rowForMatch.normalizedCompanyName,
+          });
+
+          if (!existingByNormalizedName) {
+            throw error;
+          }
+
+          sponsorOrganization = await updateSponsorOrganization({
+            id: existingByNormalizedName.id,
+            name: preferExisting(existingByNormalizedName.name, rowForMatch.companyName),
+            addressLine1: preferExisting(existingByNormalizedName.addressLine1, rowForMatch.addressLine1),
+            city: preferExisting(existingByNormalizedName.city, rowForMatch.city),
+            state: preferExisting(existingByNormalizedName.state, rowForMatch.state),
+            zipCode: preferExisting(existingByNormalizedName.zipCode, rowForMatch.zipCode),
+            mainEmail: preferExisting(existingByNormalizedName.mainEmail, rowForMatch.contactEmail),
+            mainPhone: preferExisting(existingByNormalizedName.mainPhone, rowForMatch.contactPhone),
+            notes: mergeNotes(existingByNormalizedName.notes, rowForMatch.notes),
+            sourceImportBatchId: importBatch.id,
+            sourceImportRowId: row.id,
+            importSource: "sponsor_import",
+          });
+          sponsorOrganizationsUpdated += 1;
+        }
         existingSponsors.push(sponsorOrganization);
-        sponsorOrganizationsCreated += 1;
+        if (sponsorOrganization && sponsorOrganization.sourceImportBatchId === importBatch.id) {
+          sponsorOrganizationsCreated += 1;
+        }
       } else {
         sponsorOrganization = await updateSponsorOrganization({
           id: sponsorOrganization.id,
@@ -2688,7 +2848,7 @@ export async function confirmSponsorImportForEvent(input: {
       }
     }
 
-    if (selectedTabs.history) {
+    if (shouldImportStandaloneHistory) {
       for (const historyRow of workbookHistoryRows) {
         const normalizedCompany = normalizeCompanyName(historyRow.rawCompanyName ?? "");
         const matchedSponsorOrganization = normalizedCompany

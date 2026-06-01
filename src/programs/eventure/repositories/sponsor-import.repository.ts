@@ -25,6 +25,23 @@ export async function listSponsorOrganizationsForOrganization(organizationId: st
   });
 }
 
+export async function getSponsorOrganizationByNormalizedName(input: {
+  organizationId: string;
+  normalizedName: string;
+}) {
+  return prisma.eventureSponsorOrganization.findFirst({
+    where: {
+      organizationId: input.organizationId,
+      normalizedName: input.normalizedName,
+    },
+    include: {
+      contacts: {
+        where: { archivedAt: null },
+      },
+    },
+  });
+}
+
 export async function listEventSponsorsForEvent(organizationId: string, eventId: string) {
   return prisma.eventureEventSponsor.findMany({
     where: { organizationId, eventId, archivedAt: null },
