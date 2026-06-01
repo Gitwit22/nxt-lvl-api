@@ -326,4 +326,24 @@ describe("resolveSelectedTabs", () => {
     expect(selected.followUps).toBe(false);
     expect(selected.paymentStatus).toBe(false);
   });
+
+  it("forces sponsorsList for CSV sponsor imports when parsed rows exist", () => {
+    const selected = resolveSelectedTabs(
+      { sponsorsList: false, historyFromSponsorsList: true },
+      { importFormat: "csv", importType: "sponsor_master_list", hasParsedRows: true },
+    );
+
+    expect(selected.legacyMode).toBe(false);
+    expect(selected.sponsorsList).toBe(true);
+    expect(selected.historyFromSponsorsList).toBe(true);
+  });
+
+  it("does not force sponsorsList for CSV imports when no rows were parsed", () => {
+    const selected = resolveSelectedTabs(
+      { sponsorsList: false },
+      { importFormat: "csv", importType: "sponsor_master_list", hasParsedRows: false },
+    );
+
+    expect(selected.sponsorsList).toBe(false);
+  });
 });

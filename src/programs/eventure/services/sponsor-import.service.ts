@@ -105,9 +105,16 @@ type ResolvedImportSelectedTabs = {
   legacyMode: boolean;
 };
 
-export function resolveSelectedTabs(selectedTabs?: ImportSelectedTabsInput): ResolvedImportSelectedTabs {
-  if (!selectedTabs) {
-    return {
+export function resolveSelectedTabs(
+  selectedTabs?: ImportSelectedTabsInput,
+  context?: {
+    importFormat?: "csv" | "xlsx";
+    importType?: "sponsor_master_list";
+    hasParsedRows?: boolean;
+  },
+): ResolvedImportSelectedTabs {
+  const resolved = !selectedTabs
+    ? {
       sponsorLevels: true,
       sponsorsList: true,
       amFlight: true,
@@ -118,20 +125,32 @@ export function resolveSelectedTabs(selectedTabs?: ImportSelectedTabsInput): Res
       followUps: true,
       paymentStatus: true,
       legacyMode: true,
+    }
+    : {
+      sponsorLevels: selectedTabs.sponsorLevels ?? true,
+      sponsorsList: selectedTabs.sponsorsList ?? true,
+      amFlight: selectedTabs.amFlight ?? true,
+      pmFlight: selectedTabs.pmFlight ?? true,
+      volunteers: selectedTabs.volunteers ?? true,
+      history: selectedTabs.history ?? false,
+      historyFromSponsorsList: selectedTabs.historyFromSponsorsList ?? false,
+      followUps: selectedTabs.followUps ?? false,
+      paymentStatus: selectedTabs.paymentStatus ?? false,
+      legacyMode: false,
     };
+
+  const shouldForceSponsorsListForCsv =
+    context?.importFormat === "csv"
+    && context?.importType === "sponsor_master_list"
+    && context?.hasParsedRows === true;
+
+  if (!shouldForceSponsorsListForCsv) {
+    return resolved;
   }
 
   return {
-    sponsorLevels: selectedTabs.sponsorLevels ?? true,
-    sponsorsList: selectedTabs.sponsorsList ?? true,
-    amFlight: selectedTabs.amFlight ?? true,
-    pmFlight: selectedTabs.pmFlight ?? true,
-    volunteers: selectedTabs.volunteers ?? true,
-    history: selectedTabs.history ?? false,
-    historyFromSponsorsList: selectedTabs.historyFromSponsorsList ?? false,
-    followUps: selectedTabs.followUps ?? false,
-    paymentStatus: selectedTabs.paymentStatus ?? false,
-    legacyMode: false,
+    ...resolved,
+    sponsorsList: true,
   };
 }
 
@@ -1636,7 +1655,118 @@ function parseWorkbook(buffer: Buffer): WorkbookParseResult {
   };
 }
 
-function buildImportSections(sheetPreview: WorkbookSheetPreview[]): ImportSectionPreview[] {
+function buildImportSections(args: {
+  sheetPreview: WorkbookSheetPreview[];
+  importFormat: "csv" | "xlsx";
+  sponsorsListRows: number;
+  embeddedHistoryRows: number;
+  followUpRows: number;
+  paymentStatusRows: number;
+}): ImportSectionPreview[] {
+  const {
+    sheetPreview,
+    importFormat,
+    sponsorsListRows,
+    embeddedHistoryRows,
+    followUpRows,
+    paymentStatusRows,
+  } = args;
+
+  if (importFormat === "csv") {
+    return [
+      {
+        key: "sponsorLevels",
+        label: "Sponsor Levels",
+        source: "Workbook sheet",
+        destination: "Event Packages",
+        detected: false,
+        rows: 0,
+        warnings: ["Not available for CSV import."],
+        defaultEnabled: false,
+      },
+      {
+        key: "sponsorsList",
+        label: "Sponsors List",
+        source: "CSV Sponsors List rows",
+        destination: "Companies + Contacts + Event Sponsors",
+        detected: sponsorsListRows > 0,
+        rows: sponsorsListRows,
+        warnings: sponsorsListRows > 0 ? [] : ["No sponsor rows detected."],
+        defaultEnabled: sponsorsListRows > 0,
+      },
+      {
+        key: "amFlight",
+        label: "AM Flight",
+        source: "Workbook sheet",
+        destination: "Event Assignments",
+        detected: false,
+        rows: 0,
+        warnings: ["Not available for CSV import."],
+        defaultEnabled: false,
+      },
+      {
+        key: "pmFlight",
+        label: "PM Flight",
+        source: "Workbook sheet",
+        destination: "Event Assignments",
+        detected: false,
+        rows: 0,
+        warnings: ["Not available for CSV import."],
+        defaultEnabled: false,
+      },
+      {
+        key: "volunteers",
+        label: "Volunteers",
+        source: "Workbook sheet",
+        destination: "Volunteer Assignments",
+        detected: false,
+        rows: 0,
+        warnings: ["Not available for CSV import."],
+        defaultEnabled: false,
+      },
+      {
+        key: "history",
+        label: "History",
+        source: "Workbook sheet",
+        destination: "Event Participation History",
+        detected: false,
+        rows: 0,
+        warnings: ["Standalone history sheet not detected in CSV import."],
+        defaultEnabled: false,
+      },
+      {
+        key: "embeddedSponsorHistory",
+        label: "Embedded Sponsor History",
+        source: "Sponsors List year columns",
+        destination: "Event History",
+        detected: embeddedHistoryRows > 0,
+        rows: embeddedHistoryRows,
+        warnings: embeddedHistoryRows > 0 ? [] : ["No embedded year history columns detected."],
+        defaultEnabled: embeddedHistoryRows > 0,
+      },
+      {
+        key: "followUps",
+        label: "Follow-Ups",
+        source: "Sponsors List derived columns",
+        destination: "Event Follow-Ups",
+        detected: followUpRows > 0,
+        rows: followUpRows,
+        warnings: followUpRows > 0 ? [] : ["No follow-up signals detected from Sponsors List columns."],
+        defaultEnabled: followUpRows > 0,
+      },
+      {
+        key: "paymentStatus",
+        label: "Payment Status",
+        source: "Sponsors List derived columns",
+        destination: "Event Payments / Status Items",
+        detected: paymentStatusRows > 0,
+        rows: paymentStatusRows,
+        warnings: paymentStatusRows > 0 ? [] : ["No payment status values detected from Sponsors List columns."],
+        defaultEnabled: paymentStatusRows > 0,
+      },
+    ];
+  }
+
   const previewByKey = new Map(sheetPreview.map((sheet) => [sheet.key, sheet]));
   const getSection = (key: WorkbookImportSheetKey) => previewByKey.get(key);
   const hasDetectedRows = (key: WorkbookImportSheetKey) => (getSection(key)?.rowsDetected ?? 0) > 0;
@@ -2063,6 +2193,7 @@ export async function previewSponsorImportForEvent(input: {
   let eventSponsorsDetected = 0;
   let embeddedHistoryRecordsDetected = 0;
   let followUpsDetected = 0;
+  let paymentStatusRowsDetected = 0;
 
   try {
     for (const row of parsed.rows) {
@@ -2182,6 +2313,9 @@ export async function previewSponsorImportForEvent(input: {
       if (eventSponsorTarget !== "skip") eventSponsorsDetected += 1;
       embeddedHistoryRecordsDetected += row.yearHistory.length;
       followUpsDetected += usesEventAssignment(mode) ? row.suggestedFollowUps.length : 0;
+      if (row.paymentStatus && row.paymentStatus !== "unknown") {
+        paymentStatusRowsDetected += 1;
+      }
 
       const previewRow: ImportPreviewRow = {
         importRowId: "",
@@ -2321,7 +2455,14 @@ export async function previewSponsorImportForEvent(input: {
       columnMapping: parsed.columnMapping,
       rows,
       workbookSheetPreview,
-      importSections: buildImportSections(workbookSheetPreview),
+      importSections: buildImportSections({
+        sheetPreview: workbookSheetPreview,
+        importFormat: importSource.importFormat,
+        sponsorsListRows: parsed.rows.length,
+        embeddedHistoryRows: embeddedHistoryRecordsDetected,
+        followUpRows: followUpsDetected,
+        paymentStatusRows: paymentStatusRowsDetected,
+      }),
       workbookWarnings: importSource.workbook?.warnings ?? [],
       parserUsed: importSource.parserUsed,
       warnings: importSource.parserWarnings.map((message) => ({
@@ -2363,6 +2504,8 @@ export async function confirmSponsorImportForEvent(input: {
 
   const mappingConfig = importBatch.mappingConfig as {
     mode?: ImportModeInput;
+    importType?: "sponsor_master_list";
+    importFormat?: "csv" | "xlsx";
     workbook?: {
       sponsorLevels?: SponsorshipPackageRow[];
       flightSlots?: FlightSlotRow[];
@@ -2378,7 +2521,13 @@ export async function confirmSponsorImportForEvent(input: {
   const workbookVolunteerNeeds = Array.isArray(workbookConfig.volunteerNeeds) ? workbookConfig.volunteerNeeds : [];
   const workbookHistoryRows = Array.isArray(workbookConfig.historyRows) ? workbookConfig.historyRows : [];
   const mode = toCanonicalImportMode(mappingConfig.mode);
-  const selectedTabs = resolveSelectedTabs(input.selectedTabs);
+  const importType = mappingConfig.importType ?? "sponsor_master_list";
+  const importFormat = mappingConfig.importFormat ?? "csv";
+  const selectedTabs = resolveSelectedTabs(input.selectedTabs, {
+    importType,
+    importFormat,
+    hasParsedRows: importBatch.rows.length > 0,
+  });
   const shouldImportStandaloneHistory = selectedTabs.history;
   const shouldImportEmbeddedHistoryFromSponsorsList = selectedTabs.legacyMode
     ? selectedTabs.history
@@ -2440,11 +2589,24 @@ export async function confirmSponsorImportForEvent(input: {
   let importedRowsWithWarnings = 0;
   let skippedRows = 0;
   let failedRows = 0;
+  let rowsConsidered = 0;
+  let rowsApproved = 0;
+  let rowsSkippedByDecision = 0;
+  let rowsSkippedBySelectedTabGate = 0;
+  let rowsSkippedByMissingCompany = 0;
+  let rowsPersisted = 0;
+
+  const isPersistDecision = (decision: ConfirmRowDecision) => {
+    return decision === "approve" || decision === "edit" || decision === "merge" || decision === "create_new";
+  };
 
   try {
     for (const row of importBatch.rows) {
+      rowsConsidered += 1;
+
       if (!selectedTabs.sponsorsList) {
         skippedRows += 1;
+        rowsSkippedBySelectedTabGate += 1;
         await updateImportRowStatus({
           id: row.id,
           status: "skipped",
@@ -2457,9 +2619,15 @@ export async function confirmSponsorImportForEvent(input: {
       const baseStored = row.normalizedData as unknown as StoredSponsorImportRow;
       const resolvedDecision = rowDecision?.decision ?? defaultDecisionForStoredRow(baseStored);
       const stored = mergeEditableNormalized(baseStored, rowDecision?.editableNormalized);
+      const shouldPersistRow = isPersistDecision(resolvedDecision);
+
+      if (shouldPersistRow) {
+        rowsApproved += 1;
+      }
 
       if (resolvedDecision === "skip" || resolvedDecision === "needs_review") {
         skippedRows += 1;
+        rowsSkippedByDecision += 1;
         await updateImportRowStatus({
           id: row.id,
           status: "skipped",
@@ -2470,6 +2638,9 @@ export async function confirmSponsorImportForEvent(input: {
 
       if (stored.rowStatus === "error" || stored.errors.length > 0 || !stored.companyName || !stored.normalizedCompanyName) {
         failedRows += 1;
+        if (!stored.companyName || !stored.normalizedCompanyName) {
+          rowsSkippedByMissingCompany += 1;
+        }
         await updateImportRowStatus({
           id: row.id,
           status: "failed",
@@ -2478,8 +2649,9 @@ export async function confirmSponsorImportForEvent(input: {
         continue;
       }
 
-      if (stored.rowStatus === "duplicate") {
+      if (stored.rowStatus === "duplicate" && !shouldPersistRow) {
         skippedRows += 1;
+        rowsSkippedByDecision += 1;
         await updateImportRowStatus({
           id: row.id,
           status: "skipped",
@@ -2780,6 +2952,7 @@ export async function confirmSponsorImportForEvent(input: {
       } else {
         importedRows += 1;
       }
+      rowsPersisted += 1;
     }
 
     if (selectedTabs.sponsorLevels) {
@@ -2924,6 +3097,17 @@ export async function confirmSponsorImportForEvent(input: {
         attendeesCreated,
         skippedRows,
         failedRows,
+      },
+      debug: {
+        selectedTabs,
+        importFormat,
+        importType,
+        rowsConsidered,
+        rowsApproved,
+        rowsSkippedByDecision,
+        rowsSkippedBySelectedTabGate,
+        rowsSkippedByMissingCompany,
+        rowsPersisted,
       },
       nextActions: [
         { label: "View Directory", href: "/directory" },
