@@ -169,7 +169,12 @@ router.get("/", async (req, res) => {
   try {
     const user = getRequestUser(req);
     const items = await listImportBatchesForOrg(user!.organizationId);
-    res.json({ items });
+    res.json({
+      items: items.map((item) => ({
+        ...item,
+        importScope: item.eventId ? "EVENT" : "ORG",
+      })),
+    });
   } catch (error) {
     handleError(res, error);
   }

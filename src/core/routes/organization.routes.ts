@@ -181,6 +181,230 @@ function buildOrgData(body: Record<string, unknown>) {
   return data;
 }
 
+type EventureOperationalSettings = {
+  eventDefaults: {
+    defaultEventLabel: string;
+    timezone: string;
+    primaryContact: string;
+  };
+  importSettings: {
+    parserStrategy: string;
+    duplicateHandling: string;
+    dryRunByDefault: boolean;
+  };
+  payments: {
+    defaultPaymentStatus: string;
+    invoiceNeededLabel: string;
+    pendingEventPaymentLabel: string;
+    paidExternalLabel: string;
+  };
+  notifications: {
+    operationsEmail: string;
+    sendImportSummary: boolean;
+    sendPaymentAlerts: boolean;
+    sendDailyDigest: boolean;
+  };
+  security: {
+    requireMfa: boolean;
+    sessionTimeoutMinutes: number;
+    ipAllowlistEnabled: boolean;
+    passwordRotationDays: number;
+  };
+  rollbackSettings: {
+    defaultMode: "archive" | "hard_delete";
+    allowHardDelete: boolean;
+    requireConfirmationText: boolean;
+  };
+};
+
+const EVENTURE_PROGRAM_DOMAIN = "eventure";
+
+const defaultEventureOperationalSettings: EventureOperationalSettings = {
+  eventDefaults: {
+    defaultEventLabel: "2026 Event Season",
+    timezone: "America/Denver",
+    primaryContact: "Event Operations Team",
+  },
+  importSettings: {
+    parserStrategy: "native",
+    duplicateHandling: "upsert",
+    dryRunByDefault: true,
+  },
+  payments: {
+    defaultPaymentStatus: "unknown",
+    invoiceNeededLabel: "invoice_needed",
+    pendingEventPaymentLabel: "pending_event_payment",
+    paidExternalLabel: "paid_external",
+  },
+  notifications: {
+    operationsEmail: "",
+    sendImportSummary: true,
+    sendPaymentAlerts: true,
+    sendDailyDigest: false,
+  },
+  security: {
+    requireMfa: false,
+    sessionTimeoutMinutes: 120,
+    ipAllowlistEnabled: false,
+    passwordRotationDays: 90,
+  },
+  rollbackSettings: {
+    defaultMode: "archive",
+    allowHardDelete: false,
+    requireConfirmationText: true,
+  },
+};
+
+function mergeEventureOperationalSettings(
+  partial?: Partial<EventureOperationalSettings> | null,
+): EventureOperationalSettings {
+  return {
+    eventDefaults: {
+      ...defaultEventureOperationalSettings.eventDefaults,
+      ...(partial?.eventDefaults ?? {}),
+    },
+    importSettings: {
+      ...defaultEventureOperationalSettings.importSettings,
+      ...(partial?.importSettings ?? {}),
+    },
+    payments: {
+      ...defaultEventureOperationalSettings.payments,
+      ...(partial?.payments ?? {}),
+    },
+    notifications: {
+      ...defaultEventureOperationalSettings.notifications,
+      ...(partial?.notifications ?? {}),
+    },
+    security: {
+      ...defaultEventureOperationalSettings.security,
+      ...(partial?.security ?? {}),
+    },
+    rollbackSettings: {
+      ...defaultEventureOperationalSettings.rollbackSettings,
+      ...(partial?.rollbackSettings ?? {}),
+    },
+  };
+}
+
+async function loadEventureOrgSettings(orgId: string): Promise<EventureOperationalSettings> {
+  const row = await prisma.programStorageSettings.findUnique({
+    where: {
+      organizationId_programDomain: {
+        organizationId: orgId,
+        programDomain: EVENTURE_PROGRAM_DOMAIN,
+      },
+    },
+    select: { settings: true },
+  });
+
+  return mergeEventureOperationalSettings(row?.settings as Partial<EventureOperationalSettings> | null | undefined);
+}
+
+async function saveEventureOrgSettings(orgId: string, settings: EventureOperationalSettings) {
+  return prisma.programStorageSettings.upsert({
+    where: {
+      organizationId_programDomain: {
+        organizationId: orgId,
+        programDomain: EVENTURE_PROGRAM_DOMAIN,
+      },
+    },
+    create: {
+      organizationId: orgId,
+      programDomain: EVENTURE_PROGRAM_DOMAIN,
+      settings,
+    },
+    update: {
+      settings,
+    },
+    select: {
+      settings: true,
+    },
+  });
+}
+
+router.get("/:orgId/app-settings", requireAuth, async (req, res) => {
+  const orgId = getOrgId(req.params.orgId);
+  const org = await prisma.organization.findUnique({ where: { id: orgId } });
+
+  if (!org) {
+    res.status(404).json({ error: "Organization not found" });
+    return;
+  }
+
+  const settings = await loadEventureOrgSettings(org.id);
+
+  res.json({
+    organization: org,
+    settings,
+  });
+});
+
+router.put("/:orgId/app-settings", requireAuth, async (req, res) => {
+  const requestUser = getRequestUser(req);
+  const orgId = getOrgId(req.params.orgId);
+  const org = await prisma.organization.findUnique({ where: { id: orgId } });
+
+  if (!org) {
+    res.status(404).json({ error: "Organization not found" });
+    return;
+  }
+
+  if (!(await ensureOrgAdminAccess(requestUser, orgId))) {
+    res.status(403).json({ error: "Only organization admins can update settings" });
+    return;
+  }
+
+  const body = req.body as Record<string, unknown>;
+  const organizationPatch =
+    body.organization && typeof body.organization === "object" && !Array.isArray(body.organization)
+      ? buildOrgData(body.organization as Record<string, unknown>)
+      : {};
+  const settingsPatch =
+    body.settings && typeof body.settings === "object" && !Array.isArray(body.settings)
+      ? (body.settings as Partial<EventureOperationalSettings>)
+      : {};
+
+  const currentSettings = await loadEventureOrgSettings(org.id);
+  const mergedSettings = mergeEventureOperationalSettings({
+    ...currentSettings,
+    ...settingsPatch,
+    eventDefaults: {
+      ...currentSettings.eventDefaults,
+      ...(settingsPatch.eventDefaults ?? {}),
+    },
+    importSettings: {
+      ...currentSettings.importSettings,
+      ...(settingsPatch.importSettings ?? {}),
+    },
+    payments: {
+      ...currentSettings.payments,
+      ...(settingsPatch.payments ?? {}),
+    },
+    notifications: {
+      ...currentSettings.notifications,
+      ...(settingsPatch.notifications ?? {}),
+    },
+    security: {
+      ...currentSettings.security,
+      ...(settingsPatch.security ?? {}),
+    },
+    rollbackSettings: {
+      ...currentSettings.rollbackSettings,
+      ...(settingsPatch.rollbackSettings ?? {}),
+    },
+  });
+
+  const savedSettings = await saveEventureOrgSettings(org.id, mergedSettings);
+  const updatedOrg = Object.keys(organizationPatch).length > 0
+    ? await prisma.organization.update({ where: { id: org.id }, data: organizationPatch })
+    : org;
+
+  res.json({
+    organization: updatedOrg,
+    settings: mergeEventureOperationalSettings(savedSettings.settings as Partial<EventureOperationalSettings> | null | undefined),
+  });
+});
+
 // List all organizations
 router.get("/", requireAuth, async (_req, res) => {
   try {

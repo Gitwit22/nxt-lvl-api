@@ -43,6 +43,8 @@ export type ImportMode =
   | "master_list_with_event_assignment"
   | "create_event_then_assign";
 
+export type EventureImportScope = "ORG" | "EVENT";
+
 type ImportModeInput = ImportMode | LegacyImportMode;
 
 export type ConfirmRowDecision =
@@ -351,6 +353,10 @@ function usesEventAssignment(mode: ImportMode): boolean {
 
 function requiresExistingEventIdForPreview(mode: ImportMode): boolean {
   return mode === "master_list_with_event_assignment";
+}
+
+function resolveImportScope(eventId?: string | null): EventureImportScope {
+  return eventId ? "EVENT" : "ORG";
 }
 
 function defaultDecisionForStoredRow(stored: StoredSponsorImportRow): ConfirmRowDecision {
@@ -1836,6 +1842,7 @@ export async function previewSponsorImportForEvent(input: {
     return {
       importBatchId: importBatch.id,
       importType: "sponsor_master_list",
+      importScope: resolveImportScope(input.eventId),
       importFormat: importSource.importFormat,
       mode,
       eventId: input.eventId,
@@ -2303,6 +2310,7 @@ export async function confirmSponsorImportForEvent(input: {
 
     return {
       importBatchId: importBatch.id,
+      importScope: resolveImportScope(effectiveEventId),
       eventId: effectiveEventId,
       status,
       summary: {
@@ -2323,7 +2331,7 @@ export async function confirmSponsorImportForEvent(input: {
         failedRows,
       },
       nextActions: [
-        { label: "View Contacts & Sponsors", href: "/contacts" },
+        { label: "View Directory", href: "/directory" },
         ...(effectiveEventId ? [{ label: "View Event Sponsors", href: `/events/${effectiveEventId}/sponsors` }] : []),
         { label: "View Follow-Ups", href: "/follow-ups" },
       ],
