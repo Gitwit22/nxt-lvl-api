@@ -1,0 +1,577 @@
+import { prisma } from "../../../core/db/prisma.js";
+import { EventureServiceError } from "./eventure-error.js";
+
+type ConfirmPaymentInput = {
+  organizationId: string;
+  eventId: string;
+  contactCompanyId: string;
+  attendeeCount: number;
+  amountDue?: number;
+  amountPaid?: number;
+  paymentMethod?: string | null;
+  notes?: string | null;
+  actorUserId?: string;
+  forceRemoveNamedSlots?: boolean;
+};
+
+function readLabelList(raw: unknown): string[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is string => typeof value === "string").map((value) => value.trim().toLowerCase());
+}
+
+function resolveDefaultFlight(companyName: string, labels: unknown): "AM" | "PM" {
+  const normalizedCompany = companyName.trim().toLowerCase();
+  const hasDteLabel = readLabelList(labels).some((label) => label === "dte");
+  return normalizedCompany === "dte" || hasDteLabel ? "AM" : "PM";
+}
+
+async function ensureEventAndCompany(input: { organizationId: string; eventId: string; contactCompanyId: string }) {
+  const [event, eventSponsor] = await Promise.all([
+    prisma.eventureEvent.findFirst({
+      where: {
+        id: input.eventId,
+        organizationId: input.organizationId,
+        archivedAt: null,
+      },
+    }),
+    prisma.eventureEventSponsor.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        sponsorOrganizationId: input.contactCompanyId,
+        archivedAt: null,
+      },
+      include: {
+        sponsorOrganization: true,
+      },
+    }),
+  ]);
+
+  if (!event) {
+    throw new EventureServiceError("Event not found.", 404);
+  }
+
+  if (!eventSponsor?.sponsorOrganization) {
+    throw new EventureServiceError("Contact company not linked to this event.", 404);
+  }
+
+  return eventSponsor;
+}
+
+async function reconcileAttendeeSlots(input: {
+  organizationId: string;
+  eventId: string;
+  participantId: string;
+  companyName: string;
+  attendeeCount: number;
+  flightAssignment: string;
+  forceRemoveNamedSlots?: boolean;
+}) {
+  const existing = await prisma.eventureAttendeeSlot.findMany({
+    where: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      participantId: input.participantId,
+    },
+    orderBy: [{ slotNumber: "asc" }],
+  });
+
+  if (input.attendeeCount < 0) {
+    throw new EventureServiceError("attendeeCount must be zero or greater.", 400);
+  }
+
+  if (input.attendeeCount < existing.length) {
+    const toRemove = existing.filter((slot) => slot.slotNumber > input.attendeeCount);
+    const namedRemovals = toRemove.filter((slot) => !!slot.actualName?.trim());
+    if (namedRemovals.length > 0 && !input.forceRemoveNamedSlots) {
+      throw new EventureServiceError(
+        `Reducing attendee count removes ${namedRemovals.length} named attendee slot(s). Resubmit with forceRemoveNamedSlots=true to confirm.`,
+        409,
+      );
+    }
+
+    if (toRemove.length > 0) {
+      await prisma.eventureAttendeeSlot.deleteMany({
+        where: {
+          id: { in: toRemove.map((slot) => slot.id) },
+          organizationId: input.organizationId,
+        },
+      });
+    }
+  }
+
+  const survivors = await prisma.eventureAttendeeSlot.findMany({
+    where: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      participantId: input.participantId,
+    },
+    orderBy: [{ slotNumber: "asc" }],
+  });
+
+  for (const slot of survivors) {
+    await prisma.eventureAttendeeSlot.update({
+      where: { id: slot.id },
+      data: {
+        companyName: input.companyName,
+        displayName: `${input.companyName} Attendee ${slot.slotNumber}`,
+        flightAssignment: input.flightAssignment,
+      },
+    });
+  }
+
+  if (input.attendeeCount > survivors.length) {
+    const start = survivors.length + 1;
+    const createPayload = Array.from({ length: input.attendeeCount - survivors.length }, (_, index) => {
+      const slotNumber = start + index;
+      return {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: input.participantId,
+        companyName: input.companyName,
+        slotNumber,
+        displayName: `${input.companyName} Attendee ${slotNumber}`,
+        flightAssignment: input.flightAssignment,
+      };
+    });
+
+    await prisma.eventureAttendeeSlot.createMany({ data: createPayload });
+  }
+}
+
+export async function listPaymentsForEvent(organizationId: string, eventId: string) {
+  const sponsors = await prisma.eventureEventSponsor.findMany({
+    where: {
+      organizationId,
+      eventId,
+      archivedAt: null,
+    },
+    include: {
+      sponsorOrganization: {
+        include: {
+          contacts: {
+            where: { archivedAt: null },
+            orderBy: [{ isPrimary: "desc" }, { updatedAt: "desc" }],
+          },
+        },
+      },
+    },
+    orderBy: [{ sponsorOrganization: { name: "asc" } }],
+  });
+
+  const companyIds = sponsors.map((sponsor) => sponsor.sponsorOrganizationId);
+
+  const [payments, participants] = await Promise.all([
+    prisma.eventurePayment.findMany({
+      where: { organizationId, eventId, contactCompanyId: { in: companyIds } },
+      orderBy: [{ updatedAt: "desc" }],
+    }),
+    prisma.eventureParticipant.findMany({
+      where: { organizationId, eventId, contactCompanyId: { in: companyIds } },
+      orderBy: [{ updatedAt: "desc" }],
+    }),
+  ]);
+
+  const paymentByCompany = new Map<string, (typeof payments)[number]>();
+  for (const payment of payments) {
+    if (!paymentByCompany.has(payment.contactCompanyId)) {
+      paymentByCompany.set(payment.contactCompanyId, payment);
+    }
+  }
+
+  const participantByCompany = new Map<string, (typeof participants)[number]>();
+  for (const participant of participants) {
+    if (!participantByCompany.has(participant.contactCompanyId)) {
+      participantByCompany.set(participant.contactCompanyId, participant);
+    }
+  }
+
+  return sponsors.map((sponsor) => {
+    const payment = paymentByCompany.get(sponsor.sponsorOrganizationId) ?? null;
+    const participant = participantByCompany.get(sponsor.sponsorOrganizationId) ?? null;
+    const primaryContact = sponsor.sponsorOrganization.contacts[0] ?? null;
+
+    return {
+      contactCompanyId: sponsor.sponsorOrganizationId,
+      companyName: sponsor.sponsorOrganization.name,
+      contactName: primaryContact?.name ?? null,
+      email: primaryContact?.email ?? sponsor.sponsorOrganization.mainEmail ?? null,
+      phone: primaryContact?.phone ?? sponsor.sponsorOrganization.mainPhone ?? null,
+      labels: sponsor.sponsorOrganization.labels,
+      sponsorStatus: sponsor.sponsorOrganization.sponsorStatus,
+      payment,
+      participant,
+      convertedToParticipant: Boolean(participant?.paymentConfirmed),
+    };
+  });
+}
+
+export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInput) {
+  if (!Number.isInteger(input.attendeeCount) || input.attendeeCount < 0) {
+    throw new EventureServiceError("attendeeCount must be a non-negative integer.", 400);
+  }
+
+  const eventSponsor = await ensureEventAndCompany(input);
+  const companyName = eventSponsor.sponsorOrganization.name;
+
+  const result = await prisma.$transaction(async (tx) => {
+    const latestPayment = await tx.eventurePayment.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: input.contactCompanyId,
+      },
+      orderBy: [{ updatedAt: "desc" }],
+    });
+
+    const amountDue = input.amountDue ?? latestPayment?.amountDue ?? eventSponsor.committedAmount ?? 0;
+    const amountPaid = input.amountPaid ?? latestPayment?.amountPaid ?? eventSponsor.amountPaid ?? amountDue;
+
+    const payment = latestPayment
+      ? await tx.eventurePayment.update({
+        where: { id: latestPayment.id },
+        data: {
+          participantId: latestPayment.participantId,
+          amountDue,
+          amountPaid,
+          balance: amountDue - amountPaid,
+          paymentStatus: "confirmed",
+          paymentMethod: input.paymentMethod ?? latestPayment.paymentMethod,
+          paymentConfirmedAt: new Date(),
+          notes: input.notes ?? latestPayment.notes,
+        },
+      })
+      : await tx.eventurePayment.create({
+        data: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: input.contactCompanyId,
+          amountDue,
+          amountPaid,
+          balance: amountDue - amountPaid,
+          paymentStatus: "confirmed",
+          paymentMethod: input.paymentMethod ?? null,
+          paymentConfirmedAt: new Date(),
+          notes: input.notes ?? null,
+        },
+      });
+
+    await tx.eventurePaymentHistory.create({
+      data: {
+        organizationId: input.organizationId,
+        paymentId: payment.id,
+        paymentStatus: payment.paymentStatus,
+        amountDue: payment.amountDue,
+        amountPaid: payment.amountPaid,
+        balance: payment.balance,
+        paymentMethod: payment.paymentMethod,
+        paymentConfirmedAt: payment.paymentConfirmedAt,
+        notes: payment.notes,
+        changedByUserId: input.actorUserId ?? null,
+      },
+    });
+
+    const existingParticipant = await tx.eventureParticipant.findUnique({
+      where: {
+        organizationId_eventId_contactCompanyId: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: input.contactCompanyId,
+        },
+      },
+    });
+
+    const defaultFlight = resolveDefaultFlight(companyName, eventSponsor.sponsorOrganization.labels);
+    const chosenFlight = existingParticipant?.flightAssignment || defaultFlight;
+
+    const participant = existingParticipant
+      ? await tx.eventureParticipant.update({
+        where: { id: existingParticipant.id },
+        data: {
+          companyName,
+          paymentId: payment.id,
+          paymentConfirmed: true,
+          attendeeCount: input.attendeeCount,
+          status: "active",
+          flightAssignment: chosenFlight,
+        },
+      })
+      : await tx.eventureParticipant.create({
+        data: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: input.contactCompanyId,
+          companyName,
+          paymentId: payment.id,
+          paymentConfirmed: true,
+          attendeeCount: input.attendeeCount,
+          flightAssignment: chosenFlight,
+          status: "active",
+        },
+      });
+
+    await tx.eventurePayment.update({
+      where: { id: payment.id },
+      data: {
+        participantId: participant.id,
+      },
+    });
+
+    return { payment, participant };
+  });
+
+  await reconcileAttendeeSlots({
+    organizationId: input.organizationId,
+    eventId: input.eventId,
+    participantId: result.participant.id,
+    companyName: result.participant.companyName,
+    attendeeCount: input.attendeeCount,
+    flightAssignment: result.participant.flightAssignment,
+    forceRemoveNamedSlots: input.forceRemoveNamedSlots,
+  });
+
+  const [participant, slots] = await Promise.all([
+    prisma.eventureParticipant.findUnique({ where: { id: result.participant.id } }),
+    prisma.eventureAttendeeSlot.findMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: result.participant.id,
+      },
+      orderBy: [{ slotNumber: "asc" }],
+    }),
+  ]);
+
+  return {
+    payment: result.payment,
+    participant,
+    attendeeSlots: slots,
+  };
+}
+
+export async function listParticipantsForEvent(organizationId: string, eventId: string) {
+  return prisma.eventureParticipant.findMany({
+    where: {
+      organizationId,
+      eventId,
+    },
+    include: {
+      contactCompany: {
+        include: {
+          contacts: {
+            where: { archivedAt: null },
+            orderBy: [{ isPrimary: "desc" }, { updatedAt: "desc" }],
+          },
+        },
+      },
+      attendeeSlots: {
+        orderBy: [{ slotNumber: "asc" }],
+      },
+      payment: true,
+    },
+    orderBy: [{ companyName: "asc" }],
+  });
+}
+
+export async function updateParticipantFlightAssignment(input: {
+  organizationId: string;
+  eventId: string;
+  participantId: string;
+  flightAssignment: string;
+}) {
+  const participant = await prisma.eventureParticipant.findFirst({
+    where: {
+      id: input.participantId,
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+    },
+  });
+
+  if (!participant) {
+    throw new EventureServiceError("Participant not found.", 404);
+  }
+
+  const updated = await prisma.$transaction(async (tx) => {
+    const next = await tx.eventureParticipant.update({
+      where: { id: input.participantId },
+      data: { flightAssignment: input.flightAssignment },
+    });
+
+    await tx.eventureAttendeeSlot.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: input.participantId,
+      },
+      data: {
+        flightAssignment: input.flightAssignment,
+      },
+    });
+
+    return next;
+  });
+
+  return updated;
+}
+
+export async function updateAttendeeSlot(input: {
+  organizationId: string;
+  eventId: string;
+  slotId: string;
+  actualName?: string | null;
+  notes?: string | null;
+  checkedIn?: boolean;
+}) {
+  const slot = await prisma.eventureAttendeeSlot.findFirst({
+    where: {
+      id: input.slotId,
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+    },
+  });
+
+  if (!slot) {
+    throw new EventureServiceError("Attendee slot not found.", 404);
+  }
+
+  return prisma.eventureAttendeeSlot.update({
+    where: { id: input.slotId },
+    data: {
+      actualName: input.actualName === undefined ? slot.actualName : input.actualName,
+      notes: input.notes === undefined ? slot.notes : input.notes,
+      checkedIn: input.checkedIn === undefined ? slot.checkedIn : input.checkedIn,
+    },
+  });
+}
+
+export async function updateParticipantAttendeeCount(input: {
+  organizationId: string;
+  eventId: string;
+  participantId: string;
+  attendeeCount: number;
+  forceRemoveNamedSlots?: boolean;
+}) {
+  const participant = await prisma.eventureParticipant.findFirst({
+    where: {
+      id: input.participantId,
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+    },
+  });
+
+  if (!participant) {
+    throw new EventureServiceError("Participant not found.", 404);
+  }
+
+  await prisma.eventureParticipant.update({
+    where: { id: input.participantId },
+    data: {
+      attendeeCount: input.attendeeCount,
+    },
+  });
+
+  await reconcileAttendeeSlots({
+    organizationId: input.organizationId,
+    eventId: input.eventId,
+    participantId: input.participantId,
+    companyName: participant.companyName,
+    attendeeCount: input.attendeeCount,
+    flightAssignment: participant.flightAssignment,
+    forceRemoveNamedSlots: input.forceRemoveNamedSlots,
+  });
+
+  return prisma.eventureParticipant.findUnique({
+    where: { id: input.participantId },
+    include: {
+      attendeeSlots: {
+        orderBy: [{ slotNumber: "asc" }],
+      },
+      payment: true,
+    },
+  });
+}
+
+export async function listVolunteersForEvent(organizationId: string, eventId: string) {
+  return prisma.eventureEventVolunteerNeed.findMany({
+    where: {
+      organizationId,
+      eventId,
+      archivedAt: null,
+    },
+    orderBy: [{ roleName: "asc" }],
+  });
+}
+
+export async function listAssignmentsForEvent(organizationId: string, eventId: string) {
+  return prisma.eventureAssignment.findMany({
+    where: {
+      organizationId,
+      eventId,
+    },
+    include: {
+      participant: true,
+      attendeeSlot: true,
+      volunteerNeed: true,
+    },
+    orderBy: [{ createdAt: "desc" }],
+  });
+}
+
+export async function createAssignmentForEvent(input: {
+  organizationId: string;
+  eventId: string;
+  assignmentType?: string;
+  targetType: "participant" | "attendee_slot" | "volunteer" | "staff";
+  participantId?: string;
+  attendeeSlotId?: string;
+  volunteerNeedId?: string;
+  staffMemberName?: string;
+  title: string;
+  notes?: string | null;
+  actorUserId?: string;
+}) {
+  if (!input.title.trim()) {
+    throw new EventureServiceError("title is required.", 400);
+  }
+
+  if (!input.targetType) {
+    throw new EventureServiceError("targetType is required.", 400);
+  }
+
+  if (input.targetType === "participant" && !input.participantId) {
+    throw new EventureServiceError("participantId is required when targetType is participant.", 400);
+  }
+
+  if (input.targetType === "attendee_slot" && !input.attendeeSlotId) {
+    throw new EventureServiceError("attendeeSlotId is required when targetType is attendee_slot.", 400);
+  }
+
+  if (input.targetType === "volunteer" && !input.volunteerNeedId) {
+    throw new EventureServiceError("volunteerNeedId is required when targetType is volunteer.", 400);
+  }
+
+  if (input.targetType === "staff" && !input.staffMemberName?.trim()) {
+    throw new EventureServiceError("staffMemberName is required when targetType is staff.", 400);
+  }
+
+  return prisma.eventureAssignment.create({
+    data: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      assignmentType: input.assignmentType ?? "general",
+      targetType: input.targetType,
+      participantId: input.participantId,
+      attendeeSlotId: input.attendeeSlotId,
+      volunteerNeedId: input.volunteerNeedId,
+      staffMemberName: input.staffMemberName?.trim() || null,
+      title: input.title.trim(),
+      notes: input.notes ?? null,
+      createdByUserId: input.actorUserId ?? null,
+    },
+    include: {
+      participant: true,
+      attendeeSlot: true,
+      volunteerNeed: true,
+    },
+  });
+}

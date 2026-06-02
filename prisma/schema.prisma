@@ -1235,6 +1235,10 @@ model EventureEvent {
   sponsorshipPackages EventureSponsorshipPackage[]
   flightSlots         EventureEventFlightSlot[]
   volunteerNeeds      EventureEventVolunteerNeed[]
+  participants        EventureParticipant[]
+  participantPayments EventurePayment[]
+  attendeeSlots       EventureAttendeeSlot[]
+  assignments         EventureAssignment[]
   sponsorFollowUps    EventureSponsorFollowUp[]
   participationHistory EventParticipationHistory[]
   importBatches       EventureImportBatch[]
@@ -1321,6 +1325,7 @@ model EventureEventVolunteerNeed {
   updatedAt           DateTime @updatedAt
 
   event EventureEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  assignments EventureAssignment[]
 
   @@index([organizationId, eventId, status])
   @@index([organizationId, eventId, roleName])
@@ -1493,6 +1498,8 @@ model EventureSponsorOrganization {
   mainEmail           String?
   mainPhone           String?
   website             String?
+  labels              Json     @default("[]")
+  sponsorStatus       String?
   notes               String?  @db.Text
   sourceImportBatchId String?
   sourceImportRowId   String?
@@ -1503,6 +1510,8 @@ model EventureSponsorOrganization {
 
   contacts            EventureSponsorContact[]
   eventSponsors       EventureEventSponsor[]
+  participants        EventureParticipant[]
+  participantPayments EventurePayment[]
   yearHistory         EventureSponsorYearHistory[]
   followUps           EventureSponsorFollowUp[]
   participationHistory EventParticipationHistory[]
@@ -1772,6 +1781,135 @@ model EventureRegistrationPaymentLog {
 
   @@index([organizationId, registrationId, recordedAt])
   @@index([organizationId, paymentStatus, recordedAt])
+}
+
+model EventureParticipant {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  contactCompanyId    String
+  companyName         String
+  paymentId           String?
+  paymentConfirmed    Boolean  @default(false)
+  attendeeCount       Int      @default(0)
+  flightAssignment    String   @default("PM")
+  status              String   @default("pending")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event               EventureEvent               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  contactCompany      EventureSponsorOrganization @relation(fields: [contactCompanyId], references: [id], onDelete: Cascade)
+  payment             EventurePayment?            @relation("ParticipantPrimaryPayment", fields: [paymentId], references: [id], onDelete: SetNull)
+  attendeeSlots       EventureAttendeeSlot[]
+  assignments         EventureAssignment[]
+
+  @@unique([organizationId, eventId, contactCompanyId])
+  @@index([organizationId, eventId, paymentConfirmed])
+  @@index([organizationId, eventId, flightAssignment])
+  @@index([organizationId, paymentId])
+}
+
+model EventurePayment {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  contactCompanyId    String
+  participantId       String?
+  amountDue           Float    @default(0)
+  amountPaid          Float    @default(0)
+  balance             Float    @default(0)
+  paymentStatus       String   @default("pending")
+  paymentMethod       String?
+  paymentConfirmedAt  DateTime?
+  notes               String?  @db.Text
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event               EventureEvent               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  contactCompany      EventureSponsorOrganization @relation(fields: [contactCompanyId], references: [id], onDelete: Cascade)
+  primaryForParticipant EventureParticipant[]     @relation("ParticipantPrimaryPayment")
+  history             EventurePaymentHistory[]
+
+  @@index([organizationId, eventId, contactCompanyId])
+  @@index([organizationId, eventId, paymentStatus])
+  @@index([organizationId, participantId])
+}
+
+model EventurePaymentHistory {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  paymentId           String
+  paymentStatus       String
+  amountDue           Float    @default(0)
+  amountPaid          Float    @default(0)
+  balance             Float    @default(0)
+  paymentMethod       String?
+  paymentConfirmedAt  DateTime?
+  notes               String?  @db.Text
+  changedAt           DateTime @default(now())
+  changedByUserId     String?
+
+  payment             EventurePayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, paymentId, changedAt])
+}
+
+model EventureAttendeeSlot {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  participantId       String
+  companyName         String
+  slotNumber          Int
+  displayName         String
+  actualName          String?
+  flightAssignment    String   @default("PM")
+  checkedIn           Boolean  @default(false)
+  notes               String?  @db.Text
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event               EventureEvent       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  participant         EventureParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  assignments         EventureAssignment[]
+
+  @@unique([participantId, slotNumber])
+  @@index([organizationId, eventId, participantId])
+  @@index([organizationId, eventId, flightAssignment])
+}
+
+model EventureAssignment {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  assignmentType      String   @default("general")
+  targetType          String
+  participantId       String?
+  attendeeSlotId      String?
+  volunteerNeedId     String?
+  staffMemberName     String?
+  title               String
+  notes               String?  @db.Text
+  status              String   @default("open")
+  createdByUserId     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event               EventureEvent               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  participant         EventureParticipant?        @relation(fields: [participantId], references: [id], onDelete: SetNull)
+  attendeeSlot        EventureAttendeeSlot?       @relation(fields: [attendeeSlotId], references: [id], onDelete: SetNull)
+  volunteerNeed       EventureEventVolunteerNeed? @relation(fields: [volunteerNeedId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, eventId, targetType])
+  @@index([organizationId, eventId, status])
+  @@index([organizationId, participantId])
+  @@index([organizationId, attendeeSlotId])
+  @@index([organizationId, volunteerNeedId])
 }
 
 model EventureAuditLog {
