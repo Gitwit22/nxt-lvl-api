@@ -1422,7 +1422,7 @@ model EventureRegistration {
   checkInLogs           EventureCheckInLog[]
   paymentLogs           EventureRegistrationPaymentLog[]
 
-  @@unique([eventId, attendeeId])
+  @@unique([eventId, attendeeId, registrationType])
   @@index([organizationId, eventId, registrationStatus])
   @@index([organizationId, eventId, paymentStatus])
   @@index([organizationId, eventId, checkedIn])
