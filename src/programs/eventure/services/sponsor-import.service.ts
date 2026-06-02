@@ -2296,8 +2296,8 @@ export async function previewSponsorImportForEvent(input: {
       const targetReview =
         rowErrors.length > 0 ||
         duplicateWithinFile ||
-        sponsorMatch.action === "review" ||
-        matchedContact.action === "review";
+        sponsorMatch.action === "review";
+      const contactNeedsReview = matchedContact.action === "review";
       const sponsorOrganizationTarget: PreviewRowTarget = rowErrors.length > 0
         ? "skip"
         : targetReview
@@ -2305,7 +2305,9 @@ export async function previewSponsorImportForEvent(input: {
           : sponsorMatch.action;
       const sponsorContactTarget: PreviewRowTarget = !row.contactName && !row.contactEmail && !row.contactPhone
         ? "skip"
-        : targetReview
+        : contactNeedsReview
+          ? "review"
+          : targetReview
           ? "review"
           : matchedContact.action === "update"
             ? "update"
@@ -2834,67 +2836,63 @@ export async function confirmSponsorImportForEvent(input: {
           allowNameCompanyMatch: sponsorMatch.matchedBy === "normalized_name",
         });
 
-        if (contactMatch.action === "review") {
-          skippedRows += 1;
-          await updateImportRowStatus({
-            id: row.id,
-            status: "skipped",
-            errorMessage: "Contact match requires manual review.",
-          });
-          continue;
-        }
+        const shouldPersistContact = contactMatch.action !== "review";
 
         const matchedContact = contactMatch.sponsorContactId
           ? sponsorOrganization.contacts.find((contact) => contact.id === contactMatch.sponsorContactId)
           : undefined;
 
-        if (contactMatch.action === "update" && matchedContact) {
-          await updateSponsorContact({
-            id: matchedContact.id,
-            name: preferExisting(matchedContact.name, rowForMatch.contactName),
-            email: preferExisting(matchedContact.email, rowForMatch.contactEmail),
-            phone: preferExisting(matchedContact.phone, rowForMatch.contactPhone),
-            sourceImportBatchId: importBatch.id,
-            sourceImportRowId: row.id,
-            importSource: "sponsor_import",
-          });
-          sponsorContactsUpdated += 1;
-        } else {
-          await createSponsorContact({
-            organizationId: input.organizationId,
-            sponsorOrganizationId: sponsorOrganization.id,
-            name: rowForMatch.contactName || rowForMatch.companyName,
-            email: rowForMatch.contactEmail,
-            phone: rowForMatch.contactPhone,
-            isPrimary: true,
-            sourceImportBatchId: importBatch.id,
-            sourceImportRowId: row.id,
-            importSource: "sponsor_import",
-          });
-          sponsorContactsCreated += 1;
-        }
-
-        // Persist additional contacts parsed from multi-contact fields
-        for (const additionalContact of rowForMatch.additionalContacts) {
-          if (!additionalContact.name && !additionalContact.email && !additionalContact.phone) continue;
-          const existingAdditional = sponsorOrganization.contacts.find((c) => {
-            if (additionalContact.email && c.email?.toLowerCase() === additionalContact.email.toLowerCase()) return true;
-            if (additionalContact.name && c.name?.toLowerCase() === additionalContact.name.toLowerCase()) return true;
-            return false;
-          });
-          if (!existingAdditional) {
+        if (shouldPersistContact) {
+          if (contactMatch.action === "update" && matchedContact) {
+            await updateSponsorContact({
+              id: matchedContact.id,
+              name: preferExisting(matchedContact.name, rowForMatch.contactName),
+              email: preferExisting(matchedContact.email, rowForMatch.contactEmail),
+              phone: preferExisting(matchedContact.phone, rowForMatch.contactPhone),
+              sourceImportBatchId: importBatch.id,
+              sourceImportRowId: row.id,
+              importSource: "sponsor_import",
+            });
+            sponsorContactsUpdated += 1;
+          } else {
             await createSponsorContact({
               organizationId: input.organizationId,
               sponsorOrganizationId: sponsorOrganization.id,
-              name: additionalContact.name,
-              email: additionalContact.email,
-              phone: additionalContact.phone,
-              isPrimary: false,
+              name: rowForMatch.contactName || rowForMatch.companyName,
+              email: rowForMatch.contactEmail,
+              phone: rowForMatch.contactPhone,
+              isPrimary: true,
               sourceImportBatchId: importBatch.id,
               sourceImportRowId: row.id,
               importSource: "sponsor_import",
             });
             sponsorContactsCreated += 1;
+          }
+        }
+
+        if (shouldPersistContact) {
+          // Persist additional contacts parsed from multi-contact fields
+          for (const additionalContact of rowForMatch.additionalContacts) {
+            if (!additionalContact.name && !additionalContact.email && !additionalContact.phone) continue;
+            const existingAdditional = sponsorOrganization.contacts.find((c) => {
+              if (additionalContact.email && c.email?.toLowerCase() === additionalContact.email.toLowerCase()) return true;
+              if (additionalContact.name && c.name?.toLowerCase() === additionalContact.name.toLowerCase()) return true;
+              return false;
+            });
+            if (!existingAdditional) {
+              await createSponsorContact({
+                organizationId: input.organizationId,
+                sponsorOrganizationId: sponsorOrganization.id,
+                name: additionalContact.name,
+                email: additionalContact.email,
+                phone: additionalContact.phone,
+                isPrimary: false,
+                sourceImportBatchId: importBatch.id,
+                sourceImportRowId: row.id,
+                importSource: "sponsor_import",
+              });
+              sponsorContactsCreated += 1;
+            }
           }
         }
       }
