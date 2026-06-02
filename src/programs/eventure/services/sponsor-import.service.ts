@@ -2225,8 +2225,11 @@ export async function previewSponsorImportForEvent(input: {
   let duplicateRows = 0;
   let companiesDetected = 0;
   let contactsDetected = 0;
+  let primaryContactsDetected = 0;
+  let additionalContactsDetected = 0;
   let representativeNamesDetected = 0;
   let attendeeNamesDetected = 0;
+  let attendeeCandidatesDetected = 0;
   let eventSponsorsDetected = 0;
   let embeddedHistoryRecordsDetected = 0;
   let followUpsDetected = 0;
@@ -2345,8 +2348,13 @@ export async function previewSponsorImportForEvent(input: {
 
       if (sponsorOrganizationTarget !== "skip") companiesDetected += 1;
       if (sponsorContactTarget !== "skip") contactsDetected += 1;
+      if (sponsorContactTarget !== "skip" && (row.contactName || row.contactEmail || row.contactPhone)) {
+        primaryContactsDetected += 1;
+      }
+      additionalContactsDetected += row.additionalContacts.length;
       if (row.contactName) representativeNamesDetected += 1;
       if (row.attendeeNamesRaw && cleanCell(row.attendeeNamesRaw)) attendeeNamesDetected += 1;
+      attendeeCandidatesDetected += Number(Boolean(row.contactName || row.contactEmail)) + row.additionalContacts.length;
       if (eventSponsorTarget !== "skip") eventSponsorsDetected += 1;
       embeddedHistoryRecordsDetected += row.yearHistory.length;
       followUpsDetected += usesEventAssignment(mode) ? row.suggestedFollowUps.length : 0;
@@ -2475,14 +2483,18 @@ export async function previewSponsorImportForEvent(input: {
         duplicateRows,
         companiesDetected,
         contactsDetected,
+        primaryContactsDetected,
+        additionalContactsDetected,
         representativeNamesDetected,
         attendeeNamesDetected,
+        attendeeCandidatesDetected,
         eventSponsorsDetected,
         embeddedHistoryRecordsDetected,
         historySheetRecordsDetected: importSource.workbook?.historyRows.length ?? 0,
         historicalYearColumnsDetected: importSource.workbook?.embeddedHistoryYears ?? [],
         historyRecordsDetected: embeddedHistoryRecordsDetected + (importSource.workbook?.historyRows.length ?? 0),
         followUpsDetected,
+        paymentStatusRowsDetected,
         sponsorshipPackagesDetected: importSource.workbook?.sponsorLevels.length ?? 0,
         amFlightSlotsDetected: importSource.workbook?.flightSlots.filter((slot) => slot.flight === "AM").length ?? 0,
         pmFlightSlotsDetected: importSource.workbook?.flightSlots.filter((slot) => slot.flight === "PM").length ?? 0,
