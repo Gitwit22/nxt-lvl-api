@@ -238,6 +238,7 @@ router.post("/confirm", upload.single("file"), async (req, res) => {
       rowDecisions: readRowDecisions(req),
       createEvent: readCreateEvent(req),
       selectedTabs: readSelectedTabs(req),
+      representativesAsAttendees: req.body?.representativesAsAttendees === true || req.body?.representativesAsAttendees === "true",
     });
 
     res.status(201).json(result);

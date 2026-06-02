@@ -11,6 +11,7 @@ import {
   isImportRecordManuallyEdited,
   resolveSelectedTabs,
   validateRollbackConfirmationText,
+  splitCityStateZip,
 } from "../src/programs/eventure/services/sponsor-import.service.js";
 
 // ---------------------------------------------------------------------------
@@ -32,6 +33,7 @@ describe("cleanCell", () => {
   it("returns empty string for undefined", () => {
     expect(cleanCell(undefined)).toBe("");
   });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -52,6 +54,7 @@ describe("normalizeCompanyName", () => {
   it("strips punctuation", () => {
     expect(normalizeCompanyName("O'Brien & Sons, Ltd.")).toBe("o brien sons");
   });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -80,6 +83,7 @@ describe("normalizeHeaders", () => {
     expect(result[0]).toBe("Notes");
     expect(result[1]).toBe("NOTES__2");
   });
+
 });
 
 // ---------------------------------------------------------------------------
@@ -126,7 +130,6 @@ describe("inferPaymentStatus", () => {
     // "invoiced" does NOT contain "paid", should resolve to "invoiced"
     expect(inferPaymentStatus({ statusRaw: "invoiced" })).toBe("invoiced");
   });
-});
 
 // ---------------------------------------------------------------------------
 // parseYearValue
@@ -345,5 +348,82 @@ describe("resolveSelectedTabs", () => {
     );
 
     expect(selected.sponsorsList).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Year header regex variants including "2020 Y" format
+// ---------------------------------------------------------------------------
+describe("detectEmbeddedSponsorHistoryYears — extended variants", () => {
+    it.each([
+      ["2020 Y", 2020],
+      ["2021 Y", 2021],
+      ["2022 Yrs", 2022],
+      ["2023 Years", 2023],
+      ["2024 yr", 2024],
+      ["2025 year", 2025],
+      ["2020", 2020],
+      ["2020 YR", 2020],
+      ["2020 Year", 2020],
+    ])("detects year from header '%s' → %i", (header, expected) => {
+      const [year] = detectEmbeddedSponsorHistoryYears([header]);
+      expect(year).toBe(expected);
+    });
+
+    it.each([
+      "History 2020",
+      "2020 Amount",
+      "20201",
+      "20 Y",
+      "Representative",
+      "Company",
+    ])("does NOT detect year from header '%s'", (header) => {
+      const years = detectEmbeddedSponsorHistoryYears([header]);
+      expect(years).toHaveLength(0);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // splitCityStateZip
+  // ---------------------------------------------------------------------------
+  describe("splitCityStateZip", () => {
+    it("handles standard 'City, ST 12345' format", () => {
+      const result = splitCityStateZip("Austin, TX 78701");
+      expect(result.city).toBe("Austin");
+      expect(result.state).toBe("TX");
+      expect(result.zipCode).toBe("78701");
+    });
+
+    it("handles 'City, ST' without ZIP", () => {
+      const result = splitCityStateZip("Austin, TX");
+      expect(result.city).toBe("Austin");
+      expect(result.state).toBe("TX");
+      expect(result.zipCode).toBeUndefined();
+    });
+
+    it("handles city-only input", () => {
+      const result = splitCityStateZip("Austin");
+      expect(result.city).toBe("Austin");
+      expect(result.state).toBeUndefined();
+      expect(result.zipCode).toBeUndefined();
+    });
+
+    it("handles space-delimited 'City ST ZIP' without comma", () => {
+      const result = splitCityStateZip("Austin TX 78701");
+      expect(result.city).toBe("Austin");
+      expect(result.state).toBe("TX");
+      expect(result.zipCode).toBe("78701");
+    });
+
+    it("returns empty object for undefined/empty", () => {
+      expect(splitCityStateZip(undefined)).toEqual({});
+      expect(splitCityStateZip("")).toEqual({});
+      expect(splitCityStateZip("  ")).toEqual({});
+    });
+
+    it("handles ZIP+4 format", () => {
+      const result = splitCityStateZip("Austin, TX 78701-1234");
+      expect(result.zipCode).toBe("78701-1234");
+    });
   });
 });

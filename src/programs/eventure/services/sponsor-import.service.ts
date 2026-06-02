@@ -230,6 +230,7 @@ type ParsedSponsorRow = {
   contactName?: string;
   contactEmail?: string;
   contactPhone?: string;
+  additionalContacts: Array<{ name?: string; email?: string; phone?: string }>;
   sponsorshipPackage?: string;
   flightPreference?: string;
   logoStatus?: string;
@@ -574,7 +575,7 @@ function normalizeHeaderForYearDetection(value: string): string {
 
 function parseEmbeddedHistoryYearFromHeader(value: string): number | undefined {
   const normalized = normalizeHeaderForYearDetection(value);
-  const match = normalized.match(/^(20\d{2})(?:\s*(?:yr|year))?$/i);
+  const match = normalized.match(/^(20\d{2})(?:\s*(?:y|yr|yrs|year|years))?$/i);
   if (!match) return undefined;
   const year = Number.parseInt(match[1], 10);
   if (!Number.isFinite(year) || year < 2000 || year > 2099) return undefined;
@@ -655,20 +656,39 @@ function normalizeFlightPreference(value?: string): string | undefined {
   return undefined;
 }
 
-function splitCityStateZip(value?: string): { city?: string; state?: string; zipCode?: string } {
+export function splitCityStateZip(value?: string): { city?: string; state?: string; zipCode?: string } {
   if (!value) return {};
-  const parts = value.split(",").map((part) => part.trim()).filter(Boolean);
-  if (parts.length === 0) return {};
-  if (parts.length === 1) {
-    return { city: parts[0] };
+  const trimmed = value.trim();
+  if (!trimmed) return {};
+
+  // Extract ZIP code from anywhere in the string
+  const zipMatch = trimmed.match(/\b(\d{5}(?:-\d{4})?)\b/);
+  const zipCode = zipMatch?.[1];
+
+  // Try comma-delimited "City, ST ZIP" format
+  const parts = trimmed.split(",").map((p) => p.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const city = parts[0];
+    const stateZip = parts.slice(1).join(" ").trim();
+    const state = stateZip.replace(/\b\d{5}(?:-\d{4})?\b/, "").trim() || undefined;
+    return { city, state, zipCode };
   }
 
-  const city = parts[0];
-  const stateZip = parts.slice(1).join(" ").trim();
-  const zipMatch = stateZip.match(/\b(\d{5}(?:-\d{4})?)\b/);
-  const zipCode = zipMatch?.[1];
-  const state = stateZip.replace(/\b\d{5}(?:-\d{4})?\b/, "").trim() || undefined;
-  return { city, state, zipCode };
+  // Single part — try "City ST ZIP" space-delimited form
+  if (parts.length === 1) {
+    const remaining = trimmed.replace(/\b\d{5}(?:-\d{4})?\b/, "").trim();
+    // Check if last token looks like a 2-letter state code
+    const stateMatch = remaining.match(/\s+([A-Z]{2})$/i);
+    if (stateMatch) {
+      const state = stateMatch[1].toUpperCase();
+      const city = remaining.slice(0, remaining.length - stateMatch[0].length).trim() || undefined;
+      return { city, state, zipCode };
+    }
+    // Fallback: treat whole value as city
+    return { city: trimmed };
+  }
+
+  return {};
 }
 
 function classifyRowStatus(input: {
@@ -1203,9 +1223,25 @@ function parseRows(content: string): {
       });
     }
 
-    const contactName = representativeRaw.split(/\s+and\s+|;|\||\//i)[0]?.trim() || undefined;
-    const contactEmail = emailRaw?.split(/[;,|]/)[0]?.trim() || undefined;
-    const contactPhone = phoneRaw?.split(/[;|/]/)[0]?.trim() || undefined;
+    const splitNames = representativeRaw.split(/\s+and\s+|;|\||\//i).map((s) => s.trim()).filter(Boolean);
+    const splitEmails = emailRaw ? emailRaw.split(/[;,|]/).map((s) => s.trim()).filter(Boolean) : [];
+    const splitPhones = phoneRaw ? phoneRaw.split(/[;|/]/).map((s) => s.trim()).filter(Boolean) : [];
+
+    const contactName = splitNames[0] || undefined;
+    const contactEmail = splitEmails[0] || undefined;
+    const contactPhone = splitPhones[0] || undefined;
+
+    // Build additional contacts from remaining tokens (zip by position, longest array length)
+    const additionalCount = Math.max(splitNames.length, splitEmails.length, splitPhones.length) - 1;
+    const additionalContacts: Array<{ name?: string; email?: string; phone?: string }> = [];
+    for (let i = 1; i <= additionalCount; i++) {
+      const name = splitNames[i] || undefined;
+      const email = splitEmails[i] || undefined;
+      const phone = splitPhones[i] || undefined;
+      if (name || email || phone) {
+        additionalContacts.push({ name, email, phone });
+      }
+    }
 
     const sponsorshipPackage = getCell(row, mapped.sponsorshipPackage) || undefined;
     const flightPreference = normalizeFlightPreference(getCell(row, mapped.flight)) || undefined;
@@ -1275,6 +1311,7 @@ function parseRows(content: string): {
       contactName,
       contactEmail,
       contactPhone,
+      additionalContacts,
       sponsorshipPackage,
       flightPreference,
       logoStatus,
@@ -2485,6 +2522,7 @@ export async function confirmSponsorImportForEvent(input: {
   rowDecisions?: ConfirmRowDecisionInput[];
   createEvent?: ConfirmCreateEventInput;
   selectedTabs?: ImportSelectedTabsInput;
+  representativesAsAttendees?: boolean;
 }) {
   if (input.eventId) {
     const event = await getActiveEventForOrganization(input.organizationId, input.eventId);
@@ -2672,6 +2710,9 @@ export async function confirmSponsorImportForEvent(input: {
         contactName: stored.representativeName,
         contactEmail: stored.email,
         contactPhone: stored.phone,
+        additionalContacts: Array.isArray((stored as { additionalContacts?: unknown }).additionalContacts)
+          ? ((stored as { additionalContacts?: Array<{ name?: string; email?: string; phone?: string }> }).additionalContacts ?? [])
+          : [],
         sponsorshipPackage: stored.sponsorshipPackage,
         flightPreference: stored.flightPreference,
         logoStatus: stored.logoStatus,
@@ -2820,6 +2861,30 @@ export async function confirmSponsorImportForEvent(input: {
           });
           sponsorContactsCreated += 1;
         }
+
+        // Persist additional contacts parsed from multi-contact fields
+        for (const additionalContact of rowForMatch.additionalContacts) {
+          if (!additionalContact.name && !additionalContact.email && !additionalContact.phone) continue;
+          const existingAdditional = sponsorOrganization.contacts.find((c) => {
+            if (additionalContact.email && c.email?.toLowerCase() === additionalContact.email.toLowerCase()) return true;
+            if (additionalContact.name && c.name?.toLowerCase() === additionalContact.name.toLowerCase()) return true;
+            return false;
+          });
+          if (!existingAdditional) {
+            await createSponsorContact({
+              organizationId: input.organizationId,
+              sponsorOrganizationId: sponsorOrganization.id,
+              name: additionalContact.name,
+              email: additionalContact.email,
+              phone: additionalContact.phone,
+              isPrimary: false,
+              sourceImportBatchId: importBatch.id,
+              sourceImportRowId: row.id,
+              importSource: "sponsor_import",
+            });
+            sponsorContactsCreated += 1;
+          }
+        }
       }
 
       let eventSponsor: Awaited<ReturnType<typeof getEventSponsorByComposite>> | undefined;
@@ -2909,6 +2974,65 @@ export async function confirmSponsorImportForEvent(input: {
               notes: rowForMatch.notes,
             },
           });
+        }
+      }
+
+      // Optional: create attendees from representatives when toggle is enabled
+      if (input.representativesAsAttendees && usesEventAssignment(mode) && effectiveEventId) {
+        const repContacts = [
+          { name: rowForMatch.contactName, email: rowForMatch.contactEmail, phone: rowForMatch.contactPhone },
+          ...rowForMatch.additionalContacts,
+        ].filter((c) => c.name || c.email);
+
+        for (const rep of repContacts) {
+          if (!rep.name && !rep.email) continue;
+          const fullName = rep.name || rep.email || rowForMatch.companyName;
+          const nameParts = (rep.name ?? "").trim().split(/\s+/);
+          const firstName = nameParts.length > 1 ? nameParts.slice(0, -1).join(" ") : nameParts[0] ?? undefined;
+          const lastName = nameParts.length > 1 ? nameParts[nameParts.length - 1] : undefined;
+
+          let attendee = rep.email
+            ? await prisma.eventureAttendee.findFirst({
+                where: { organizationId: input.organizationId, email: rep.email },
+              })
+            : await prisma.eventureAttendee.findFirst({
+                where: { organizationId: input.organizationId, fullName },
+              });
+
+          if (!attendee) {
+            attendee = await prisma.eventureAttendee.create({
+              data: {
+                organizationId: input.organizationId,
+                fullName,
+                firstName,
+                lastName,
+                email: rep.email,
+                phone: rep.phone,
+                company: rowForMatch.companyName,
+                source: "sponsor_import",
+                createdByUserId: input.createdByUserId,
+              },
+            });
+          }
+
+          const existingReg = await prisma.eventureRegistration.findUnique({
+            where: { eventId_attendeeId: { eventId: effectiveEventId, attendeeId: attendee.id } },
+          });
+          if (!existingReg) {
+            await prisma.eventureRegistration.create({
+              data: {
+                organizationId: input.organizationId,
+                eventId: effectiveEventId,
+                attendeeId: attendee.id,
+                registrationType: "sponsor_representative",
+                registrationStatus: "registered",
+                paymentStatus: "not_applicable",
+                source: "sponsor_import",
+                importBatchId: importBatch.id,
+                createdByUserId: input.createdByUserId,
+              },
+            });
+          }
         }
       }
 
