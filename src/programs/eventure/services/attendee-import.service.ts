@@ -608,7 +608,7 @@ export async function confirmAttendeeImportForEvent(input: {
       registrationsCreated += 1;
 
       if (finalCompanyId && decision !== "leave_individual") {
-        const participant = await prisma.eventureParticipant.findFirst({
+        let participant = await prisma.eventureParticipant.findFirst({
           where: {
             organizationId: input.organizationId,
             eventId: input.eventId,
@@ -622,42 +622,59 @@ export async function confirmAttendeeImportForEvent(input: {
         });
 
         if (!participant) {
-          pendingParticipantRows += 1;
-        } else {
-          const currentMaxSlot = await prisma.eventureAttendeeSlot.findFirst({
-            where: {
-              organizationId: input.organizationId,
-              eventId: input.eventId,
-              participantId: participant.id,
-            },
-            orderBy: { slotNumber: "desc" },
-            select: { slotNumber: true },
-          });
-
-          const nextSlotNumber = (currentMaxSlot?.slotNumber ?? 0) + 1;
-          await prisma.eventureAttendeeSlot.create({
+          const participantCompanyName = finalCompanyName ?? normalized.ticketBuyer ?? "Participant Company";
+          participant = await prisma.eventureParticipant.create({
             data: {
               organizationId: input.organizationId,
               eventId: input.eventId,
-              participantId: participant.id,
-              companyName: participant.companyName,
-              slotNumber: nextSlotNumber,
-              displayName: normalized.attendeeName ?? `Attendee ${nextSlotNumber}`,
-              actualName: normalized.attendeeName,
+              contactCompanyId: finalCompanyId,
+              companyName: participantCompanyName,
+              paymentConfirmed: false,
+              attendeeCount: 0,
               flightAssignment: normalized.flight,
-              checkedIn: normalized.checkedIn,
-              notes: `Registration ${registration.id} imported from batch ${batch.id}`,
+              status: "pending",
             },
-          });
-          attendeeSlotsCreated += 1;
-
-          await prisma.eventureParticipant.update({
-            where: { id: participant.id },
-            data: {
-              attendeeCount: participant.attendeeCount + 1,
+            select: {
+              id: true,
+              companyName: true,
+              attendeeCount: true,
             },
           });
         }
+
+        const currentMaxSlot = await prisma.eventureAttendeeSlot.findFirst({
+          where: {
+            organizationId: input.organizationId,
+            eventId: input.eventId,
+            participantId: participant.id,
+          },
+          orderBy: { slotNumber: "desc" },
+          select: { slotNumber: true },
+        });
+
+        const nextSlotNumber = (currentMaxSlot?.slotNumber ?? 0) + 1;
+        await prisma.eventureAttendeeSlot.create({
+          data: {
+            organizationId: input.organizationId,
+            eventId: input.eventId,
+            participantId: participant.id,
+            companyName: participant.companyName,
+            slotNumber: nextSlotNumber,
+            displayName: normalized.attendeeName ?? `Attendee ${nextSlotNumber}`,
+            actualName: normalized.attendeeName,
+            flightAssignment: normalized.flight,
+            checkedIn: normalized.checkedIn,
+            notes: `Registration ${registration.id} imported from batch ${batch.id}`,
+          },
+        });
+        attendeeSlotsCreated += 1;
+
+        await prisma.eventureParticipant.update({
+          where: { id: participant.id },
+          data: {
+            attendeeCount: participant.attendeeCount + 1,
+          },
+        });
       }
 
       await prisma.eventureImportRow.update({

@@ -16,6 +16,7 @@ export type ParsedAttendeeImportRow = {
   eventName?: string;
   orderDate?: string;
   checkedIn?: boolean;
+  explicitFlight?: "AM" | "PM";
   flightAssignment: "AM" | "PM";
   status: AttendeeImportRowStatus;
   warnings: string[];
@@ -64,11 +65,16 @@ function truthy(value?: string): boolean {
 }
 
 export function detectFlight(input: {
+  explicitFlight?: "AM" | "PM";
   ticketType?: string;
   eventName?: string;
   ticketBuyer?: string;
   attendeeEmail?: string;
 }): "AM" | "PM" {
+  if (input.explicitFlight === "AM" || input.explicitFlight === "PM") {
+    return input.explicitFlight;
+  }
+
   const ticketType = (input.ticketType ?? "").toLowerCase();
   const eventName = (input.eventName ?? "").toLowerCase();
   const ticketBuyer = normalizeCompanyName(input.ticketBuyer ?? "");
@@ -80,6 +86,14 @@ export function detectFlight(input: {
   if (eventName.includes("pm")) return "PM";
   if (ticketBuyer.includes("dte") || attendeeEmail.includes("@dte")) return "AM";
   return "PM";
+}
+
+function parseFlightValue(value?: string): "AM" | "PM" | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  if (normalized.includes("am")) return "AM";
+  if (normalized.includes("pm")) return "PM";
+  return undefined;
 }
 
 function parseCsvLine(line: string): string[] {
@@ -164,6 +178,7 @@ function resolveHeaderIndex(headers: string[]): Record<string, number | undefine
     eventName: find(["event name", "event"]),
     orderDate: find(["order date", "purchase date", "date"]),
     checkedIn: find(["checked in", "check in"]),
+    flight: find(["flight", "flight assignment", "am/pm", "wave", "tee time"]),
   };
 }
 
@@ -199,6 +214,7 @@ export function parseCsvOrXlsx(input: {
     const eventName = normalizeName(getCell(row, mapping.eventName));
     const orderDate = getCell(row, mapping.orderDate);
     const checkedIn = truthy(getCell(row, mapping.checkedIn));
+    const explicitFlight = parseFlightValue(getCell(row, mapping.flight));
 
     const warnings: string[] = [];
     const errors: string[] = [];
@@ -220,6 +236,7 @@ export function parseCsvOrXlsx(input: {
     }
 
     const flightAssignment = detectFlight({
+      explicitFlight,
       ticketType,
       eventName,
       ticketBuyer,
@@ -238,6 +255,7 @@ export function parseCsvOrXlsx(input: {
       eventName,
       orderDate,
       checkedIn,
+      explicitFlight,
       flightAssignment,
       warnings,
       errors,

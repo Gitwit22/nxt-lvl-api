@@ -1857,6 +1857,33 @@ model EventurePaymentHistory {
   @@index([organizationId, paymentId, changedAt])
 }
 
+model EventureUnmatchedRevenue {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  importBatchId       String
+  importRowId         String?
+  rowNumber           Int?
+  sourceCompanyName   String?
+  ticketBuyer         String?
+  attendeeName        String?
+  attendeeEmail       String?
+  amount              Float?
+  description         String?
+  status              String   @default("unmatched")
+  matchedParticipantId String?
+  notes               String?  @db.Text
+  resolvedAt          DateTime?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  @@unique([importBatchId, rowNumber])
+  @@index([organizationId, eventId, status])
+  @@index([organizationId, eventId, createdAt])
+  @@index([organizationId, matchedParticipantId])
+}
+
 model EventureAttendeeSlot {
   id                  String   @id @default(cuid())
   organizationId      String
