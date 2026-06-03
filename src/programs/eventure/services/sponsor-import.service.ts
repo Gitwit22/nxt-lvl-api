@@ -3025,8 +3025,12 @@ export async function confirmSponsorImportForEvent(input: {
             });
           }
 
-          const existingReg = await prisma.eventureRegistration.findUnique({
-            where: { eventId_attendeeId: { eventId: effectiveEventId, attendeeId: attendee.id } },
+          const existingReg = await prisma.eventureRegistration.findFirst({
+            where: {
+              eventId: effectiveEventId,
+              attendeeId: attendee.id,
+              registrationType: "sponsor_representative",
+            },
           });
           if (!existingReg) {
             await prisma.eventureRegistration.create({
