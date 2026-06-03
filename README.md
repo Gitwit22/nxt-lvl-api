@@ -48,6 +48,22 @@ npm run prisma:generate
 npm run prisma:push
 ```
 
+## Render deployment note
+
+If this service is deployed on Render, set the Start Command to:
+
+```bash
+npm run start
+```
+
+The `start` script already runs:
+
+```bash
+npx prisma db push --accept-data-loss && node dist/index.js
+```
+
+If Render is configured with a manual command like `npx prisma db push && node dist/index.js`, deploys can fail on schema changes that Prisma marks as potential data-loss operations.
+
 ## Health check
 
 The service exposes `GET /api/health` and verifies database reachability before returning `ok: true`.
