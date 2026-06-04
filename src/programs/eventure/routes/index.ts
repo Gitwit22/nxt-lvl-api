@@ -15,6 +15,7 @@ import { eventureHistoryRouter } from "./history.routes.js";
 import { eventureSharedRouter } from "./shared.routes.js";
 import { ordersRouter } from "./orders.routes.js";
 import { eventureWorkspaceRouter } from "./workspace.routes.js";
+import { eventureTasksRouter } from "./tasks.routes.js";
 
 const router = express.Router();
 
@@ -46,6 +47,7 @@ router.use("/events/:eventId/unmatched-revenue", eventureUnmatchedRevenueRouter)
 router.use("/events/:eventId/sponsors", eventureSponsorsRouter);
 router.use("/events/:eventId/history", eventureHistoryRouter);
 router.use("/events/:eventId/workspace", eventureWorkspaceRouter);
+router.use("/tasks", eventureTasksRouter);
 router.use("/sponsor-imports", eventureSponsorImportsOrgRouter);
 router.use("/shared", eventureSharedRouter);
 router.use("/registrations", eventureRegistrationsRouter);

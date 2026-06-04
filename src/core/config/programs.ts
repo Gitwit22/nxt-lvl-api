@@ -4,11 +4,32 @@ export type ProgramDefinition = {
   allowedOrigins: string[];
 };
 
+function parseOriginsCsv(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((origin) => origin.trim().replace(/\/$/, ""))
+    .filter(Boolean);
+}
+
+const ENV_PROGRAM_ALLOWED_ORIGINS = parseOriginsCsv(process.env.PROGRAM_ALLOWED_ORIGINS);
+const ENV_EVENTURE_ALLOWED_ORIGINS = parseOriginsCsv(process.env.EVENTURE_ALLOWED_ORIGINS);
+
+const EVENTURE_ALLOWED_ORIGINS = Array.from(
+  new Set([
+    ...ENV_PROGRAM_ALLOWED_ORIGINS,
+    ...ENV_EVENTURE_ALLOWED_ORIGINS,
+  ]),
+);
+
 export const programs: Record<string, ProgramDefinition> = {
   eventure: {
     displayName: "Eventure",
     routePrefix: "/api/eventure",
-    allowedOrigins: ["https://eventure.nltops.com"],
+    allowedOrigins:
+      EVENTURE_ALLOWED_ORIGINS.length > 0
+        ? EVENTURE_ALLOWED_ORIGINS
+        : ["https://eventure.nltops.com", "http://localhost:5173"],
   },
   "financial-hub": {
     displayName: "Financial Hub",
