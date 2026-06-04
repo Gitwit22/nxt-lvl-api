@@ -23,6 +23,21 @@ export type ParsedAttendeeImportRow = {
   errors: string[];
 };
 
+const HEADER_ALIASES = {
+  attendeeName: ["attendee name", "full name", "attendee", "name", "registrant"],
+  attendeeFirstName: ["attendee first", "first name", "registrant first"],
+  attendeeLastName: ["attendee last", "last name", "registrant last"],
+  attendeeEmail: ["attendee email", "email", "email address"],
+  attendeePhone: ["attendee phone", "phone", "mobile", "cell"],
+  ticketBuyer: ["ticket buyer", "buyer", "purchaser", "company", "company name"],
+  ticketBuyerEmail: ["ticket buyer email", "buyer email", "purchaser email", "billing email"],
+  ticketType: ["ticket type", "registration type", "type", "package", "registration"],
+  eventName: ["event name", "event"],
+  orderDate: ["order date", "purchase date", "date", "order created"],
+  checkedIn: ["checked in", "check in"],
+  flight: ["flight", "flight assignment", "am/pm", "wave", "tee time"],
+} as const;
+
 function toStringValue(value: unknown): string | undefined {
   if (typeof value === "string") {
     const cleaned = cleanCell(value);
@@ -136,25 +151,82 @@ function parseCsv(content: string): { headers: string[]; rows: string[][] } {
     return { headers: [], rows: [] };
   }
 
-  const headers = parseCsvLine(lines[0]);
-  const rows = lines.slice(1).map((line) => parseCsvLine(line));
-  return { headers, rows };
+  const grid = lines.map((line) => parseCsvLine(line));
+  return parseSheetRows(grid as unknown[][]);
 }
 
-function parseSheetRows(grid: unknown[][]): { headers: string[]; rows: string[][] } {
-  if (grid.length === 0) return { headers: [], rows: [] };
-  const headers = (grid[0] ?? []).map((cell) => toStringValue(cell) ?? "");
-  const rows = grid.slice(1).map((row) => row.map((cell) => toStringValue(cell) ?? ""));
-  return { headers, rows };
+function scoreHeaderRow(headers: string[]): number {
+  const normalized = normalizeHeaders(headers);
+  let score = 0;
+  for (const aliases of Object.values(HEADER_ALIASES)) {
+    const hasMatch = aliases.some((alias) => normalized.some((header) => header.includes(alias)));
+    if (hasMatch) {
+      score += 1;
+    }
+  }
+  return score;
+}
+
+function parseSheetRows(grid: unknown[][]): { headers: string[]; rows: string[][]; headerScore: number } {
+  if (grid.length === 0) return { headers: [], rows: [], headerScore: 0 };
+
+  let bestHeaderIndex = -1;
+  let bestHeaderScore = 0;
+  const scanLimit = Math.min(grid.length, 40);
+
+  for (let rowIndex = 0; rowIndex < scanLimit; rowIndex += 1) {
+    const candidate = (grid[rowIndex] ?? []).map((cell) => toStringValue(cell) ?? "").map((cell) => cell.trim());
+    if (candidate.length === 0) continue;
+    const nonEmptyCount = candidate.filter((cell) => cell.length > 0).length;
+    if (nonEmptyCount < 2) continue;
+
+    const score = scoreHeaderRow(candidate);
+    if (score > bestHeaderScore) {
+      bestHeaderScore = score;
+      bestHeaderIndex = rowIndex;
+    }
+  }
+
+  const headerIndex = bestHeaderIndex >= 0 ? bestHeaderIndex : 0;
+  const headers = (grid[headerIndex] ?? []).map((cell) => toStringValue(cell) ?? "");
+  const rows = grid
+    .slice(headerIndex + 1)
+    .map((row) => row.map((cell) => toStringValue(cell) ?? ""))
+    .filter((row) => row.some((cell) => cell.trim().length > 0));
+
+  return { headers, rows, headerScore: bestHeaderScore };
 }
 
 function parseWorkbook(buffer: Buffer): { headers: string[]; rows: string[][] } {
   const workbook = XLSX.read(buffer, { type: "buffer" });
-  const firstSheetName = workbook.SheetNames[0];
-  if (!firstSheetName) return { headers: [], rows: [] };
-  const sheet = workbook.Sheets[firstSheetName];
-  const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false }) as unknown[][];
-  return parseSheetRows(grid);
+  if (workbook.SheetNames.length === 0) return { headers: [], rows: [] };
+
+  let best: { headers: string[]; rows: string[][]; headerScore: number } | null = null;
+  for (const sheetName of workbook.SheetNames) {
+    const sheet = workbook.Sheets[sheetName];
+    if (!sheet) continue;
+    const grid = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false }) as unknown[][];
+    const parsed = parseSheetRows(grid);
+    if (parsed.headers.length === 0 || parsed.rows.length === 0) continue;
+
+    if (
+      !best
+      || parsed.headerScore > best.headerScore
+      || (parsed.headerScore === best.headerScore && parsed.rows.length > best.rows.length)
+    ) {
+      best = parsed;
+    }
+  }
+
+  if (!best) {
+    const fallbackSheet = workbook.Sheets[workbook.SheetNames[0] as string];
+    if (!fallbackSheet) return { headers: [], rows: [] };
+    const fallbackGrid = XLSX.utils.sheet_to_json(fallbackSheet, { header: 1, raw: false }) as unknown[][];
+    const fallback = parseSheetRows(fallbackGrid);
+    return { headers: fallback.headers, rows: fallback.rows };
+  }
+
+  return { headers: best.headers, rows: best.rows };
 }
 
 function resolveHeaderIndex(headers: string[]): Record<string, number | undefined> {
@@ -169,16 +241,18 @@ function resolveHeaderIndex(headers: string[]): Record<string, number | undefine
   };
 
   return {
-    attendeeName: find(["attendee name", "name", "full name", "attendee"]),
-    attendeeEmail: find(["attendee email", "email"]),
-    attendeePhone: find(["attendee phone", "phone"]),
-    ticketBuyer: find(["ticket buyer", "buyer", "company"]),
-    ticketBuyerEmail: find(["ticket buyer email", "buyer email", "purchaser email"]),
-    ticketType: find(["ticket type", "registration type", "type"]),
-    eventName: find(["event name", "event"]),
-    orderDate: find(["order date", "purchase date", "date"]),
-    checkedIn: find(["checked in", "check in"]),
-    flight: find(["flight", "flight assignment", "am/pm", "wave", "tee time"]),
+    attendeeName: find([...HEADER_ALIASES.attendeeName]),
+    attendeeFirstName: find([...HEADER_ALIASES.attendeeFirstName]),
+    attendeeLastName: find([...HEADER_ALIASES.attendeeLastName]),
+    attendeeEmail: find([...HEADER_ALIASES.attendeeEmail]),
+    attendeePhone: find([...HEADER_ALIASES.attendeePhone]),
+    ticketBuyer: find([...HEADER_ALIASES.ticketBuyer]),
+    ticketBuyerEmail: find([...HEADER_ALIASES.ticketBuyerEmail]),
+    ticketType: find([...HEADER_ALIASES.ticketType]),
+    eventName: find([...HEADER_ALIASES.eventName]),
+    orderDate: find([...HEADER_ALIASES.orderDate]),
+    checkedIn: find([...HEADER_ALIASES.checkedIn]),
+    flight: find([...HEADER_ALIASES.flight]),
   };
 }
 
@@ -205,7 +279,10 @@ export function parseCsvOrXlsx(input: {
 
   const mapping = resolveHeaderIndex(parsed.headers);
   const rows: ParsedAttendeeImportRow[] = parsed.rows.map((row, rowIndex) => {
-    const attendeeName = normalizeName(getCell(row, mapping.attendeeName));
+    const attendeeFirstName = normalizeName(getCell(row, mapping.attendeeFirstName));
+    const attendeeLastName = normalizeName(getCell(row, mapping.attendeeLastName));
+    const attendeeName = normalizeName(getCell(row, mapping.attendeeName))
+      ?? normalizeName([attendeeFirstName, attendeeLastName].filter(Boolean).join(" "));
     const attendeeEmail = normalizeEmail(getCell(row, mapping.attendeeEmail));
     const attendeePhone = cleanPhone(getCell(row, mapping.attendeePhone));
     const ticketBuyer = normalizeName(getCell(row, mapping.ticketBuyer));
