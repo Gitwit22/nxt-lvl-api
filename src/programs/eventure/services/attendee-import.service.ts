@@ -54,6 +54,13 @@ export type AttendeeImportPreviewRow = {
     confidence: number;
     reason: string;
   };
+  existingAttendee?: {
+    id: string;
+    fullName: string;
+    email?: string;
+    phone?: string;
+    company?: string;
+  };
   warnings: string[];
   errors: string[];
 };
@@ -165,6 +172,132 @@ function isWeakCompanyMatchStatus(status?: string): status is AttendeeImportMatc
   return WEAK_COMPANY_MATCH_STATUSES.includes(status as AttendeeImportMatchStatus);
 }
 
+function splitAttendeeName(attendeeName?: string): { firstName?: string; lastName?: string } {
+  if (!attendeeName) return {};
+  const parts = attendeeName.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return {};
+  if (parts.length === 1) {
+    return { firstName: parts[0] };
+  }
+
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(" "),
+  };
+}
+
+async function findExistingAttendee(input: {
+  organizationId: string;
+  attendeeEmail?: string;
+  attendeePhone?: string;
+}) {
+  if (input.attendeeEmail) {
+    const existingByEmail = await prisma.eventureAttendee.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        email: {
+          equals: input.attendeeEmail,
+          mode: "insensitive",
+        },
+      },
+    });
+
+    if (existingByEmail) return existingByEmail;
+  }
+
+  if (input.attendeePhone) {
+    const existingByPhone = await prisma.eventureAttendee.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        phone: input.attendeePhone,
+      },
+    });
+
+    if (existingByPhone) return existingByPhone;
+  }
+
+  return null;
+}
+
+function serializeExistingAttendee(attendee: {
+  id: string;
+  fullName: string;
+  email: string | null;
+  phone: string | null;
+  company: string | null;
+}) {
+  return {
+    id: attendee.id,
+    fullName: attendee.fullName,
+    email: attendee.email ?? undefined,
+    phone: attendee.phone ?? undefined,
+    company: attendee.company ?? undefined,
+  };
+}
+
+async function upsertAttendeeFromImport(input: {
+  organizationId: string;
+  createdByUserId: string;
+  attendeeName?: string;
+  attendeeEmail?: string;
+  attendeePhone?: string;
+  company?: string;
+  importBatchId: string;
+  importRowId: string;
+}) {
+  const existing = await findExistingAttendee({
+    organizationId: input.organizationId,
+    attendeeEmail: input.attendeeEmail,
+    attendeePhone: input.attendeePhone,
+  });
+
+  const nameParts = splitAttendeeName(input.attendeeName);
+  const notes = `Imported from attendee batch ${input.importBatchId} row ${input.importRowId}`;
+
+  if (existing) {
+    const nextFullName = input.attendeeName?.trim() || existing.fullName;
+    const nextCompany = input.company?.trim();
+
+    const updateData: Prisma.EventureAttendeeUpdateInput = {
+      fullName: nextFullName,
+      firstName: nameParts.firstName ?? existing.firstName ?? undefined,
+      lastName: nameParts.lastName ?? existing.lastName ?? undefined,
+      email: input.attendeeEmail ?? existing.email ?? undefined,
+      phone: input.attendeePhone ?? existing.phone ?? undefined,
+      notes: existing.notes ? `${existing.notes}\n${notes}` : notes,
+      source: "import",
+    };
+
+    if (nextCompany) {
+      updateData.company = nextCompany;
+    }
+
+    const attendee = await prisma.eventureAttendee.update({
+      where: { id: existing.id },
+      data: updateData,
+    });
+
+    return { attendee, created: false };
+  }
+
+  const attendee = await prisma.eventureAttendee.create({
+    data: {
+      organizationId: input.organizationId,
+      firstName: nameParts.firstName,
+      lastName: nameParts.lastName,
+      fullName: input.attendeeName || "Unknown attendee",
+      email: input.attendeeEmail,
+      phone: input.attendeePhone,
+      company: input.company,
+      source: "import",
+      notes,
+      createdByUserId: input.createdByUserId,
+    },
+  });
+
+  return { attendee, created: true };
+}
+
 export async function previewAttendeeImportForEvent(input: {
   organizationId: string;
   eventId: string;
@@ -205,7 +338,7 @@ export async function previewAttendeeImportForEvent(input: {
   const companies = await buildCompanyCandidates(input.organizationId);
 
   const duplicateKeys = new Set<string>();
-  const previewRows = parsed.rows.map((row) => {
+  const previewRows = await Promise.all(parsed.rows.map(async (row) => {
     const match = matchAttendeeCompany({
       candidates: companies,
       ticketBuyer: row.ticketBuyer,
@@ -233,6 +366,16 @@ export async function previewAttendeeImportForEvent(input: {
       warnings.push("Duplicate attendee email + ticket type in current upload.");
     }
 
+    // Existing attendee lookup is used to show the user what this import would update.
+    // The confirm step already performs the write; this is purely a preview/diff aid.
+    const existingAttendee = row.attendeeEmail || row.attendeePhone
+      ? await findExistingAttendee({
+          organizationId: input.organizationId,
+          attendeeEmail: row.attendeeEmail,
+          attendeePhone: row.attendeePhone,
+        })
+      : null;
+
     const status = rowStatusFromIssues(warnings, errors, duplicate);
 
     return {
@@ -259,10 +402,11 @@ export async function previewAttendeeImportForEvent(input: {
         confidence: match.confidence,
         reason: match.reason,
       },
+      existingAttendee: existingAttendee ? serializeExistingAttendee(existingAttendee) : undefined,
       warnings,
       errors,
     };
-  });
+  }));
 
   const importBatch = await prisma.eventureImportBatch.create({
     data: {
@@ -367,61 +511,6 @@ function readNormalizedRow(row: { normalizedData: unknown }) {
     suggestedCompanyName: typeof suggestedCompany.name === "string" ? suggestedCompany.name : undefined,
     suggestedMatchStatus: typeof suggestedCompany.matchStatus === "string" ? suggestedCompany.matchStatus : undefined,
   };
-}
-
-async function findOrCreateAttendee(input: {
-  organizationId: string;
-  createdByUserId: string;
-  attendeeName?: string;
-  attendeeEmail?: string;
-  attendeePhone?: string;
-  company?: string;
-  importBatchId: string;
-  importRowId: string;
-}) {
-  const email = input.attendeeEmail;
-  const phone = input.attendeePhone;
-
-  if (email) {
-    const existingByEmail = await prisma.eventureAttendee.findFirst({
-      where: {
-        organizationId: input.organizationId,
-        email: {
-          equals: email,
-          mode: "insensitive",
-        },
-      },
-    });
-    if (existingByEmail) return existingByEmail;
-  }
-
-  if (phone) {
-    const existingByPhone = await prisma.eventureAttendee.findFirst({
-      where: {
-        organizationId: input.organizationId,
-        phone,
-      },
-    });
-    if (existingByPhone) return existingByPhone;
-  }
-
-  const [firstName, ...rest] = (input.attendeeName ?? "").trim().split(" ");
-  const lastName = rest.length > 0 ? rest.join(" ") : undefined;
-
-  return prisma.eventureAttendee.create({
-    data: {
-      organizationId: input.organizationId,
-      firstName: firstName || undefined,
-      lastName,
-      fullName: input.attendeeName || "Unknown attendee",
-      email,
-      phone,
-      company: input.company,
-      source: "import",
-      notes: `Imported from attendee batch ${input.importBatchId} row ${input.importRowId}`,
-      createdByUserId: input.createdByUserId,
-    },
-  });
 }
 
 export async function confirmAttendeeImportForEvent(input: {
@@ -557,7 +646,7 @@ export async function confirmAttendeeImportForEvent(input: {
         }
       }
 
-      const attendee = await findOrCreateAttendee({
+      const attendeeResult = await upsertAttendeeFromImport({
         organizationId: input.organizationId,
         createdByUserId: input.createdByUserId,
         attendeeName: normalized.attendeeName,
@@ -567,8 +656,9 @@ export async function confirmAttendeeImportForEvent(input: {
         importBatchId: batch.id,
         importRowId: row.id,
       });
+      const attendee = attendeeResult.attendee;
 
-      if (attendee.createdAt.getTime() === attendee.updatedAt.getTime()) {
+      if (attendeeResult.created) {
         attendeesCreated += 1;
       }
 
@@ -580,32 +670,44 @@ export async function confirmAttendeeImportForEvent(input: {
           attendeeId: attendee.id,
           registrationType: ticketType,
         },
-        select: { id: true },
+        select: { id: true, notes: true },
       });
 
+      let registrationId: string;
+      let registrationWasCreated = false;
       if (existingRegistration) {
-        duplicatesPrevented += 1;
-        await prisma.eventureImportRow.update({ where: { id: row.id }, data: { status: "duplicate", errorMessage: "Registration already exists for attendee and ticket type." } });
-        continue;
+        await prisma.eventureRegistration.update({
+          where: { id: existingRegistration.id },
+          data: {
+            registrationStatus: normalized.checkedIn ? "attended" : "registered",
+            checkedIn: normalized.checkedIn,
+            checkedInAt: normalized.checkedIn ? new Date() : null,
+            importBatchId: batch.id,
+            notes: rowDecisionInput?.notes ?? existingRegistration.notes,
+          },
+        });
+        registrationId = existingRegistration.id;
+      } else {
+        const registration = await prisma.eventureRegistration.create({
+          data: {
+            organizationId: input.organizationId,
+            eventId: input.eventId,
+            attendeeId: attendee.id,
+            registrationType: ticketType,
+            registrationStatus: normalized.checkedIn ? "attended" : "registered",
+            paymentStatus: "pending",
+            checkedIn: normalized.checkedIn,
+            checkedInAt: normalized.checkedIn ? new Date() : null,
+            source: "import",
+            importBatchId: batch.id,
+            notes: rowDecisionInput?.notes,
+            createdByUserId: input.createdByUserId,
+          },
+        });
+        registrationId = registration.id;
+        registrationWasCreated = true;
+        registrationsCreated += 1;
       }
-
-      const registration = await prisma.eventureRegistration.create({
-        data: {
-          organizationId: input.organizationId,
-          eventId: input.eventId,
-          attendeeId: attendee.id,
-          registrationType: ticketType,
-          registrationStatus: normalized.checkedIn ? "attended" : "registered",
-          paymentStatus: "pending",
-          checkedIn: normalized.checkedIn,
-          checkedInAt: normalized.checkedIn ? new Date() : null,
-          source: "import",
-          importBatchId: batch.id,
-          notes: rowDecisionInput?.notes,
-          createdByUserId: input.createdByUserId,
-        },
-      });
-      registrationsCreated += 1;
 
       if (finalCompanyId && decision !== "leave_individual") {
         let participant = await prisma.eventureParticipant.findFirst({
@@ -640,48 +742,88 @@ export async function confirmAttendeeImportForEvent(input: {
               attendeeCount: true,
             },
           });
+        } else if (finalCompanyName && participant.companyName !== finalCompanyName) {
+          participant = await prisma.eventureParticipant.update({
+            where: { id: participant.id },
+            data: {
+              companyName: finalCompanyName,
+              flightAssignment: normalized.flight,
+            },
+            select: {
+              id: true,
+              companyName: true,
+              attendeeCount: true,
+            },
+          });
         }
 
-        const currentMaxSlot = await prisma.eventureAttendeeSlot.findFirst({
+        const existingSlot = await prisma.eventureAttendeeSlot.findFirst({
           where: {
             organizationId: input.organizationId,
             eventId: input.eventId,
             participantId: participant.id,
+            OR: [
+              { notes: { contains: registrationId } },
+              ...(normalized.attendeeName ? [{ actualName: normalized.attendeeName }] : []),
+            ],
           },
-          orderBy: { slotNumber: "desc" },
-          select: { slotNumber: true },
+          orderBy: { slotNumber: "asc" },
         });
 
-        const nextSlotNumber = (currentMaxSlot?.slotNumber ?? 0) + 1;
-        await prisma.eventureAttendeeSlot.create({
-          data: {
-            organizationId: input.organizationId,
-            eventId: input.eventId,
-            participantId: participant.id,
-            companyName: participant.companyName,
-            slotNumber: nextSlotNumber,
-            displayName: normalized.attendeeName ?? `Attendee ${nextSlotNumber}`,
-            actualName: normalized.attendeeName,
-            flightAssignment: normalized.flight,
-            checkedIn: normalized.checkedIn,
-            notes: `Registration ${registration.id} imported from batch ${batch.id}`,
-          },
-        });
-        attendeeSlotsCreated += 1;
+        if (existingSlot) {
+          await prisma.eventureAttendeeSlot.update({
+            where: { id: existingSlot.id },
+            data: {
+              companyName: participant.companyName,
+              displayName: normalized.attendeeName ?? existingSlot.displayName,
+              actualName: normalized.attendeeName ?? existingSlot.actualName,
+              flightAssignment: normalized.flight,
+              checkedIn: normalized.checkedIn,
+              notes: `Registration ${registrationId} imported from batch ${batch.id}`,
+            },
+          });
+        } else {
+          const currentMaxSlot = await prisma.eventureAttendeeSlot.findFirst({
+            where: {
+              organizationId: input.organizationId,
+              eventId: input.eventId,
+              participantId: participant.id,
+            },
+            orderBy: { slotNumber: "desc" },
+            select: { slotNumber: true },
+          });
 
-        await prisma.eventureParticipant.update({
-          where: { id: participant.id },
-          data: {
-            attendeeCount: participant.attendeeCount + 1,
-          },
-        });
+          const nextSlotNumber = (currentMaxSlot?.slotNumber ?? 0) + 1;
+          await prisma.eventureAttendeeSlot.create({
+            data: {
+              organizationId: input.organizationId,
+              eventId: input.eventId,
+              participantId: participant.id,
+              companyName: participant.companyName,
+              slotNumber: nextSlotNumber,
+              displayName: normalized.attendeeName ?? `Attendee ${nextSlotNumber}`,
+              actualName: normalized.attendeeName,
+              flightAssignment: normalized.flight,
+              checkedIn: normalized.checkedIn,
+              notes: `Registration ${registrationId} imported from batch ${batch.id}`,
+            },
+          });
+          attendeeSlotsCreated += 1;
+
+          await prisma.eventureParticipant.update({
+            where: { id: participant.id },
+            data: {
+              attendeeCount: participant.attendeeCount + 1,
+            },
+          });
+        }
       }
 
       await prisma.eventureImportRow.update({
         where: { id: row.id },
         data: {
-          status: "imported",
-          createdRegistrationId: registration.id,
+          status: existingRegistration || !registrationWasCreated ? "updated" : "imported",
+          createdRegistrationId: registrationId,
           matchedAttendeeId: attendee.id,
           errorMessage: null,
         },
