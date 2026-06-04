@@ -28,7 +28,7 @@ const HEADER_ALIASES = {
   attendeeFirstName: ["attendee first", "first name", "registrant first"],
   attendeeLastName: ["attendee last", "last name", "registrant last"],
   attendeeEmail: ["attendee email", "email", "email address"],
-  attendeePhone: ["attendee phone", "phone", "mobile", "cell"],
+  attendeePhone: ["attendee phone", "phone", "mobile"],
   ticketBuyer: ["ticket buyer", "buyer", "purchaser", "company", "company name"],
   ticketBuyerEmail: ["ticket buyer email", "buyer email", "purchaser email", "billing email"],
   ticketType: ["ticket type", "registration type", "type", "package", "registration"],
@@ -156,10 +156,14 @@ function parseCsv(content: string): { headers: string[]; rows: string[][] } {
 }
 
 function scoreHeaderRow(headers: string[]): number {
-  const normalized = normalizeHeaders(headers);
+  const normalized = normalizeHeaders(headers).map((header) => header.toLowerCase().trim());
   let score = 0;
   for (const aliases of Object.values(HEADER_ALIASES)) {
-    const hasMatch = aliases.some((alias) => normalized.some((header) => header.includes(alias)));
+    const hasMatch = aliases.some((alias) => {
+      const escapedAlias = alias.toLowerCase().trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const tokenPattern = new RegExp(`(^|[^a-z0-9])${escapedAlias}([^a-z0-9]|$)`, "i");
+      return normalized.some((header) => tokenPattern.test(header));
+    });
     if (hasMatch) {
       score += 1;
     }
@@ -185,6 +189,16 @@ function parseSheetRows(grid: unknown[][]): { headers: string[]; rows: string[][
       bestHeaderScore = score;
       bestHeaderIndex = rowIndex;
     }
+  }
+
+  const hasConfidentHeader = bestHeaderScore >= 2;
+  if (!hasConfidentHeader) {
+    const maxColumns = grid.reduce((max, row) => Math.max(max, row.length), 0);
+    const headers = Array.from({ length: maxColumns }, (_, index) => `column_${index + 1}`);
+    const rows = grid
+      .map((row) => row.map((cell) => toStringValue(cell) ?? ""))
+      .filter((row) => row.some((cell) => cell.trim().length > 0));
+    return { headers, rows, headerScore: 0 };
   }
 
   const headerIndex = bestHeaderIndex >= 0 ? bestHeaderIndex : 0;
@@ -230,11 +244,12 @@ function parseWorkbook(buffer: Buffer): { headers: string[]; rows: string[][] } 
 }
 
 function resolveHeaderIndex(headers: string[]): Record<string, number | undefined> {
-  const normalized = normalizeHeaders(headers);
+  const normalized = normalizeHeaders(headers).map((header) => header.toLowerCase().trim());
   const find = (aliases: string[]): number | undefined => {
     for (const alias of aliases) {
-      const normalizedAlias = alias.toLowerCase();
-      const index = normalized.findIndex((item) => item.includes(normalizedAlias));
+      const escapedAlias = alias.toLowerCase().trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const tokenPattern = new RegExp(`(^|[^a-z0-9])${escapedAlias}([^a-z0-9]|$)`, "i");
+      const index = normalized.findIndex((item) => tokenPattern.test(item));
       if (index >= 0) return index;
     }
     return undefined;
@@ -253,6 +268,104 @@ function resolveHeaderIndex(headers: string[]): Record<string, number | undefine
     orderDate: find([...HEADER_ALIASES.orderDate]),
     checkedIn: find([...HEADER_ALIASES.checkedIn]),
     flight: find([...HEADER_ALIASES.flight]),
+  };
+}
+
+function isLikelyEmail(value?: string): boolean {
+  if (!value) return false;
+  return /[^\s@]+@[^\s@]+\.[^\s@]+/.test(value.trim());
+}
+
+function isLikelyPhone(value?: string): boolean {
+  if (!value) return false;
+  const digits = value.replace(/\D+/g, "");
+  return digits.length >= 10 && digits.length <= 15;
+}
+
+function isLikelyPersonName(value?: string): boolean {
+  if (!value) return false;
+  const compact = value.trim();
+  if (compact.length < 4 || compact.length > 60) return false;
+  if (/\d/.test(compact)) return false;
+  if (/[@]/.test(compact)) return false;
+  if (/flight|foursome|sponsor|event|classic|presented/i.test(compact)) return false;
+  const parts = compact.split(/\s+/).filter(Boolean);
+  return parts.length >= 2;
+}
+
+function isLikelyCompany(value?: string): boolean {
+  if (!value) return false;
+  const compact = value.trim();
+  if (compact.length < 2) return false;
+  if (/[@]/.test(compact)) return false;
+  return /\b(inc|llc|ltd|corp|corporation|company|co\.|group|energy|bank|systems|partners|foundation|services)\b/i.test(compact)
+    || /[A-Z]{2,}/.test(compact);
+}
+
+function isLikelyTicketType(value?: string): boolean {
+  if (!value) return false;
+  return /flight|foursome|ticket|registration|sponsor|package|am|pm/i.test(value);
+}
+
+function isLikelyEventName(value?: string): boolean {
+  if (!value) return false;
+  return /annual|classic|tournament|event|golf|open/i.test(value);
+}
+
+function isLikelyDate(value?: string): boolean {
+  if (!value) return false;
+  return /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/.test(value) || /\b\d{4}-\d{2}-\d{2}\b/.test(value);
+}
+
+function inferHeaderIndexFromRows(rows: string[][]): Partial<Record<string, number>> {
+  if (rows.length === 0) return {};
+  const maxColumns = rows.reduce((max, row) => Math.max(max, row.length), 0);
+
+  const scoreByColumn = Array.from({ length: maxColumns }, () => ({
+    attendeeName: 0,
+    attendeeEmail: 0,
+    attendeePhone: 0,
+    ticketBuyer: 0,
+    ticketType: 0,
+    eventName: 0,
+    orderDate: 0,
+  }));
+
+  for (const row of rows.slice(0, 60)) {
+    for (let column = 0; column < maxColumns; column += 1) {
+      const value = cleanCell(row[column]);
+      if (!value) continue;
+      if (isLikelyEmail(value)) scoreByColumn[column].attendeeEmail += 3;
+      if (isLikelyPhone(value)) scoreByColumn[column].attendeePhone += 3;
+      if (isLikelyPersonName(value)) scoreByColumn[column].attendeeName += 2;
+      if (isLikelyCompany(value)) scoreByColumn[column].ticketBuyer += 2;
+      if (isLikelyTicketType(value)) scoreByColumn[column].ticketType += 2;
+      if (isLikelyEventName(value)) scoreByColumn[column].eventName += 2;
+      if (isLikelyDate(value)) scoreByColumn[column].orderDate += 1;
+    }
+  }
+
+  const pickBest = (field: keyof (typeof scoreByColumn)[number], minimum: number): number | undefined => {
+    let bestIndex = -1;
+    let bestScore = minimum;
+    for (let i = 0; i < scoreByColumn.length; i += 1) {
+      const candidateScore = scoreByColumn[i][field];
+      if (candidateScore > bestScore) {
+        bestScore = candidateScore;
+        bestIndex = i;
+      }
+    }
+    return bestIndex >= 0 ? bestIndex : undefined;
+  };
+
+  return {
+    attendeeName: pickBest("attendeeName", 1),
+    attendeeEmail: pickBest("attendeeEmail", 1),
+    attendeePhone: pickBest("attendeePhone", 1),
+    ticketBuyer: pickBest("ticketBuyer", 1),
+    ticketType: pickBest("ticketType", 1),
+    eventName: pickBest("eventName", 1),
+    orderDate: pickBest("orderDate", 0),
   };
 }
 
@@ -278,20 +391,37 @@ export function parseCsvOrXlsx(input: {
   }
 
   const mapping = resolveHeaderIndex(parsed.headers);
+  const mappedCount = Object.values(mapping).filter((value) => value !== undefined).length;
+  const inferred: Partial<ReturnType<typeof resolveHeaderIndex>> = mappedCount >= 2
+    ? {}
+    : inferHeaderIndexFromRows(parsed.rows);
+  const resolvedMapping: ReturnType<typeof resolveHeaderIndex> = {
+    ...mapping,
+    ...inferred,
+  };
+
+  resolvedMapping.attendeeName = mapping.attendeeName ?? inferred.attendeeName;
+  resolvedMapping.attendeeEmail = mapping.attendeeEmail ?? inferred.attendeeEmail;
+  resolvedMapping.attendeePhone = mapping.attendeePhone ?? inferred.attendeePhone;
+  resolvedMapping.ticketBuyer = mapping.ticketBuyer ?? inferred.ticketBuyer;
+  resolvedMapping.ticketType = mapping.ticketType ?? inferred.ticketType;
+  resolvedMapping.eventName = mapping.eventName ?? inferred.eventName;
+  resolvedMapping.orderDate = mapping.orderDate ?? inferred.orderDate;
+
   const rows: ParsedAttendeeImportRow[] = parsed.rows.map((row, rowIndex) => {
-    const attendeeFirstName = normalizeName(getCell(row, mapping.attendeeFirstName));
-    const attendeeLastName = normalizeName(getCell(row, mapping.attendeeLastName));
-    const attendeeName = normalizeName(getCell(row, mapping.attendeeName))
+    const attendeeFirstName = normalizeName(getCell(row, resolvedMapping.attendeeFirstName));
+    const attendeeLastName = normalizeName(getCell(row, resolvedMapping.attendeeLastName));
+    const attendeeName = normalizeName(getCell(row, resolvedMapping.attendeeName))
       ?? normalizeName([attendeeFirstName, attendeeLastName].filter(Boolean).join(" "));
-    const attendeeEmail = normalizeEmail(getCell(row, mapping.attendeeEmail));
-    const attendeePhone = cleanPhone(getCell(row, mapping.attendeePhone));
-    const ticketBuyer = normalizeName(getCell(row, mapping.ticketBuyer));
-    const ticketBuyerEmail = normalizeEmail(getCell(row, mapping.ticketBuyerEmail));
-    const ticketType = normalizeName(getCell(row, mapping.ticketType));
-    const eventName = normalizeName(getCell(row, mapping.eventName));
-    const orderDate = getCell(row, mapping.orderDate);
-    const checkedIn = truthy(getCell(row, mapping.checkedIn));
-    const explicitFlight = parseFlightValue(getCell(row, mapping.flight));
+    const attendeeEmail = normalizeEmail(getCell(row, resolvedMapping.attendeeEmail));
+    const attendeePhone = cleanPhone(getCell(row, resolvedMapping.attendeePhone));
+    const ticketBuyer = normalizeName(getCell(row, resolvedMapping.ticketBuyer));
+    const ticketBuyerEmail = normalizeEmail(getCell(row, resolvedMapping.ticketBuyerEmail));
+    const ticketType = normalizeName(getCell(row, resolvedMapping.ticketType));
+    const eventName = normalizeName(getCell(row, resolvedMapping.eventName));
+    const orderDate = getCell(row, resolvedMapping.orderDate);
+    const checkedIn = truthy(getCell(row, resolvedMapping.checkedIn));
+    const explicitFlight = parseFlightValue(getCell(row, resolvedMapping.flight));
 
     const warnings: string[] = [];
     const errors: string[] = [];
@@ -308,8 +438,11 @@ export function parseCsvOrXlsx(input: {
     }
 
     if (!attendeeEmail && !attendeePhone) {
-      errors.push("Attendee email or phone is required.");
-      status = "error";
+      warnings.push("Attendee email or phone is missing.");
+      if (!attendeeName && !ticketBuyer) {
+        errors.push("Attendee identity fields are missing.");
+        status = "error";
+      }
     }
 
     const flightAssignment = detectFlight({
@@ -352,7 +485,7 @@ export function parseCsvOrXlsx(input: {
     seen.add(key);
   }
 
-  const columnMapping = Object.entries(mapping)
+  const columnMapping = Object.entries(resolvedMapping)
     .filter(([, value]) => value !== undefined)
     .map(([target, index]) => {
       const sourceColumn = parsed.headers[index as number] ?? target;
