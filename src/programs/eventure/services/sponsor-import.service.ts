@@ -629,7 +629,7 @@ function normalizeName(value?: string): string {
   return value.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
-function parseMoney(value?: string): number | undefined {
+export function parseMoney(value?: string): number | undefined {
   if (!value) return undefined;
   const cleaned = value.replace(/[$,\s]/g, "").trim();
   if (!cleaned) return undefined;

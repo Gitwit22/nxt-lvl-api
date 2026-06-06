@@ -12,6 +12,7 @@ import { eventureParticipantRevenueImportsRouter } from "./participant-revenue-i
 import { eventureUnmatchedRevenueRouter } from "./unmatched-revenue.routes.js";
 import { eventureSponsorsRouter } from "./sponsors.routes.js";
 import { eventurePackagesRouter } from "./packages.routes.js";
+import { eventurePaymentImportRouter } from "./payment-import.routes.js";
 import { eventureHistoryRouter } from "./history.routes.js";
 import { eventureSharedRouter } from "./shared.routes.js";
 import { ordersRouter } from "./orders.routes.js";
@@ -45,6 +46,7 @@ router.use("/events/:eventId/sponsor-imports", eventureSponsorImportsRouter);
 router.use("/events/:eventId/attendee-imports", eventureAttendeeImportsRouter);
 router.use("/events/:eventId/participant-revenue-imports", eventureParticipantRevenueImportsRouter);
 router.use("/events/:eventId/unmatched-revenue", eventureUnmatchedRevenueRouter);
+router.use("/events/:eventId/sponsors/payment-import", eventurePaymentImportRouter);
 router.use("/events/:eventId/sponsors", eventureSponsorsRouter);
 router.use("/events/:eventId/packages", eventurePackagesRouter);
 router.use("/events/:eventId/history", eventureHistoryRouter);
