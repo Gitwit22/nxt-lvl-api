@@ -1,6 +1,10 @@
 import express from "express";
+import path from "path";
 import { getRequestUser } from "../../../core/auth/auth.service.js";
 import { requireAuth } from "../../../core/middleware/auth.middleware.js";
+import { upload } from "../../../validators.js";
+import { isR2Configured, uploadToR2, deleteFromR2 } from "../../../core/storage/r2.js";
+import { prisma } from "../../../core/db/prisma.js";
 import {
   archiveSponsorContactForEvent,
   archiveSponsorForEvent,
@@ -17,6 +21,8 @@ import {
   updateSponsorForEvent,
 } from "../services/sponsor.service.js";
 import { EventureServiceError } from "../services/eventure-error.js";
+
+const ALLOWED_LOGO_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"];
 
 const router = express.Router({ mergeParams: true });
 
@@ -333,6 +339,57 @@ router.post("/", async (req, res) => {
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const item = await createSponsorForEvent(user!.organizationId, eventId, readSponsorPayload(req.body));
     res.status(201).json({ item });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+
+router.post("/:sponsorId/logo", upload.single("file"), async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const sponsorId = readRouteParam(req.params["sponsorId"], "sponsorId");
+
+    if (!req.file) {
+      res.status(400).json({ error: "No file uploaded." });
+      return;
+    }
+
+    if (!ALLOWED_LOGO_TYPES.includes(req.file.mimetype)) {
+      res.status(400).json({ error: "File type not allowed. Use JPEG, PNG, GIF, WebP, or SVG." });
+      return;
+    }
+
+    const sponsor = await getSponsorForEvent(user!.organizationId, eventId, sponsorId);
+    const org = sponsor.sponsorOrganization;
+
+    const ext = path.extname(req.file.originalname).toLowerCase() || ".bin";
+    const key = `eventure/${user!.organizationId}/sponsors/${org.id}/logo-${Date.now()}${ext}`;
+
+    let logoUrl: string;
+    let logoKey: string;
+
+    if (isR2Configured()) {
+      // Delete old logo if one exists
+      if (org.logoKey) {
+        await deleteFromR2(org.logoKey).catch(() => void 0);
+      }
+      const result = await uploadToR2(key, req.file.buffer, req.file.mimetype);
+      logoUrl = result.fileUrl;
+      logoKey = result.key;
+    } else {
+      // Local fallback: store buffer as base64 data URL (dev only)
+      logoUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+      logoKey = key;
+    }
+
+    await prisma.eventureSponsorOrganization.update({
+      where: { id: org.id },
+      data: { logoUrl, logoKey },
+    });
+
+    res.json({ logoUrl });
   } catch (error) {
     handleError(res, error);
   }

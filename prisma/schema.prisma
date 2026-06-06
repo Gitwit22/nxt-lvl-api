@@ -1501,6 +1501,8 @@ model EventureSponsorOrganization {
   website             String?
   labels              Json     @default("[]")
   sponsorStatus       String?
+  logoUrl             String?
+  logoKey             String?
   notes               String?  @db.Text
   sourceImportBatchId String?
   sourceImportRowId   String?
