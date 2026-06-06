@@ -4,6 +4,7 @@ import { requireAuth } from "../../../core/middleware/auth.middleware.js";
 import {
   confirmPaymentAndSyncParticipant,
   createAssignmentForEvent,
+  listAttendeesForEvent,
   listAssignmentsForEvent,
   listParticipantsForEvent,
   listPaymentsForEvent,
@@ -113,6 +114,17 @@ router.get("/participants", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listParticipantsForEvent(user!.organizationId, eventId);
+    res.json({ items });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.get("/attendees", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const items = await listAttendeesForEvent(user!.organizationId, eventId);
     res.json({ items });
   } catch (error) {
     handleError(res, error);

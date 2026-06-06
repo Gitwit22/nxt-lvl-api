@@ -206,6 +206,19 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
   });
 }
 
+export async function listAttendeesForEvent(organizationId: string, eventId: string) {
+  return prisma.eventureAttendeeSlot.findMany({
+    where: {
+      organizationId,
+      eventId,
+    },
+    orderBy: [
+      { companyName: "asc" },
+      { slotNumber: "asc" },
+    ],
+  });
+}
+
 export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInput) {
   if (!Number.isInteger(input.attendeeCount) || input.attendeeCount < 0) {
     throw new EventureServiceError("attendeeCount must be a non-negative integer.", 400);

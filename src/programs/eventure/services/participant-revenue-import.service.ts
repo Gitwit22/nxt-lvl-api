@@ -8,6 +8,7 @@ import {
   type AttendeeImportParserStrategy,
 } from "./attendee-import.service.js";
 import { EventureServiceError } from "./eventure-error.js";
+import { normalizeCompanyName } from "./sponsor-import.service.js";
 
 export type ParticipantRevenueImportPreviewRow = AttendeeImportPreviewResponse["rows"][number] & {
   revenue: {
@@ -33,6 +34,7 @@ export type ParticipantRevenueImportConfirmResponse = AttendeeImportConfirmRespo
   summary: AttendeeImportConfirmResponse["summary"] & {
     revenueRowsConfirmed: number;
     unmatchedRevenueRowsCreated: number;
+    paymentsUpserted: number;
   };
 };
 
@@ -81,6 +83,30 @@ function readRawRevenueAmount(raw: Record<string, unknown>): number | undefined 
 function readNormalizedString(normalized: Record<string, unknown>, field: string): string | undefined {
   const value = normalized[field];
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+async function resolveContactCompanyId(input: {
+  organizationId: string;
+  companyName?: string;
+  suggestedCompanyId?: string;
+}): Promise<string | undefined> {
+  if (input.suggestedCompanyId) return input.suggestedCompanyId;
+  if (!input.companyName) return undefined;
+
+  const normalizedName = normalizeCompanyName(input.companyName);
+  const company = await prisma.eventureSponsorOrganization.findFirst({
+    where: {
+      organizationId: input.organizationId,
+      archivedAt: null,
+      OR: [
+        { normalizedName },
+        { name: { equals: input.companyName, mode: "insensitive" } },
+      ],
+    },
+    select: { id: true },
+  });
+
+  return company?.id;
 }
 
 export async function previewParticipantRevenueImportForEvent(input: {
@@ -174,6 +200,7 @@ export async function confirmParticipantRevenueImportForEvent(input: {
 
   let revenueRowsConfirmed = 0;
   let unmatchedRevenueRowsCreated = 0;
+  let paymentsUpserted = 0;
 
   for (const row of importRows) {
     const raw = (row.rawData ?? {}) as Record<string, unknown>;
@@ -194,7 +221,73 @@ export async function confirmParticipantRevenueImportForEvent(input: {
     const attendeeEmail = readNormalizedString(normalized, "attendeeEmail");
 
     const hasCompanyAnchor = Boolean((revenueCompany && revenueCompany.trim()) || suggestedCompanyId || ticketBuyer);
-    if (hasCompanyAnchor) continue;
+    if (hasCompanyAnchor) {
+      const contactCompanyId = await resolveContactCompanyId({
+        organizationId: input.organizationId,
+        companyName: revenueCompany ?? ticketBuyer ?? readNormalizedString(suggestedCompany, "name"),
+        suggestedCompanyId,
+      });
+
+      if (contactCompanyId) {
+        const existingPayment = await prisma.eventurePayment.findFirst({
+          where: {
+            organizationId: input.organizationId,
+            eventId: input.eventId,
+            contactCompanyId,
+          },
+          orderBy: [{ updatedAt: "desc" }],
+        });
+
+        const amountDue = revenueAmount;
+        const amountPaid = revenueAmount;
+        const balance = amountDue - amountPaid;
+
+        const payment = existingPayment
+          ? await prisma.eventurePayment.update({
+            where: { id: existingPayment.id },
+            data: {
+              amountDue,
+              amountPaid,
+              balance,
+              paymentStatus: "confirmed",
+              paymentConfirmedAt: new Date(),
+              notes: revenueDescription ?? existingPayment.notes,
+            },
+          })
+          : await prisma.eventurePayment.create({
+            data: {
+              organizationId: input.organizationId,
+              eventId: input.eventId,
+              contactCompanyId,
+              amountDue,
+              amountPaid,
+              balance,
+              paymentStatus: "confirmed",
+              paymentConfirmedAt: new Date(),
+              notes: revenueDescription ?? null,
+            },
+          });
+
+        await prisma.eventurePaymentHistory.create({
+          data: {
+            organizationId: input.organizationId,
+            paymentId: payment.id,
+            paymentStatus: payment.paymentStatus,
+            amountDue: payment.amountDue,
+            amountPaid: payment.amountPaid,
+            balance: payment.balance,
+            paymentMethod: payment.paymentMethod,
+            paymentConfirmedAt: payment.paymentConfirmedAt,
+            notes: payment.notes,
+            changedByUserId: input.createdByUserId,
+          },
+        });
+
+        paymentsUpserted += 1;
+      }
+
+      continue;
+    }
 
     await prisma.eventureUnmatchedRevenue.create({
       data: {
@@ -222,6 +315,7 @@ export async function confirmParticipantRevenueImportForEvent(input: {
       ...base.summary,
       revenueRowsConfirmed,
       unmatchedRevenueRowsCreated,
+      paymentsUpserted,
     },
   };
 }

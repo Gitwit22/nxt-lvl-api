@@ -18,6 +18,12 @@ export type ParsedAttendeeImportRow = {
   checkedIn?: boolean;
   explicitFlight?: "AM" | "PM";
   flightAssignment: "AM" | "PM";
+  paymentStatus?: string;
+  amountExpected?: number;
+  amountPaid?: number;
+  paymentMethod?: string;
+  paymentReference?: string;
+  paymentNotes?: string;
   status: AttendeeImportRowStatus;
   warnings: string[];
   errors: string[];
@@ -36,6 +42,12 @@ const HEADER_ALIASES = {
   orderDate: ["order date", "purchase date", "date", "order created"],
   checkedIn: ["checked in", "check in"],
   flight: ["flight", "flight assignment", "am/pm", "wave", "tee time"],
+  paymentStatus: ["payment status", "payment", "status"],
+  amountExpected: ["amount expected", "amount due", "balance due", "expected amount", "total due"],
+  amountPaid: ["amount paid", "paid amount", "amount received", "payment amount"],
+  paymentMethod: ["payment method", "method", "tender"],
+  paymentReference: ["payment reference", "reference", "transaction id", "confirmation", "check number"],
+  paymentNotes: ["payment notes", "payment note", "memo", "payment memo", "payment comment"],
 } as const;
 
 function toStringValue(value: unknown): string | undefined {
@@ -268,7 +280,21 @@ function resolveHeaderIndex(headers: string[]): Record<string, number | undefine
     orderDate: find([...HEADER_ALIASES.orderDate]),
     checkedIn: find([...HEADER_ALIASES.checkedIn]),
     flight: find([...HEADER_ALIASES.flight]),
+    paymentStatus: find([...HEADER_ALIASES.paymentStatus]),
+    amountExpected: find([...HEADER_ALIASES.amountExpected]),
+    amountPaid: find([...HEADER_ALIASES.amountPaid]),
+    paymentMethod: find([...HEADER_ALIASES.paymentMethod]),
+    paymentReference: find([...HEADER_ALIASES.paymentReference]),
+    paymentNotes: find([...HEADER_ALIASES.paymentNotes]),
   };
+}
+
+function parseMoney(value?: string): number | undefined {
+  if (!value) return undefined;
+  const normalized = value.replace(/[^\d.-]/g, "");
+  if (!normalized) return undefined;
+  const parsed = Number(normalized);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function isLikelyEmail(value?: string): boolean {
@@ -407,6 +433,12 @@ export function parseCsvOrXlsx(input: {
   resolvedMapping.ticketType = mapping.ticketType ?? inferred.ticketType;
   resolvedMapping.eventName = mapping.eventName ?? inferred.eventName;
   resolvedMapping.orderDate = mapping.orderDate ?? inferred.orderDate;
+  resolvedMapping.paymentStatus = mapping.paymentStatus ?? inferred.paymentStatus;
+  resolvedMapping.amountExpected = mapping.amountExpected ?? inferred.amountExpected;
+  resolvedMapping.amountPaid = mapping.amountPaid ?? inferred.amountPaid;
+  resolvedMapping.paymentMethod = mapping.paymentMethod ?? inferred.paymentMethod;
+  resolvedMapping.paymentReference = mapping.paymentReference ?? inferred.paymentReference;
+  resolvedMapping.paymentNotes = mapping.paymentNotes ?? inferred.paymentNotes;
 
   const rows: ParsedAttendeeImportRow[] = parsed.rows.map((row, rowIndex) => {
     const attendeeFirstName = normalizeName(getCell(row, resolvedMapping.attendeeFirstName));
@@ -422,6 +454,12 @@ export function parseCsvOrXlsx(input: {
     const orderDate = getCell(row, resolvedMapping.orderDate);
     const checkedIn = truthy(getCell(row, resolvedMapping.checkedIn));
     const explicitFlight = parseFlightValue(getCell(row, resolvedMapping.flight));
+    const paymentStatus = normalizeName(getCell(row, resolvedMapping.paymentStatus));
+    const amountExpected = parseMoney(getCell(row, resolvedMapping.amountExpected));
+    const amountPaid = parseMoney(getCell(row, resolvedMapping.amountPaid));
+    const paymentMethod = normalizeName(getCell(row, resolvedMapping.paymentMethod));
+    const paymentReference = normalizeName(getCell(row, resolvedMapping.paymentReference));
+    const paymentNotes = normalizeName(getCell(row, resolvedMapping.paymentNotes));
 
     const warnings: string[] = [];
     const errors: string[] = [];
@@ -467,6 +505,12 @@ export function parseCsvOrXlsx(input: {
       checkedIn,
       explicitFlight,
       flightAssignment,
+      paymentStatus,
+      amountExpected,
+      amountPaid,
+      paymentMethod,
+      paymentReference,
+      paymentNotes,
       warnings,
       errors,
       status,
