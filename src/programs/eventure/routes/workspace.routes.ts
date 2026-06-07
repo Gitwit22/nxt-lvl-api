@@ -2,6 +2,7 @@ import express from "express";
 import { getRequestUser } from "../../../core/auth/auth.service.js";
 import { requireAuth } from "../../../core/middleware/auth.middleware.js";
 import {
+  cleanupUnconfirmedParticipants,
   confirmPaymentAndSyncParticipant,
   createAssignmentForEvent,
   listAttendeesForEvent,
@@ -248,6 +249,27 @@ router.get("/volunteers", async (req, res) => {
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listVolunteersForEvent(user!.organizationId, eventId);
     res.json({ items });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+/**
+ * Admin-only: repair participants that have a confirmed payment but paymentConfirmed=false,
+ * and soft-archive participants with no confirmed payment.
+ * Supports ?dryRun=true to preview changes without writing.
+ */
+router.post("/cleanup-unconfirmed-participants", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const dryRun = req.query["dryRun"] === "true" || readBoolean(req.body?.dryRun) === true;
+    const result = await cleanupUnconfirmedParticipants({
+      organizationId: user!.organizationId,
+      eventId,
+      dryRun,
+    });
+    res.json(result);
   } catch (error) {
     handleError(res, error);
   }

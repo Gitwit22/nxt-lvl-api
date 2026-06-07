@@ -58,7 +58,7 @@ async function ensureEventAndCompany(input: { organizationId: string; eventId: s
   return eventSponsor;
 }
 
-async function reconcileAttendeeSlots(input: {
+export async function reconcileAttendeeSlots(input: {
   organizationId: string;
   eventId: string;
   participantId: string;
@@ -528,6 +528,108 @@ export async function listAssignmentsForEvent(organizationId: string, eventId: s
     },
     orderBy: [{ createdAt: "desc" }],
   });
+}
+
+export type CleanupUnconfirmedParticipantsResult = {
+  dryRun: boolean;
+  repaired: number;
+  archived: number;
+  participants: Array<{
+    id: string;
+    companyName: string;
+    action: "repaired" | "archived";
+    paymentId?: string;
+  }>;
+};
+
+export async function cleanupUnconfirmedParticipants(input: {
+  organizationId: string;
+  eventId: string;
+  dryRun?: boolean;
+}): Promise<CleanupUnconfirmedParticipantsResult> {
+  const unconfirmed = await prisma.eventureParticipant.findMany({
+    where: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      paymentConfirmed: false,
+      status: { not: "archived" },
+    },
+    select: {
+      id: true,
+      companyName: true,
+      contactCompanyId: true,
+      attendeeCount: true,
+      flightAssignment: true,
+    },
+  });
+
+  const result: CleanupUnconfirmedParticipantsResult = {
+    dryRun: input.dryRun ?? false,
+    repaired: 0,
+    archived: 0,
+    participants: [],
+  };
+
+  for (const participant of unconfirmed) {
+    const confirmedPayment = await prisma.eventurePayment.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: participant.contactCompanyId,
+        paymentStatus: "confirmed",
+      },
+      orderBy: [{ updatedAt: "desc" }],
+    });
+
+    if (confirmedPayment) {
+      // Repair: link payment and confirm participant
+      if (!input.dryRun) {
+        await prisma.eventureParticipant.update({
+          where: { id: participant.id },
+          data: {
+            paymentConfirmed: true,
+            paymentId: confirmedPayment.id,
+          },
+        });
+
+        if (participant.attendeeCount > 0) {
+          await reconcileAttendeeSlots({
+            organizationId: input.organizationId,
+            eventId: input.eventId,
+            participantId: participant.id,
+            companyName: participant.companyName,
+            attendeeCount: participant.attendeeCount,
+            flightAssignment: participant.flightAssignment ?? "PM",
+          });
+        }
+      }
+
+      result.repaired += 1;
+      result.participants.push({
+        id: participant.id,
+        companyName: participant.companyName,
+        action: "repaired",
+        paymentId: confirmedPayment.id,
+      });
+    } else {
+      // No confirmed payment — soft-archive the participant
+      if (!input.dryRun) {
+        await prisma.eventureParticipant.update({
+          where: { id: participant.id },
+          data: { status: "archived" },
+        });
+      }
+
+      result.archived += 1;
+      result.participants.push({
+        id: participant.id,
+        companyName: participant.companyName,
+        action: "archived",
+      });
+    }
+  }
+
+  return result;
 }
 
 export async function createAssignmentForEvent(input: {

@@ -9,6 +9,7 @@ import {
 } from "./attendee-import.service.js";
 import { EventureServiceError } from "./eventure-error.js";
 import { normalizeCompanyName } from "./sponsor-import.service.js";
+import { reconcileAttendeeSlots } from "./workspace.service.js";
 
 export type ParticipantRevenueImportPreviewRow = AttendeeImportPreviewResponse["rows"][number] & {
   revenue: {
@@ -35,6 +36,7 @@ export type ParticipantRevenueImportConfirmResponse = AttendeeImportConfirmRespo
     revenueRowsConfirmed: number;
     unmatchedRevenueRowsCreated: number;
     paymentsUpserted: number;
+    participantsConfirmed: number;
   };
 };
 
@@ -201,6 +203,7 @@ export async function confirmParticipantRevenueImportForEvent(input: {
   let revenueRowsConfirmed = 0;
   let unmatchedRevenueRowsCreated = 0;
   let paymentsUpserted = 0;
+  let participantsConfirmed = 0;
 
   for (const row of importRows) {
     const raw = (row.rawData ?? {}) as Record<string, unknown>;
@@ -284,6 +287,43 @@ export async function confirmParticipantRevenueImportForEvent(input: {
         });
 
         paymentsUpserted += 1;
+
+        // Link the matching Participant to this payment and confirm it
+        const participant = await prisma.eventureParticipant.findFirst({
+          where: {
+            organizationId: input.organizationId,
+            eventId: input.eventId,
+            contactCompanyId,
+          },
+          select: {
+            id: true,
+            companyName: true,
+            attendeeCount: true,
+            flightAssignment: true,
+          },
+        });
+
+        if (participant) {
+          await prisma.eventureParticipant.update({
+            where: { id: participant.id },
+            data: {
+              paymentConfirmed: true,
+              paymentId: payment.id,
+            },
+          });
+          participantsConfirmed += 1;
+
+          if (participant.attendeeCount > 0) {
+            await reconcileAttendeeSlots({
+              organizationId: input.organizationId,
+              eventId: input.eventId,
+              participantId: participant.id,
+              companyName: participant.companyName,
+              attendeeCount: participant.attendeeCount,
+              flightAssignment: participant.flightAssignment ?? "PM",
+            });
+          }
+        }
       }
 
       continue;
@@ -316,6 +356,7 @@ export async function confirmParticipantRevenueImportForEvent(input: {
       revenueRowsConfirmed,
       unmatchedRevenueRowsCreated,
       paymentsUpserted,
+      participantsConfirmed,
     },
   };
 }

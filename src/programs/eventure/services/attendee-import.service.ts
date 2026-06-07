@@ -13,6 +13,15 @@ import { normalizeCompanyName } from "./sponsor-import.service.js";
 
 export type AttendeeImportParserStrategy = "native";
 
+// Paid statuses: only these values trigger Participant + AttendeeSlot creation.
+// "confirmed" is intentionally excluded — it is used for RSVP confirmation, not financial confirmation.
+const PAID_STATUSES = new Set(["paid", "comped", "payment confirmed"]);
+
+export function isPaidStatus(value?: string | null): boolean {
+  const normalized = value?.trim().toLowerCase();
+  return !!normalized && PAID_STATUSES.has(normalized);
+}
+
 export type AttendeeImportRowDecision =
   | "approve"
   | "skip"
@@ -110,6 +119,7 @@ export type AttendeeImportConfirmResponse = {
     ignoredRows: number;
     duplicatesPrevented: number;
     pendingParticipantRows: number;
+    unpaidAttendeesSkipped: number;
     failedRows: number;
   };
 };
@@ -584,6 +594,7 @@ export async function confirmAttendeeImportForEvent(input: {
   let ignoredRows = 0;
   let duplicatesPrevented = 0;
   let pendingParticipantRows = 0;
+  let unpaidAttendeesSkipped = 0;
   let failedRows = 0;
 
   for (const row of batch.rows) {
@@ -727,6 +738,23 @@ export async function confirmAttendeeImportForEvent(input: {
       }
 
       if (finalCompanyId && decision !== "leave_individual") {
+        // Business rule: only paid/comped attendees become Participants and get AttendeeSlots.
+        // Registrations are always created above regardless of payment status.
+        if (!isPaidStatus(normalized.paymentStatus)) {
+          unpaidAttendeesSkipped += 1;
+          // Still mark the row as imported/updated so it doesn't block the batch
+          await prisma.eventureImportRow.update({
+            where: { id: row.id },
+            data: {
+              status: existingRegistration || !registrationWasCreated ? "updated" : "imported",
+              createdRegistrationId: registrationId,
+              matchedAttendeeId: attendee.id,
+              errorMessage: null,
+            },
+          });
+          continue;
+        }
+
         let participant = await prisma.eventureParticipant.findFirst({
           where: {
             organizationId: input.organizationId,
@@ -866,6 +894,7 @@ export async function confirmAttendeeImportForEvent(input: {
     ignoredRows,
     duplicatesPrevented,
     pendingParticipantRows,
+    unpaidAttendeesSkipped,
     failedRows,
   };
 
