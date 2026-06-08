@@ -75,7 +75,7 @@ function readRawString(raw: Record<string, unknown>, aliases: string[]): string 
 }
 
 function readRawRevenueAmount(raw: Record<string, unknown>): number | undefined {
-  const text = readRawString(raw, ["revenue amount", "revenue amt", "revenue total"]);
+  const text = readRawString(raw, ["revenue amount", "revenue amt", "revenue total", "amount"]);
   if (!text) return undefined;
   const normalized = text.replace(/[^\d.-]/g, "");
   if (!normalized) return undefined;
@@ -130,11 +130,14 @@ export async function previewParticipantRevenueImportForEvent(input: {
     const revenueCompany = readRawString(row.raw, ["company (revenue file)", "revenue company", "company"]);
     const revenueDescription = readRawString(row.raw, ["revenue description", "description", "memo", "notes"]);
     const revenueAmount = readRawRevenueAmount(row.raw);
+    // For revenue-only rows (have amount but no attendee email), treat the attendeeName as the company name
+    const isRevenueOnlyRow = revenueAmount !== undefined && !row.normalized.attendeeEmail;
+    const companyAnchor = revenueCompany ?? (row.normalized.ticketBuyer as string | undefined) ?? (isRevenueOnlyRow ? (row.normalized.attendeeName as string | undefined) : undefined);
 
     return {
       ...row,
       revenue: {
-        company: revenueCompany,
+        company: companyAnchor,
         amount: revenueAmount,
         description: revenueDescription,
       },
@@ -143,8 +146,7 @@ export async function previewParticipantRevenueImportForEvent(input: {
 
   const revenueRowsDetected = rows.filter((row) => row.revenue.amount !== undefined).length;
   const rowsWithCompanyAnchor = rows.filter((row) => {
-    const company = row.revenue.company ?? row.normalized.ticketBuyer ?? row.suggestedCompany?.name;
-    return !!company;
+    return !!(row.revenue.company ?? row.suggestedCompany?.name);
   }).length;
   const unmatchedRevenueRows = rows.filter((row) => row.revenue.amount !== undefined && !row.revenue.company && !row.suggestedCompany?.id).length;
   const totalRevenueAmount = rows.reduce((sum, row) => sum + (row.revenue.amount ?? 0), 0);
@@ -223,12 +225,15 @@ export async function confirmParticipantRevenueImportForEvent(input: {
     const ticketBuyer = readNormalizedString(normalized, "ticketBuyer");
     const attendeeName = readNormalizedString(normalized, "attendeeName");
     const attendeeEmail = readNormalizedString(normalized, "attendeeEmail");
+    // For revenue-only rows (have amount but no attendee email), treat attendeeName as company name
+    const isRevenueOnlyRow = !attendeeEmail;
+    const companyAnchor = revenueCompany ?? ticketBuyer ?? (isRevenueOnlyRow ? attendeeName : undefined);
 
-    const hasCompanyAnchor = Boolean((revenueCompany && revenueCompany.trim()) || suggestedCompanyId || ticketBuyer);
+    const hasCompanyAnchor = Boolean((companyAnchor && companyAnchor.trim()) || suggestedCompanyId);
     if (hasCompanyAnchor) {
       const contactCompanyId = await resolveContactCompanyId({
         organizationId: input.organizationId,
-        companyName: revenueCompany ?? ticketBuyer ?? readNormalizedString(suggestedCompany, "name"),
+        companyName: companyAnchor ?? readNormalizedString(suggestedCompany, "name"),
         suggestedCompanyId,
       });
 
@@ -337,7 +342,7 @@ export async function confirmParticipantRevenueImportForEvent(input: {
         importBatchId: input.importBatchId,
         importRowId: row.id,
         rowNumber: row.rowNumber,
-        sourceCompanyName: revenueCompany,
+        sourceCompanyName: companyAnchor,
         ticketBuyer,
         attendeeName,
         attendeeEmail,
