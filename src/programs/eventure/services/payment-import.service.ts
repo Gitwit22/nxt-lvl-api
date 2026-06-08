@@ -8,6 +8,7 @@ import XLSX from "xlsx";
 import { prisma } from "../../../core/db/prisma.js";
 import { canUseSharedParser, parseDocumentWithSharedService } from "../../../core/services/parse/documentParseService.js";
 import { EventureServiceError } from "./eventure-error.js";
+import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
 import { inferPaymentStatus, normalizeCompanyName, parseMoney } from "./sponsor-import.service.js";
 import { reconcileAttendeeSlots } from "./workspace.service.js";
 
@@ -907,49 +908,32 @@ export async function confirmPaymentImportForEvent(input: PaymentImportConfirmIn
 
       const amountDueResolved = amountPaid ?? existingPayment?.amountDue ?? 0;
       const amountPaidResolved = amountPaid ?? existingPayment?.amountPaid ?? 0;
-      const balanceResolved = amountDueResolved - amountPaidResolved;
 
-      const payment = existingPayment
-        ? await prisma.eventurePayment.update({
-            where: { id: existingPayment.id },
-            data: {
-              amountDue: amountDueResolved,
-              amountPaid: amountPaidResolved,
-              balance: balanceResolved,
-              paymentStatus: "confirmed",
-              paymentMethod: normalized.paymentMethod ?? existingPayment.paymentMethod,
-              notes: normalized.paymentNotes ?? existingPayment.notes,
-              paymentConfirmedAt: new Date(),
+      const { payment } = await recordEventurePaymentTransaction({
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: sponsorOrgId,
+        amountDue: amountDueResolved,
+        amountPaid: amountPaidResolved,
+        paymentMethod: normalized.paymentMethod,
+        notes: normalized.paymentNotes,
+        changedByUserId: input.createdByUserId,
+        transactionType: "import_payment_status",
+        source: "payment_status_import",
+        referenceKey: normalized.paymentReference,
+        lineItems: [
+          {
+            category: normalized.sponsorshipPackage ? "SPONSOR_PACKAGE" : "UNSPECIFIED",
+            amount: amountPaidResolved,
+            description: normalized.paymentNotes ?? normalized.sponsorshipPackage ?? "Imported payment",
+            sourceImportBatchId: input.importBatchId,
+            sourceImportRowId: row.id,
+            metadata: {
+              paymentReference: normalized.paymentReference ?? null,
+              sponsorshipPackage: normalized.sponsorshipPackage ?? null,
             },
-          })
-        : await prisma.eventurePayment.create({
-            data: {
-              organizationId: input.organizationId,
-              eventId: input.eventId,
-              contactCompanyId: sponsorOrgId,
-              amountDue: amountDueResolved,
-              amountPaid: amountPaidResolved,
-              balance: balanceResolved,
-              paymentStatus: "confirmed",
-              paymentMethod: normalized.paymentMethod ?? null,
-              notes: normalized.paymentNotes ?? null,
-              paymentConfirmedAt: new Date(),
-            },
-          });
-
-      await prisma.eventurePaymentHistory.create({
-        data: {
-          organizationId: input.organizationId,
-          paymentId: payment.id,
-          paymentStatus: payment.paymentStatus,
-          amountDue: payment.amountDue,
-          amountPaid: payment.amountPaid,
-          balance: payment.balance,
-          paymentMethod: payment.paymentMethod,
-          paymentConfirmedAt: payment.paymentConfirmedAt,
-          notes: payment.notes,
-          changedByUserId: input.createdByUserId,
-        },
+          },
+        ],
       });
 
       paymentsSynced += 1;

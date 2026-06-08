@@ -8,6 +8,7 @@ import {
   type AttendeeImportParserStrategy,
 } from "./attendee-import.service.js";
 import { EventureServiceError } from "./eventure-error.js";
+import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
 import { normalizeCompanyName } from "./sponsor-import.service.js";
 import { reconcileAttendeeSlots } from "./workspace.service.js";
 
@@ -247,58 +248,28 @@ export async function confirmParticipantRevenueImportForEvent(input: {
       });
 
       if (contactCompanyId) {
-        const existingPayment = await prisma.eventurePayment.findFirst({
-          where: {
-            organizationId: input.organizationId,
-            eventId: input.eventId,
-            contactCompanyId,
-          },
-          orderBy: [{ updatedAt: "desc" }],
-        });
-
         const amountDue = revenueAmount;
         const amountPaid = revenueAmount;
-        const balance = amountDue - amountPaid;
 
-        const payment = existingPayment
-          ? await prisma.eventurePayment.update({
-            where: { id: existingPayment.id },
-            data: {
-              amountDue,
-              amountPaid,
-              balance,
-              paymentStatus: "confirmed",
-              paymentConfirmedAt: new Date(),
-              notes: revenueDescription ?? existingPayment.notes,
+        const { payment } = await recordEventurePaymentTransaction({
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId,
+          amountDue,
+          amountPaid,
+          notes: revenueDescription,
+          changedByUserId: input.createdByUserId,
+          transactionType: "import_participant_revenue",
+          source: "participant_revenue_import",
+          lineItems: [
+            {
+              category: "PARTICIPANT_REVENUE",
+              amount: amountPaid,
+              description: revenueDescription ?? "Imported participant revenue",
+              sourceImportBatchId: input.importBatchId,
+              sourceImportRowId: row.id,
             },
-          })
-          : await prisma.eventurePayment.create({
-            data: {
-              organizationId: input.organizationId,
-              eventId: input.eventId,
-              contactCompanyId,
-              amountDue,
-              amountPaid,
-              balance,
-              paymentStatus: "confirmed",
-              paymentConfirmedAt: new Date(),
-              notes: revenueDescription ?? null,
-            },
-          });
-
-        await prisma.eventurePaymentHistory.create({
-          data: {
-            organizationId: input.organizationId,
-            paymentId: payment.id,
-            paymentStatus: payment.paymentStatus,
-            amountDue: payment.amountDue,
-            amountPaid: payment.amountPaid,
-            balance: payment.balance,
-            paymentMethod: payment.paymentMethod,
-            paymentConfirmedAt: payment.paymentConfirmedAt,
-            notes: payment.notes,
-            changedByUserId: input.createdByUserId,
-          },
+          ],
         });
 
         paymentsUpserted += 1;

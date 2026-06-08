@@ -1237,6 +1237,8 @@ model EventureEvent {
   volunteerNeeds      EventureEventVolunteerNeed[]
   participants        EventureParticipant[]
   participantPayments EventurePayment[]
+  paymentTransactions EventurePaymentTransaction[]
+  paymentLineItems    EventurePaymentLineItem[]
   attendeeSlots       EventureAttendeeSlot[]
   assignments         EventureAssignment[]
   tasks               EventureTask[]
@@ -1520,6 +1522,8 @@ model EventureSponsorOrganization {
   eventSponsors       EventureEventSponsor[]
   participants        EventureParticipant[]
   participantPayments EventurePayment[]
+  paymentTransactions EventurePaymentTransaction[]
+  paymentLineItems    EventurePaymentLineItem[]
   yearHistory         EventureSponsorYearHistory[]
   followUps           EventureSponsorFollowUp[]
   participationHistory EventParticipationHistory[]
@@ -1840,10 +1844,70 @@ model EventurePayment {
   contactCompany      EventureSponsorOrganization @relation(fields: [contactCompanyId], references: [id], onDelete: Cascade)
   primaryForParticipant EventureParticipant[]     @relation("ParticipantPrimaryPayment")
   history             EventurePaymentHistory[]
+  transactions        EventurePaymentTransaction[]
 
   @@index([organizationId, eventId, contactCompanyId])
   @@index([organizationId, eventId, paymentStatus])
   @@index([organizationId, participantId])
+}
+
+model EventurePaymentTransaction {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  eventId             String
+  contactCompanyId    String
+  paymentId           String?
+  participantId       String?
+  transactionType     String   @default("payment")
+  status              String   @default("confirmed")
+  source              String   @default("manual")
+  referenceKey        String?
+  paymentMethod       String?
+  notes               String?  @db.Text
+  totalAmount         Float    @default(0)
+  transactionAt       DateTime @default(now())
+  createdByUserId     String?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  event               EventureEvent               @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  contactCompany      EventureSponsorOrganization @relation(fields: [contactCompanyId], references: [id], onDelete: Cascade)
+  payment             EventurePayment?            @relation(fields: [paymentId], references: [id], onDelete: SetNull)
+  lineItems           EventurePaymentLineItem[]
+
+  @@index([organizationId, eventId, contactCompanyId, transactionAt])
+  @@index([organizationId, paymentId])
+  @@index([organizationId, participantId])
+  @@index([organizationId, referenceKey])
+}
+
+model EventurePaymentLineItem {
+  id                  String   @id @default(cuid())
+  organizationId      String
+  programDomain       String   @default("eventure")
+  transactionId       String
+  eventId             String
+  contactCompanyId    String
+  participantId       String?
+  category            String   @default("UNSPECIFIED")
+  description         String?  @db.Text
+  amount              Float    @default(0)
+  sourceImportBatchId String?
+  sourceImportRowId   String?
+  metadata            Json?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  transaction         EventurePaymentTransaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  event               EventureEvent              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  contactCompany      EventureSponsorOrganization @relation(fields: [contactCompanyId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, transactionId])
+  @@index([organizationId, eventId, contactCompanyId])
+  @@index([organizationId, participantId])
+  @@index([organizationId, sourceImportBatchId])
+  @@index([organizationId, sourceImportRowId])
 }
 
 model EventurePaymentHistory {

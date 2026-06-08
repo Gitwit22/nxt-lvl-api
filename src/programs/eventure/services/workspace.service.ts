@@ -1,5 +1,6 @@
 import { prisma } from "../../../core/db/prisma.js";
 import { EventureServiceError } from "./eventure-error.js";
+import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
 
 type ConfirmPaymentInput = {
   organizationId: string;
@@ -405,50 +406,6 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
     const amountDue = input.amountDue ?? latestPayment?.amountDue ?? eventSponsor.committedAmount ?? 0;
     const amountPaid = input.amountPaid ?? latestPayment?.amountPaid ?? eventSponsor.amountPaid ?? amountDue;
 
-    const payment = latestPayment
-      ? await tx.eventurePayment.update({
-        where: { id: latestPayment.id },
-        data: {
-          participantId: latestPayment.participantId,
-          amountDue,
-          amountPaid,
-          balance: amountDue - amountPaid,
-          paymentStatus: "confirmed",
-          paymentMethod: input.paymentMethod ?? latestPayment.paymentMethod,
-          paymentConfirmedAt: new Date(),
-          notes: input.notes ?? latestPayment.notes,
-        },
-      })
-      : await tx.eventurePayment.create({
-        data: {
-          organizationId: input.organizationId,
-          eventId: input.eventId,
-          contactCompanyId: input.contactCompanyId,
-          amountDue,
-          amountPaid,
-          balance: amountDue - amountPaid,
-          paymentStatus: "confirmed",
-          paymentMethod: input.paymentMethod ?? null,
-          paymentConfirmedAt: new Date(),
-          notes: input.notes ?? null,
-        },
-      });
-
-    await tx.eventurePaymentHistory.create({
-      data: {
-        organizationId: input.organizationId,
-        paymentId: payment.id,
-        paymentStatus: payment.paymentStatus,
-        amountDue: payment.amountDue,
-        amountPaid: payment.amountPaid,
-        balance: payment.balance,
-        paymentMethod: payment.paymentMethod,
-        paymentConfirmedAt: payment.paymentConfirmedAt,
-        notes: payment.notes,
-        changedByUserId: input.actorUserId ?? null,
-      },
-    });
-
     const existingParticipant = await tx.eventureParticipant.findUnique({
       where: {
         organizationId_eventId_contactCompanyId: {
@@ -467,7 +424,6 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
         where: { id: existingParticipant.id },
         data: {
           companyName,
-          paymentId: payment.id,
           paymentConfirmed: true,
           attendeeCount: input.attendeeCount,
           status: "active",
@@ -480,13 +436,34 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
           eventId: input.eventId,
           contactCompanyId: input.contactCompanyId,
           companyName,
-          paymentId: payment.id,
           paymentConfirmed: true,
           attendeeCount: input.attendeeCount,
           flightAssignment: chosenFlight,
           status: "active",
         },
       });
+
+    const { payment } = await recordEventurePaymentTransaction({
+      db: tx,
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      contactCompanyId: input.contactCompanyId,
+      participantId: participant.id,
+      amountDue,
+      amountPaid,
+      paymentMethod: input.paymentMethod,
+      notes: input.notes,
+      changedByUserId: input.actorUserId,
+      transactionType: "manual_confirm",
+      source: "workspace_confirm",
+      lineItems: [
+        {
+          category: "PARTICIPANT_PACKAGE",
+          amount: amountPaid,
+          description: input.notes ?? "Manual payment confirmation",
+        },
+      ],
+    });
 
     await tx.eventurePayment.update({
       where: { id: payment.id },
