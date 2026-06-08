@@ -261,6 +261,16 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
     }),
   ]);
 
+  const transactions = await prisma.eventurePaymentTransaction.findMany({
+    where: { organizationId, eventId, contactCompanyId: { in: companyIds } },
+    include: {
+      lineItems: {
+        orderBy: [{ createdAt: "asc" }],
+      },
+    },
+    orderBy: [{ transactionAt: "desc" }, { createdAt: "desc" }],
+  });
+
   const paymentByCompany = new Map<string, (typeof payments)[number]>();
   for (const payment of payments) {
     if (!paymentByCompany.has(payment.contactCompanyId)) {
@@ -275,14 +285,22 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
     }
   }
 
+  const transactionsByCompany = new Map<string, (typeof transactions)>();
+  for (const transaction of transactions) {
+    const bucket = transactionsByCompany.get(transaction.contactCompanyId) ?? [];
+    bucket.push(transaction);
+    transactionsByCompany.set(transaction.contactCompanyId, bucket);
+  }
+
   return sponsors.map((sponsor) => {
     const payment = paymentByCompany.get(sponsor.sponsorOrganizationId) ?? null;
     const participant = participantByCompany.get(sponsor.sponsorOrganizationId) ?? null;
+    const paymentTransactions = transactionsByCompany.get(sponsor.sponsorOrganizationId) ?? [];
     const primaryContact = sponsor.sponsorOrganization.contacts[0] ?? null;
 
     // Exclude pure contact-only entries: companies with neither a payment record
     // nor a participant record have no payment activity for this event.
-    if (payment === null && participant === null) return null;
+    if (payment === null && participant === null && paymentTransactions.length === 0) return null;
 
     return {
       contactCompanyId: sponsor.sponsorOrganizationId,
@@ -293,6 +311,7 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
       labels: sponsor.sponsorOrganization.labels,
       sponsorStatus: sponsor.sponsorOrganization.sponsorStatus,
       payment,
+      paymentTransactions,
       participant,
       convertedToParticipant: Boolean(participant?.paymentConfirmed),
     };
