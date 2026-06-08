@@ -242,12 +242,11 @@ export async function acceptEventureInvite(input: AcceptEventureInviteInput) {
     user = await prisma.user.create({
       data: {
         email,
-        name,
-        password: passwordHash,
+        displayName: name,
+        passwordHash,
         role: "uploader",
         platformRole: "user",
         organizationId: metadata.organizationId,
-        programDomain: "eventure",
       },
     });
   }
