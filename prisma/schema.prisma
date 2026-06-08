@@ -1244,6 +1244,7 @@ model EventureEvent {
   participationHistory EventParticipationHistory[]
   importBatches       EventureImportBatch[]
   checkInLogs         EventureCheckInLog[]
+  personnel           EventureEventPersonnel[]
 
   @@index([organizationId, programDomain])
   @@index([organizationId, status, startDateTime])
@@ -2197,6 +2198,75 @@ model Document {
   @@index([organizationId, programDomain, parentDocumentId])
   @@index([organizationId, programDomain, rootDocumentId])
   @@index([organizationId, programDomain, splitReviewRequired, updatedAt])
+}
+
+// ─── Eventure Personnel & Access ─────────────────────────────────────────────
+
+model EventurePersonnel {
+  id               String    @id @default(cuid())
+  organizationId   String
+  userId           String?   // linked after invite is accepted
+  name             String
+  email            String
+  programRole      String?   // "program_director" — grants org-wide Eventure access
+  inviteStatus     String    @default("none")
+  // "none" | "invite_created" | "invite_pending" | "accepted" | "revoked"
+  notes            String?   @db.Text
+  archivedAt       DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  invite           EventureInvite?
+  eventAssignments EventureEventPersonnel[]
+
+  @@index([organizationId])
+  @@index([organizationId, userId])
+  @@index([organizationId, programRole])
+  @@index([organizationId, email])
+}
+
+model EventureInvite {
+  id               String    @id @default(cuid())
+  organizationId   String
+  personnelId      String    @unique
+  recipientEmail   String
+  recipientName    String
+  assignedRole     String    // human-readable label sent in the email
+  createdByAdminId String
+  tokenHash        String    @unique
+  expiresAt        DateTime
+  status           String    @default("pending")   // pending | accepted | revoked | expired
+  emailStatus      String    @default("not_sent")  // not_sent | sent | failed
+  acceptedAt       DateTime?
+  revokedAt        DateTime?
+  resentAt         DateTime?
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  personnel        EventurePersonnel @relation(fields: [personnelId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, status])
+  @@index([tokenHash])
+  @@index([organizationId, personnelId])
+}
+
+model EventureEventPersonnel {
+  id               String    @id @default(cuid())
+  organizationId   String
+  eventId          String
+  personnelId      String
+  eventRole        String    // "event_manager" | "event_operator"
+  assignedAt       DateTime  @default(now())
+  assignedByUserId String?
+  archivedAt       DateTime?
+
+  event            EventureEvent     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  personnel        EventurePersonnel @relation(fields: [personnelId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, personnelId])
+  @@index([organizationId, eventId])
+  @@index([organizationId, personnelId])
+  @@index([eventId, eventRole])
 }
 
 // ─── Finance Hub: Payee & Tax Identity Management ────────────────────────────

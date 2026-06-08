@@ -136,6 +136,10 @@ export async function previewParticipantRevenueImportForEvent(input: {
 
     return {
       ...row,
+      normalized: {
+        ...row.normalized,
+        amount: revenueAmount ?? row.normalized.amount,
+      },
       revenue: {
         company: companyAnchor,
         amount: revenueAmount,

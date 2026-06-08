@@ -55,6 +55,7 @@ export type AttendeeImportPreviewRow = {
     orderDate?: string;
     checkedIn?: boolean;
     flight?: "AM" | "PM";
+    amount?: number;
   };
   suggestedCompany?: {
     id?: string;
@@ -404,6 +405,7 @@ export async function previewAttendeeImportForEvent(input: {
         orderDate: row.orderDate,
         checkedIn: row.checkedIn,
         flight: row.flightAssignment,
+        amount: row.amountPaid ?? row.amountExpected ?? undefined,
       },
       suggestedCompany: {
         id: match.suggestedCompanyId,
