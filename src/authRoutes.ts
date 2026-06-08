@@ -126,6 +126,63 @@ async function fetchOrgMemberships(userId: string) {
   }
 }
 
+async function resolveTenantScopeForProgram(
+  user: AuthUserRecord,
+  programDomain: string,
+): Promise<{ organizationId: string; programDomain: string }> {
+  const fallback = getTenantScopeForUser(user);
+
+  try {
+    if (user.organizationId) {
+      const primarySubscription = await prisma.organizationProgramSubscription.findUnique({
+        where: {
+          organizationId_programId: {
+            organizationId: user.organizationId,
+            programId: programDomain,
+          },
+        },
+        select: { status: true },
+      });
+
+      if (primarySubscription && (primarySubscription.status === "active" || primarySubscription.status === "trialing")) {
+        return { organizationId: user.organizationId, programDomain };
+      }
+    }
+
+    const memberships = await prisma.membership.findMany({
+      where: { userId: user.id },
+      select: { organizationId: true },
+    });
+
+    if (memberships.length > 0) {
+      const membershipOrgIds = memberships.map((membership) => membership.organizationId);
+      const subscribedMembership = await prisma.organizationProgramSubscription.findFirst({
+        where: {
+          organizationId: { in: membershipOrgIds },
+          programId: programDomain,
+          status: { in: ["active", "trialing"] },
+        },
+        select: { organizationId: true },
+      });
+
+      if (subscribedMembership?.organizationId) {
+        return { organizationId: subscribedMembership.organizationId, programDomain };
+      }
+    }
+  } catch (error) {
+    logger.warn("[auth] failed to resolve tenant scope for program", {
+      userId: user.id,
+      programDomain,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+
+  return {
+    organizationId: fallback.organizationId,
+    programDomain,
+  };
+}
+
 function resolveAuthProgramDomain(req: express.Request): string {
   const headerValue =
     typeof req.headers["x-app-partition"] === "string"
@@ -172,7 +229,7 @@ router.post("/login", async (req, res) => {
     return;
   }
 
-  const tenantScope = getTenantScopeForUser(user);
+  const tenantScope = await resolveTenantScopeForProgram(user, programDomain);
   const orgMemberships = await fetchOrgMemberships(user.id);
   const appInitState = resolveAppInitState(user, orgMemberships.length > 0);
   const token = signToken({
@@ -712,7 +769,7 @@ router.get("/me", requireAuth, async (req, res) => {
     res.status(404).json({ error: "User not found" });
     return;
   }
-  const tenantScope = getTenantScopeForUser(user);
+  const tenantScope = await resolveTenantScopeForProgram(user, payload.programDomain);
   const orgMemberships = await fetchOrgMemberships(user.id);
   const appInitState = resolveAppInitState(user, orgMemberships.length > 0);
   res.json({
