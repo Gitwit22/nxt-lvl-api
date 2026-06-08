@@ -20,6 +20,15 @@ export type PaymentImportConfirmRowDecisionInput = {
   importRowId?: string;
   rowNumber?: number;
   decision: PaymentImportRowDecision;
+  editedNormalized?: {
+    companyName?: string;
+    sponsorshipPackage?: string;
+    amountPaid?: number;
+    paymentStatus?: string;
+    paymentMethod?: string;
+    paymentReference?: string;
+    paymentNotes?: string;
+  };
 };
 
 export type PaymentImportPreviewRow = {
@@ -513,6 +522,42 @@ function readStoredRow(row: { normalizedData: unknown }): StoredPaymentRow {
   };
 }
 
+function mergeEditedStoredRow(
+  normalized: StoredPaymentRow,
+  rowDecision?: PaymentImportConfirmRowDecisionInput,
+): StoredPaymentRow {
+  const edited = rowDecision?.editedNormalized;
+  if (!edited) return normalized;
+
+  const companyName = normalizeTextCell(edited.companyName) ?? normalized.companyName;
+  const sponsorshipPackage = normalizeTextCell(edited.sponsorshipPackage) ?? normalized.sponsorshipPackage;
+  const amountPaid = typeof edited.amountPaid === "number" && Number.isFinite(edited.amountPaid)
+    ? edited.amountPaid
+    : normalized.amountPaid;
+  const paymentMethod = normalizeTextCell(edited.paymentMethod) ?? normalized.paymentMethod;
+  const paymentReference = normalizeTextCell(edited.paymentReference) ?? normalized.paymentReference;
+  const paymentNotes = normalizeTextCell(edited.paymentNotes) ?? normalized.paymentNotes;
+
+  const paymentStatus = normalizeTextCell(edited.paymentStatus)
+    ? inferPaymentStatus({
+      statusRaw: edited.paymentStatus,
+      notes: paymentNotes,
+      sponsorshipPackage,
+    })
+    : normalized.paymentStatus;
+
+  return {
+    ...normalized,
+    companyName,
+    sponsorshipPackage,
+    amountPaid,
+    paymentStatus,
+    paymentMethod,
+    paymentReference,
+    paymentNotes,
+  };
+}
+
 export async function previewPaymentImportForEvent(input: PaymentImportPreviewInput): Promise<PaymentImportPreviewResponse> {
   const parsed = await parseInputTable(input);
   const existingSponsors = await prisma.eventureEventSponsor.findMany({
@@ -732,12 +777,26 @@ export async function confirmPaymentImportForEvent(input: PaymentImportConfirmIn
     orderBy: { rowNumber: "asc" },
   });
 
+  const existingSponsors = await prisma.eventureEventSponsor.findMany({
+    where: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+    },
+    include: {
+      sponsorOrganization: {
+        select: {
+          name: true,
+        },
+      },
+    },
+  });
+
   const decisionByRowId = new Map((input.rowDecisions ?? []).flatMap((decision) => {
-    if (decision.importRowId) return [[decision.importRowId, decision.decision] as const];
+    if (decision.importRowId) return [[decision.importRowId, decision] as const];
     return [];
   }));
   const decisionByRowNumber = new Map((input.rowDecisions ?? []).flatMap((decision) => {
-    if (typeof decision.rowNumber === "number") return [[decision.rowNumber, decision.decision] as const];
+    if (typeof decision.rowNumber === "number") return [[decision.rowNumber, decision] as const];
     return [];
   }));
 
@@ -752,10 +811,22 @@ export async function confirmPaymentImportForEvent(input: PaymentImportConfirmIn
   let paymentSyncedWithoutParticipant = 0;
 
   for (const row of rows) {
-    const normalized = readStoredRow(row);
-    const matchedSponsorId = normalized.matchedSponsor?.id?.trim();
+    const rowDecisionInput = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
+    const normalized = mergeEditedStoredRow(readStoredRow(row), rowDecisionInput);
+    let matchedSponsorId = normalized.matchedSponsor?.id?.trim();
+
+    const rematch = matchSponsorForPaymentRow({
+      sponsors: existingSponsors,
+      companyName: normalized.companyName,
+      sponsorshipPackage: normalized.sponsorshipPackage,
+      paymentReference: normalized.paymentReference,
+    });
+    if (rematch.sponsor?.id) {
+      matchedSponsorId = rematch.sponsor.id;
+    }
+
     const defaultDecision: PaymentImportRowDecision = matchedSponsorId ? "approve" : "skip";
-    const decision = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber) ?? defaultDecision;
+    const decision = rowDecisionInput?.decision ?? defaultDecision;
     const companyName = normalized.companyName ?? `Row ${row.rowNumber}`;
 
     if (decision === "skip") {

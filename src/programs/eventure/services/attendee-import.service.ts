@@ -105,6 +105,15 @@ export type AttendeeImportConfirmRowDecisionInput = {
   finalCompanyId?: string;
   createCompanyName?: string;
   notes?: string;
+  editedNormalized?: {
+    attendeeName?: string;
+    attendeeEmail?: string;
+    attendeePhone?: string;
+    ticketBuyer?: string;
+    ticketType?: string;
+    flight?: "AM" | "PM";
+    amount?: number;
+  };
 };
 
 export type AttendeeImportConfirmResponse = {
@@ -531,6 +540,30 @@ function readNormalizedRow(row: { normalizedData: unknown }) {
   };
 }
 
+type NormalizedAttendeeRow = ReturnType<typeof readNormalizedRow>;
+
+function mergeEditedNormalizedRow(
+  normalized: NormalizedAttendeeRow,
+  rowDecisionInput?: AttendeeImportConfirmRowDecisionInput,
+): NormalizedAttendeeRow {
+  const edited = rowDecisionInput?.editedNormalized;
+  if (!edited) return normalized;
+
+  const amount = typeof edited.amount === "number" && Number.isFinite(edited.amount) ? edited.amount : undefined;
+
+  return {
+    ...normalized,
+    attendeeName: normalizeName(edited.attendeeName) ?? normalized.attendeeName,
+    attendeeEmail: normalizeEmail(edited.attendeeEmail) ?? normalized.attendeeEmail,
+    attendeePhone: cleanPhone(edited.attendeePhone) ?? normalized.attendeePhone,
+    ticketBuyer: normalizeName(edited.ticketBuyer) ?? normalized.ticketBuyer,
+    ticketType: normalizeName(edited.ticketType) ?? normalized.ticketType,
+    flight: edited.flight === "AM" || edited.flight === "PM" ? edited.flight : normalized.flight,
+    amountExpected: amount ?? normalized.amountExpected,
+    amountPaid: amount ?? normalized.amountPaid,
+  };
+}
+
 export async function confirmAttendeeImportForEvent(input: {
   organizationId: string;
   eventId: string;
@@ -561,10 +594,10 @@ export async function confirmAttendeeImportForEvent(input: {
 
   const unresolvedWeakMatchRows: number[] = [];
   for (const row of batch.rows) {
-    const normalized = readNormalizedRow(row);
+    const rowDecisionInput = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
+    const normalized = mergeEditedNormalizedRow(readNormalizedRow(row), rowDecisionInput);
     if (!isWeakCompanyMatchStatus(normalized.suggestedMatchStatus)) continue;
 
-    const rowDecisionInput = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
     const decision = normalizeImportRowDecision(rowDecisionInput);
 
     if (decision === "approve") {
@@ -600,8 +633,8 @@ export async function confirmAttendeeImportForEvent(input: {
   let failedRows = 0;
 
   for (const row of batch.rows) {
-    const normalized = readNormalizedRow(row);
     const rowDecisionInput = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
+    const normalized = mergeEditedNormalizedRow(readNormalizedRow(row), rowDecisionInput);
     const decision = normalizeImportRowDecision(rowDecisionInput);
 
     if (decision === "skip") {

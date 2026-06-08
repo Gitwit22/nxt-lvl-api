@@ -374,4 +374,89 @@ describe("eventure payment import", () => {
     expect(result.summary.paymentSyncedWithoutParticipant).toBe(1);
     expect(result.summary.participantsConfirmed).toBe(0);
   });
+
+  it("uses edited normalized values to rematch sponsor and apply payment fields", async () => {
+    prismaMock.eventureImportBatch.findFirst.mockResolvedValue({
+      id: "batch-4",
+      organizationId: "org-1",
+      eventId: "event-1",
+      sourceType: "payment_import",
+      status: "preview_ready",
+      fileType: "csv",
+      fileName: "payments.csv",
+      mappingConfig: {},
+    });
+    prismaMock.eventureImportRow.findMany.mockResolvedValue([
+      {
+        id: "row-1",
+        rowNumber: 1,
+        normalizedData: {
+          companyName: "Acm Corp",
+          amountPaid: 100,
+          matchedSponsor: {
+            id: "",
+            companyName: "Acm Corp",
+            matchStatus: "Unmatched",
+            confidence: 0,
+          },
+        },
+      },
+    ]);
+    prismaMock.eventureEventSponsor.update.mockResolvedValue({
+      id: "event-sponsor-1",
+      organizationId: "org-1",
+      eventId: "event-1",
+      sponsorOrganizationId: "company-1",
+      sponsorOrganization: { name: "Acme Corp" },
+      attendeeCount: 0,
+    });
+    prismaMock.eventurePayment.findFirst.mockResolvedValue(null);
+    prismaMock.eventurePayment.create.mockResolvedValue({
+      id: "payment-4",
+      paymentStatus: "confirmed",
+      amountDue: 900,
+      amountPaid: 900,
+      balance: 0,
+      paymentMethod: "Wire",
+      paymentReference: null,
+      paymentConfirmedAt: new Date(),
+      notes: "Edited in preview",
+    });
+    prismaMock.eventurePaymentHistory.create.mockResolvedValue({ id: "hist-4" });
+    prismaMock.eventureParticipant.findFirst.mockResolvedValue(null);
+    prismaMock.eventureImportRow.update.mockResolvedValue({ id: "row-1" });
+
+    const result = await confirmPaymentImportForEvent({
+      organizationId: "org-1",
+      eventId: "event-1",
+      createdByUserId: "user-1",
+      importBatchId: "batch-4",
+      rowDecisions: [
+        {
+          importRowId: "row-1",
+          decision: "approve",
+          editedNormalized: {
+            companyName: "Acme Corp",
+            amountPaid: 900,
+            paymentStatus: "Paid",
+            paymentMethod: "Wire",
+            paymentNotes: "Edited in preview",
+          },
+        },
+      ],
+    });
+
+    expect(prismaMock.eventureEventSponsor.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: "event-sponsor-1" },
+        data: expect.objectContaining({
+          amountPaid: 900,
+          paymentMethod: "Wire",
+          paymentNotes: "Edited in preview",
+        }),
+      }),
+    );
+    expect(result.updated).toEqual(["Acme Corp"]);
+    expect(result.summary.importedRows).toBe(1);
+  });
 });

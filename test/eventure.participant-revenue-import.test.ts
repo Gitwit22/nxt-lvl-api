@@ -153,4 +153,66 @@ describe("eventure participant revenue import", () => {
     expect(prismaMock.eventureAttendeeSlot.createMany).toHaveBeenCalled();
     expect(result.summary.participantsConfirmed).toBe(1);
   });
+
+  it("uses row decision finalCompanyId override for payment company resolution", async () => {
+    prismaMock.eventureImportRow.findMany.mockResolvedValue([
+      {
+        id: "row-2",
+        rowNumber: 2,
+        rawData: {
+          company: "Wrong Co",
+          amount: "$300.00",
+          description: "Override test",
+        },
+        normalizedData: {
+          attendeeName: "Alex Example",
+          attendeeEmail: "alex@example.com",
+          suggestedCompany: {
+            id: "company-old",
+            name: "Wrong Co",
+          },
+        },
+      },
+    ]);
+    prismaMock.eventurePayment.findFirst.mockResolvedValue(null);
+    prismaMock.eventurePayment.create.mockResolvedValue({
+      id: "payment-override",
+      organizationId: "org-1",
+      eventId: "evt-1",
+      contactCompanyId: "company-override",
+      amountDue: 300,
+      amountPaid: 300,
+      balance: 0,
+      paymentStatus: "confirmed",
+      paymentMethod: null,
+      paymentConfirmedAt: new Date("2026-06-01T00:00:00.000Z"),
+      notes: "Override test",
+    });
+    prismaMock.eventurePaymentHistory.create.mockResolvedValue({ id: "history-override" });
+    prismaMock.eventureParticipant.findFirst.mockResolvedValue(null);
+
+    await confirmParticipantRevenueImportForEvent({
+      organizationId: "org-1",
+      eventId: "evt-1",
+      createdByUserId: "user-1",
+      importBatchId: "batch-1",
+      rowDecisions: [
+        {
+          importRowId: "row-2",
+          decision: "assign_existing_company",
+          finalCompanyId: "company-override",
+        },
+      ],
+    });
+
+    expect(prismaMock.eventurePayment.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({
+          contactCompanyId: "company-override",
+          amountDue: 300,
+          amountPaid: 300,
+        }),
+      }),
+    );
+  });
 });

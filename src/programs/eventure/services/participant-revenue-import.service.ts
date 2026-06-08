@@ -184,6 +184,9 @@ export async function confirmParticipantRevenueImportForEvent(input: {
     rowDecisions: input.rowDecisions,
   });
 
+  const decisionByRowId = new Map((input.rowDecisions ?? []).filter((item) => item.importRowId).map((item) => [item.importRowId as string, item]));
+  const decisionByRowNumber = new Map((input.rowDecisions ?? []).filter((item) => item.rowNumber !== undefined).map((item) => [item.rowNumber as number, item]));
+
   const importRows = await prisma.eventureImportRow.findMany({
     where: {
       organizationId: input.organizationId,
@@ -213,9 +216,11 @@ export async function confirmParticipantRevenueImportForEvent(input: {
   let participantsConfirmed = 0;
 
   for (const row of importRows) {
+    const rowDecision = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
     const raw = (row.rawData ?? {}) as Record<string, unknown>;
     const normalized = (row.normalizedData ?? {}) as Record<string, unknown>;
     const suggestedCompany = (normalized.suggestedCompany ?? {}) as Record<string, unknown>;
+    const edited = rowDecision?.editedNormalized;
 
     const revenueCompany = readRawString(raw, ["company (revenue file)", "revenue company", "company"]);
     const revenueDescription = readRawString(raw, ["revenue description", "description", "memo", "notes"]);
@@ -225,10 +230,10 @@ export async function confirmParticipantRevenueImportForEvent(input: {
 
     revenueRowsConfirmed += 1;
 
-    const suggestedCompanyId = typeof suggestedCompany.id === "string" ? suggestedCompany.id.trim() : "";
-    const ticketBuyer = readNormalizedString(normalized, "ticketBuyer");
-    const attendeeName = readNormalizedString(normalized, "attendeeName");
-    const attendeeEmail = readNormalizedString(normalized, "attendeeEmail");
+    const suggestedCompanyId = rowDecision?.finalCompanyId?.trim() || (typeof suggestedCompany.id === "string" ? suggestedCompany.id.trim() : "");
+    const ticketBuyer = edited?.ticketBuyer?.trim() || readNormalizedString(normalized, "ticketBuyer");
+    const attendeeName = edited?.attendeeName?.trim() || readNormalizedString(normalized, "attendeeName");
+    const attendeeEmail = edited?.attendeeEmail?.trim() || readNormalizedString(normalized, "attendeeEmail");
     // For revenue-only rows (have amount but no attendee email), treat attendeeName as company name
     const isRevenueOnlyRow = !attendeeEmail;
     const companyAnchor = revenueCompany ?? ticketBuyer ?? (isRevenueOnlyRow ? attendeeName : undefined);
