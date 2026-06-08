@@ -215,4 +215,43 @@ describe("eventure participant revenue import", () => {
       }),
     );
   });
+
+  it("does not process ignored rows for payment or unmatched revenue", async () => {
+    prismaMock.eventureImportRow.findMany.mockResolvedValue([
+      {
+        id: "row-ignore",
+        rowNumber: 8,
+        rawData: {
+          company: "Ignored Co",
+          amount: "$450.00",
+          description: "Ignored revenue",
+        },
+        normalizedData: {
+          suggestedCompany: {
+            id: "company-ignore",
+            name: "Ignored Co",
+          },
+        },
+      },
+    ]);
+
+    const result = await confirmParticipantRevenueImportForEvent({
+      organizationId: "org-1",
+      eventId: "evt-1",
+      createdByUserId: "user-1",
+      importBatchId: "batch-1",
+      rowDecisions: [
+        {
+          importRowId: "row-ignore",
+          decision: "ignore",
+        },
+      ],
+    });
+
+    expect(prismaMock.eventurePayment.create).not.toHaveBeenCalled();
+    expect(prismaMock.eventureUnmatchedRevenue.create).not.toHaveBeenCalled();
+    expect(result.summary.revenueRowsConfirmed).toBe(0);
+    expect(result.summary.paymentsUpserted).toBe(0);
+    expect(result.summary.unmatchedRevenueRowsCreated).toBe(0);
+  });
 });

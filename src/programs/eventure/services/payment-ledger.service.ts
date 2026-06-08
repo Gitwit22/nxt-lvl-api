@@ -35,6 +35,17 @@ export async function recordEventurePaymentTransaction(input: RecordPaymentTrans
   const db = input.db ?? prisma;
   const now = input.transactionAt ?? new Date();
 
+  const lineItems = Array.isArray(input.lineItems) && input.lineItems.length > 0
+    ? input.lineItems
+    : [{
+      category: "UNSPECIFIED",
+      amount: input.amountPaid,
+      description: input.notes,
+    }];
+
+  const rollupAmountPaid = lineItems.reduce((sum, item) => sum + item.amount, 0);
+  const rollupAmountDue = Math.max(input.amountDue, rollupAmountPaid);
+
   const existingPayment = await db.eventurePayment.findFirst({
     where: {
       organizationId: input.organizationId,
@@ -49,9 +60,9 @@ export async function recordEventurePaymentTransaction(input: RecordPaymentTrans
       where: { id: existingPayment.id },
       data: {
         participantId: input.participantId ?? existingPayment.participantId,
-        amountDue: input.amountDue,
-        amountPaid: input.amountPaid,
-        balance: input.amountDue - input.amountPaid,
+        amountDue: rollupAmountDue,
+        amountPaid: rollupAmountPaid,
+        balance: rollupAmountDue - rollupAmountPaid,
         paymentStatus: "confirmed",
         paymentMethod: input.paymentMethod ?? existingPayment.paymentMethod,
         paymentConfirmedAt: now,
@@ -64,9 +75,9 @@ export async function recordEventurePaymentTransaction(input: RecordPaymentTrans
         eventId: input.eventId,
         contactCompanyId: input.contactCompanyId,
         participantId: input.participantId ?? null,
-        amountDue: input.amountDue,
-        amountPaid: input.amountPaid,
-        balance: input.amountDue - input.amountPaid,
+        amountDue: rollupAmountDue,
+        amountPaid: rollupAmountPaid,
+        balance: rollupAmountDue - rollupAmountPaid,
         paymentStatus: "confirmed",
         paymentMethod: input.paymentMethod ?? null,
         paymentConfirmedAt: now,
@@ -89,14 +100,6 @@ export async function recordEventurePaymentTransaction(input: RecordPaymentTrans
     },
   });
 
-  const lineItems = Array.isArray(input.lineItems) && input.lineItems.length > 0
-    ? input.lineItems
-    : [{
-      category: "UNSPECIFIED",
-      amount: input.amountPaid,
-      description: input.notes,
-    }];
-
   const transaction = await db.eventurePaymentTransaction.create({
     data: {
       organizationId: input.organizationId,
@@ -110,7 +113,7 @@ export async function recordEventurePaymentTransaction(input: RecordPaymentTrans
       referenceKey: input.referenceKey ?? null,
       paymentMethod: input.paymentMethod ?? null,
       notes: input.notes ?? null,
-      totalAmount: lineItems.reduce((sum, item) => sum + item.amount, 0),
+      totalAmount: rollupAmountPaid,
       transactionAt: now,
       createdByUserId: input.changedByUserId ?? null,
     },

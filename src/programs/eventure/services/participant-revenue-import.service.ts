@@ -218,6 +218,10 @@ export async function confirmParticipantRevenueImportForEvent(input: {
 
   for (const row of importRows) {
     const rowDecision = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
+    if (rowDecision?.decision === "ignore" || rowDecision?.decision === "skip") {
+      continue;
+    }
+
     const raw = (row.rawData ?? {}) as Record<string, unknown>;
     const normalized = (row.normalizedData ?? {}) as Record<string, unknown>;
     const suggestedCompany = (normalized.suggestedCompany ?? {}) as Record<string, unknown>;

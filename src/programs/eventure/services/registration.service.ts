@@ -11,6 +11,7 @@ import {
   updateRegistrationById,
   type CreateEventureRegistrationInput,
 } from "../repositories/registration.repository.js";
+import { prisma } from "../../../core/db/prisma.js";
 import { assignRegistrationToSlot } from "./workspace.service.js";
 import { EventureServiceError } from "./eventure-error.js";
 
@@ -20,7 +21,51 @@ export async function listAttendeesForEvent(organizationId: string, eventId: str
     throw new EventureServiceError("Event not found.", 404);
   }
 
-  return listRegistrationsForEvent(organizationId, eventId);
+  const registrations = await listRegistrationsForEvent(organizationId, eventId);
+
+  const companyIds = Array.from(
+    new Set(
+      registrations
+        .map((registration) => registration.contactCompanyId)
+        .filter((value): value is string => typeof value === "string" && value.trim().length > 0),
+    ),
+  );
+
+  if (companyIds.length === 0) {
+    return registrations;
+  }
+
+  const payments = await prisma.eventurePayment.findMany({
+    where: {
+      organizationId,
+      eventId,
+      contactCompanyId: { in: companyIds },
+    },
+    orderBy: [{ updatedAt: "desc" }],
+  });
+
+  const latestPaymentByCompany = new Map<string, (typeof payments)[number]>();
+  for (const payment of payments) {
+    if (!latestPaymentByCompany.has(payment.contactCompanyId)) {
+      latestPaymentByCompany.set(payment.contactCompanyId, payment);
+    }
+  }
+
+  return registrations.map((registration) => {
+    if (!registration.contactCompanyId) {
+      return registration;
+    }
+
+    const latestPayment = latestPaymentByCompany.get(registration.contactCompanyId);
+    if (!latestPayment?.paymentStatus) {
+      return registration;
+    }
+
+    return {
+      ...registration,
+      paymentStatus: latestPayment.paymentStatus,
+    };
+  });
 }
 
 export async function createAttendeeRegistrationForEvent(input: CreateEventureRegistrationInput) {
