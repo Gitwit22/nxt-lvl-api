@@ -11,8 +11,29 @@ type ConfirmPaymentInput = {
   amountPaid?: number;
   paymentMethod?: string | null;
   notes?: string | null;
+  lineItems?: Array<{
+    category: string;
+    amount: number;
+    description?: string | null;
+  }>;
   actorUserId?: string;
   forceRemoveNamedSlots?: boolean;
+};
+
+type CreatePaymentTransactionInput = {
+  organizationId: string;
+  eventId: string;
+  contactCompanyId: string;
+  amountDue?: number;
+  amountPaid: number;
+  paymentMethod?: string | null;
+  notes?: string | null;
+  lineItems?: Array<{
+    category: string;
+    amount: number;
+    description?: string | null;
+  }>;
+  actorUserId?: string;
 };
 
 function readLabelList(raw: unknown): string[] {
@@ -475,13 +496,15 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
       changedByUserId: input.actorUserId,
       transactionType: "manual_confirm",
       source: "workspace_confirm",
-      lineItems: [
-        {
-          category: "PARTICIPANT_PACKAGE",
-          amount: amountPaid,
-          description: input.notes ?? "Manual payment confirmation",
-        },
-      ],
+      lineItems: input.lineItems?.length
+        ? input.lineItems
+        : [
+          {
+            category: "PARTICIPANT_PACKAGE",
+            amount: amountPaid,
+            description: input.notes ?? "Manual payment confirmation",
+          },
+        ],
     });
 
     await tx.eventurePayment.update({
@@ -555,6 +578,62 @@ export async function listParticipantsForEvent(organizationId: string, eventId: 
     },
     orderBy: [{ companyName: "asc" }],
   });
+}
+
+export async function createStandalonePaymentTransaction(input: CreatePaymentTransactionInput) {
+  if (!Number.isFinite(input.amountPaid) || input.amountPaid < 0) {
+    throw new EventureServiceError("amountPaid must be 0 or greater.", 400);
+  }
+
+  const eventSponsor = await ensureEventAndCompany(input);
+
+  const participant = await prisma.eventureParticipant.findUnique({
+    where: {
+      organizationId_eventId_contactCompanyId: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: input.contactCompanyId,
+      },
+    },
+  });
+
+  const amountDue = input.amountDue ?? eventSponsor.committedAmount ?? input.amountPaid;
+
+  const { payment, transaction } = await prisma.$transaction(async (tx) => {
+    const result = await recordEventurePaymentTransaction({
+      db: tx,
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      contactCompanyId: input.contactCompanyId,
+      participantId: participant?.id,
+      amountDue,
+      amountPaid: input.amountPaid,
+      paymentMethod: input.paymentMethod,
+      notes: input.notes,
+      changedByUserId: input.actorUserId,
+      transactionType: "manual_transaction",
+      source: "workspace_transaction",
+      lineItems: input.lineItems,
+    });
+
+    if (participant) {
+      await tx.eventureParticipant.update({
+        where: { id: participant.id },
+        data: {
+          paymentId: result.payment.id,
+          paymentConfirmed: true,
+        },
+      });
+    }
+
+    return result;
+  });
+
+  return {
+    payment,
+    transaction,
+    participant,
+  };
 }
 
 export async function updateParticipantFlightAssignment(input: {

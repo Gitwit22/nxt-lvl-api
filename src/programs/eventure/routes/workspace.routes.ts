@@ -4,6 +4,7 @@ import { requireAuth } from "../../../core/middleware/auth.middleware.js";
 import {
   cleanupUnconfirmedParticipants,
   confirmPaymentAndSyncParticipant,
+  createStandalonePaymentTransaction,
   createAssignmentForEvent,
   listAttendeesForEvent,
   listAssignmentsForEvent,
@@ -53,6 +54,38 @@ function readNumber(value: unknown): number | undefined {
   return undefined;
 }
 
+function readLineItems(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new EventureServiceError("lineItems must be an array when provided.", 400);
+  }
+
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new EventureServiceError(`lineItems[${index}] must be an object.`, 400);
+    }
+
+    const record = item as Record<string, unknown>;
+    const category = readString(record["category"]);
+    const amount = readNumber(record["amount"]);
+    const description = readNullableString(record["description"]);
+
+    if (!category) {
+      throw new EventureServiceError(`lineItems[${index}].category is required.`, 400);
+    }
+
+    if (amount === undefined) {
+      throw new EventureServiceError(`lineItems[${index}].amount is required.`, 400);
+    }
+
+    if (amount < 0) {
+      throw new EventureServiceError(`lineItems[${index}].amount must be 0 or greater.`, 400);
+    }
+
+    return { category, amount, description };
+  });
+}
+
 function handleError(res: express.Response, error: unknown) {
   if (error instanceof EventureServiceError) {
     res.status(error.statusCode).json({ error: error.message });
@@ -100,11 +133,45 @@ router.post("/payments/confirm", async (req, res) => {
       amountPaid: readNumber(req.body?.amountPaid),
       paymentMethod: readNullableString(req.body?.paymentMethod),
       notes: readNullableString(req.body?.notes),
+      lineItems: readLineItems(req.body?.lineItems),
       actorUserId: user!.userId,
       forceRemoveNamedSlots: readBoolean(req.body?.forceRemoveNamedSlots),
     });
 
     res.json({ item });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.post("/payments/transactions", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const contactCompanyId = readString(req.body?.contactCompanyId);
+    const amountPaid = readNumber(req.body?.amountPaid);
+
+    if (!contactCompanyId) {
+      throw new EventureServiceError("contactCompanyId is required.", 400);
+    }
+
+    if (amountPaid === undefined) {
+      throw new EventureServiceError("amountPaid is required.", 400);
+    }
+
+    const item = await createStandalonePaymentTransaction({
+      organizationId: user!.organizationId,
+      eventId,
+      contactCompanyId,
+      amountDue: readNumber(req.body?.amountDue),
+      amountPaid,
+      paymentMethod: readNullableString(req.body?.paymentMethod),
+      notes: readNullableString(req.body?.notes),
+      lineItems: readLineItems(req.body?.lineItems),
+      actorUserId: user!.userId,
+    });
+
+    res.status(201).json({ item });
   } catch (error) {
     handleError(res, error);
   }
