@@ -754,6 +754,310 @@ export async function updateParticipantAttendeeCount(input: {
   });
 }
 
+export async function removeParticipantFromEvent(input: {
+  organizationId: string;
+  eventId: string;
+  participantId: string;
+}) {
+  const participant = await prisma.eventureParticipant.findFirst({
+    where: {
+      id: input.participantId,
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+    },
+    select: {
+      id: true,
+      contactCompanyId: true,
+    },
+  });
+
+  if (!participant) {
+    throw new EventureServiceError("Participant not found.", 404);
+  }
+
+  await prisma.$transaction(async (tx) => {
+    await tx.eventurePayment.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: participant.id,
+      },
+      data: {
+        participantId: null,
+      },
+    });
+
+    await tx.eventurePaymentTransaction.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: participant.id,
+      },
+      data: {
+        participantId: null,
+      },
+    });
+
+    await tx.eventurePaymentLineItem.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: participant.id,
+      },
+      data: {
+        participantId: null,
+      },
+    });
+
+    await tx.eventureUnmatchedRevenue.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        matchedParticipantId: participant.id,
+      },
+      data: {
+        matchedParticipantId: null,
+      },
+    });
+
+    await tx.eventureParticipant.delete({
+      where: { id: participant.id },
+    });
+  });
+
+  return {
+    removedParticipantId: participant.id,
+    contactCompanyId: participant.contactCompanyId,
+  };
+}
+
+export async function mergeParticipantIntoCompany(input: {
+  organizationId: string;
+  eventId: string;
+  sourceParticipantId: string;
+  targetCompanyId: string;
+}) {
+  const sourceParticipant = await prisma.eventureParticipant.findFirst({
+    where: {
+      id: input.sourceParticipantId,
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+    },
+    select: {
+      id: true,
+      contactCompanyId: true,
+      companyName: true,
+      paymentConfirmed: true,
+      flightAssignment: true,
+    },
+  });
+
+  if (!sourceParticipant) {
+    throw new EventureServiceError("Source participant not found.", 404);
+  }
+
+  if (sourceParticipant.contactCompanyId === input.targetCompanyId) {
+    throw new EventureServiceError("Target company must be different from source company.", 400);
+  }
+
+  const targetSponsor = await ensureEventAndCompany({
+    organizationId: input.organizationId,
+    eventId: input.eventId,
+    contactCompanyId: input.targetCompanyId,
+  });
+
+  const merged = await prisma.$transaction(async (tx) => {
+    const existingTarget = await tx.eventureParticipant.findUnique({
+      where: {
+        organizationId_eventId_contactCompanyId: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: input.targetCompanyId,
+        },
+      },
+      select: {
+        id: true,
+        companyName: true,
+        paymentConfirmed: true,
+        flightAssignment: true,
+      },
+    });
+
+    const targetParticipant = existingTarget
+      ? await tx.eventureParticipant.update({
+        where: { id: existingTarget.id },
+        data: {
+          companyName: targetSponsor.sponsorOrganization.name,
+        },
+        select: {
+          id: true,
+          companyName: true,
+          paymentConfirmed: true,
+          flightAssignment: true,
+        },
+      })
+      : await tx.eventureParticipant.create({
+        data: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: input.targetCompanyId,
+          companyName: targetSponsor.sponsorOrganization.name,
+          paymentConfirmed: sourceParticipant.paymentConfirmed,
+          attendeeCount: 0,
+          flightAssignment: sourceParticipant.flightAssignment,
+          status: "active",
+        },
+        select: {
+          id: true,
+          companyName: true,
+          paymentConfirmed: true,
+          flightAssignment: true,
+        },
+      });
+
+    const [targetSlots, sourceSlots] = await Promise.all([
+      tx.eventureAttendeeSlot.findMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: targetParticipant.id,
+        },
+        orderBy: [{ slotNumber: "asc" }],
+      }),
+      tx.eventureAttendeeSlot.findMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: sourceParticipant.id,
+        },
+        orderBy: [{ slotNumber: "asc" }],
+      }),
+    ]);
+
+    let nextSlotNumber = (targetSlots[targetSlots.length - 1]?.slotNumber ?? 0) + 1;
+    for (const slot of sourceSlots) {
+      await tx.eventureAttendeeSlot.update({
+        where: { id: slot.id },
+        data: {
+          participantId: targetParticipant.id,
+          companyName: targetSponsor.sponsorOrganization.name,
+          slotNumber: nextSlotNumber,
+          displayName: `${targetSponsor.sponsorOrganization.name} Attendee ${nextSlotNumber}`,
+          flightAssignment: targetParticipant.flightAssignment,
+        },
+      });
+      nextSlotNumber += 1;
+    }
+
+    await tx.eventureAssignment.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: sourceParticipant.id,
+      },
+      data: {
+        participantId: targetParticipant.id,
+      },
+    });
+
+    await tx.eventurePayment.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: sourceParticipant.contactCompanyId,
+      },
+      data: {
+        contactCompanyId: input.targetCompanyId,
+        participantId: targetParticipant.id,
+      },
+    });
+
+    await tx.eventurePaymentTransaction.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: sourceParticipant.contactCompanyId,
+      },
+      data: {
+        contactCompanyId: input.targetCompanyId,
+        participantId: targetParticipant.id,
+      },
+    });
+
+    await tx.eventurePaymentLineItem.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: sourceParticipant.contactCompanyId,
+      },
+      data: {
+        contactCompanyId: input.targetCompanyId,
+        participantId: targetParticipant.id,
+      },
+    });
+
+    await tx.eventureUnmatchedRevenue.updateMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        matchedParticipantId: sourceParticipant.id,
+      },
+      data: {
+        matchedParticipantId: targetParticipant.id,
+      },
+    });
+
+    const latestTargetPayment = await tx.eventurePayment.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: input.targetCompanyId,
+      },
+      orderBy: [{ updatedAt: "desc" }],
+      select: {
+        id: true,
+        paymentStatus: true,
+      },
+    });
+
+    const targetSlotCount = await tx.eventureAttendeeSlot.count({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: targetParticipant.id,
+      },
+    });
+
+    await tx.eventureParticipant.update({
+      where: { id: targetParticipant.id },
+      data: {
+        attendeeCount: targetSlotCount,
+        paymentId: latestTargetPayment?.id ?? null,
+        paymentConfirmed: latestTargetPayment?.paymentStatus === "confirmed" || sourceParticipant.paymentConfirmed || targetParticipant.paymentConfirmed,
+        companyName: targetSponsor.sponsorOrganization.name,
+      },
+    });
+
+    await tx.eventureParticipant.delete({ where: { id: sourceParticipant.id } });
+
+    return tx.eventureParticipant.findUnique({
+      where: { id: targetParticipant.id },
+      include: {
+        attendeeSlots: {
+          orderBy: [{ slotNumber: "asc" }],
+        },
+        payment: true,
+      },
+    });
+  });
+
+  return {
+    mergedParticipant: merged,
+    sourceParticipantId: sourceParticipant.id,
+    targetCompanyId: input.targetCompanyId,
+  };
+}
+
 export async function listVolunteersForEvent(organizationId: string, eventId: string) {
   return prisma.eventureEventVolunteerNeed.findMany({
     where: {

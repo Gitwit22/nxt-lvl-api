@@ -11,6 +11,8 @@ import {
   listParticipantsForEvent,
   listPaymentsForEvent,
   listVolunteersForEvent,
+  mergeParticipantIntoCompany,
+  removeParticipantFromEvent,
   updateAttendeeSlot,
   updateParticipantAttendeeCount,
   updateParticipantFlightAssignment,
@@ -240,6 +242,48 @@ router.patch("/participants/:participantId/attendee-count", async (req, res) => 
       participantId,
       attendeeCount,
       forceRemoveNamedSlots: readBoolean(req.body?.forceRemoveNamedSlots),
+    });
+
+    res.json({ item });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.delete("/participants/:participantId", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const participantId = readRouteParam(req.params["participantId"], "participantId");
+
+    const item = await removeParticipantFromEvent({
+      organizationId: user!.organizationId,
+      eventId,
+      participantId,
+    });
+
+    res.json({ item });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.post("/participants/:participantId/merge", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const participantId = readRouteParam(req.params["participantId"], "participantId");
+    const targetCompanyId = readString(req.body?.targetCompanyId);
+
+    if (!targetCompanyId) {
+      throw new EventureServiceError("targetCompanyId is required.", 400);
+    }
+
+    const item = await mergeParticipantIntoCompany({
+      organizationId: user!.organizationId,
+      eventId,
+      sourceParticipantId: participantId,
+      targetCompanyId,
     });
 
     res.json({ item });
