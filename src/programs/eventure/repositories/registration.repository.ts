@@ -35,6 +35,7 @@ export type UpdateEventureRegistrationInput = {
   registrationType?: string;
   registrationStatus?: string;
   paymentStatus?: string;
+  contactCompanyId?: string | null;
   ticketTypeId?: string | null;
   groupId?: string | null;
   householdId?: string | null;

@@ -75,9 +75,10 @@ function readRawString(raw: Record<string, unknown>, aliases: string[]): string 
 }
 
 function readRawRevenueAmount(raw: Record<string, unknown>): number | undefined {
-  const text = readRawString(raw, ["revenue amount", "amount", "revenue"]);
+  const text = readRawString(raw, ["revenue amount", "revenue amt", "revenue total"]);
   if (!text) return undefined;
   const normalized = text.replace(/[^\d.-]/g, "");
+  if (!normalized) return undefined;
   const value = Number(normalized);
   return Number.isFinite(value) ? value : undefined;
 }

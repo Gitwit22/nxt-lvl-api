@@ -139,6 +139,94 @@ export async function reconcileAttendeeSlots(input: {
   }
 }
 
+export async function assignRegistrationToSlot(input: {
+  organizationId: string;
+  eventId: string;
+  registrationId: string;
+  contactCompanyId: string;
+  attendeeFullName?: string | null;
+  actorUserId?: string;
+}): Promise<void> {
+  const participant = await prisma.eventureParticipant.findUnique({
+    where: {
+      organizationId_eventId_contactCompanyId: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: input.contactCompanyId,
+      },
+    },
+  });
+
+  // No participant yet for this company — nothing to link.
+  if (!participant) return;
+
+  await prisma.$transaction(async (tx) => {
+    // Check if this registration already has a slot assigned.
+    const alreadyLinked = await tx.eventureAttendeeSlot.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        registrationId: input.registrationId,
+      },
+    });
+    if (alreadyLinked) return;
+
+    // Find the lowest open slot (no registrationId) for this participant.
+    const openSlot = await tx.eventureAttendeeSlot.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: participant.id,
+        registrationId: null,
+      },
+      orderBy: [{ slotNumber: "asc" }],
+    });
+
+    if (openSlot) {
+      // Link the registration to the open slot.
+      await tx.eventureAttendeeSlot.update({
+        where: { id: openSlot.id },
+        data: {
+          registrationId: input.registrationId,
+          actualName: openSlot.actualName?.trim() ? openSlot.actualName : (input.attendeeFullName?.trim() || null),
+        },
+      });
+    } else {
+      // All slots occupied — create an overflow slot and increment attendeeCount.
+      const maxSlot = await tx.eventureAttendeeSlot.findFirst({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: participant.id,
+        },
+        orderBy: [{ slotNumber: "desc" }],
+      });
+
+      const nextSlotNumber = (maxSlot?.slotNumber ?? 0) + 1;
+      const companyName = participant.companyName;
+
+      await tx.eventureAttendeeSlot.create({
+        data: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: participant.id,
+          companyName,
+          registrationId: input.registrationId,
+          slotNumber: nextSlotNumber,
+          displayName: `${companyName} Attendee ${nextSlotNumber}`,
+          actualName: input.attendeeFullName?.trim() || null,
+          flightAssignment: participant.flightAssignment,
+        },
+      });
+
+      await tx.eventureParticipant.update({
+        where: { id: participant.id },
+        data: { attendeeCount: { increment: 1 } },
+      });
+    }
+  });
+}
+
 export async function listPaymentsForEvent(organizationId: string, eventId: string) {
   const sponsors = await prisma.eventureEventSponsor.findMany({
     where: {
@@ -217,6 +305,79 @@ export async function listAttendeesForEvent(organizationId: string, eventId: str
       { slotNumber: "asc" },
     ],
   });
+}
+
+async function syncRegistrationsOnPaymentConfirm(input: {
+  organizationId: string;
+  eventId: string;
+  contactCompanyId: string;
+  participantId: string;
+  actorUserId?: string;
+}): Promise<void> {
+  const now = new Date();
+
+  // Step 1: Mark all unpaid registrations for this company as "paid".
+  await prisma.eventureRegistration.updateMany({
+    where: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      contactCompanyId: input.contactCompanyId,
+      paymentStatus: { not: "paid" },
+    },
+    data: {
+      paymentStatus: "paid",
+      paymentRecordedAt: now,
+      paymentRecordedByUserId: input.actorUserId ?? null,
+    },
+  });
+
+  // Step 2: Pair all "paid" registrations (oldest first) with slots (lowest slotNumber first)
+  // and write registrationId where the slot is still unlinked.
+  const [paidRegistrations, allSlots] = await Promise.all([
+    prisma.eventureRegistration.findMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: input.contactCompanyId,
+        paymentStatus: "paid",
+      },
+      include: { attendee: true },
+      orderBy: [{ createdAt: "asc" }],
+    }),
+    prisma.eventureAttendeeSlot.findMany({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: input.participantId,
+      },
+      orderBy: [{ slotNumber: "asc" }],
+    }),
+  ]);
+
+  // Build a set of registrationIds already linked to a slot so we skip them.
+  const alreadyLinked = new Set(
+    allSlots.map((s) => s.registrationId).filter((id): id is string => id !== null),
+  );
+
+  const unlinkedRegistrations = paidRegistrations.filter((r) => !alreadyLinked.has(r.id));
+  const openSlots = allSlots.filter((s) => s.registrationId === null);
+
+  // Pair deterministically: first unlinked reg → first open slot, etc.
+  const pairs = unlinkedRegistrations.map((reg, index) => ({ reg, slot: openSlots[index] ?? null }));
+
+  for (const { reg, slot } of pairs) {
+    if (slot) {
+      await prisma.eventureAttendeeSlot.update({
+        where: { id: slot.id },
+        data: {
+          registrationId: reg.id,
+          actualName: slot.actualName?.trim() ? slot.actualName : (reg.attendee?.fullName?.trim() || null),
+        },
+      });
+    }
+    // Registrations without a corresponding slot are left unlinked;
+    // they will be assigned when the attendeeCount is increased or on a future confirmPayment call.
+  }
 }
 
 export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInput) {
@@ -341,6 +502,16 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
     attendeeCount: input.attendeeCount,
     flightAssignment: result.participant.flightAssignment,
     forceRemoveNamedSlots: input.forceRemoveNamedSlots,
+  });
+
+  // Reverse sync: mark all unlinked registrations for this company as "paid"
+  // and pair them deterministically with slots by createdAt / slotNumber order.
+  await syncRegistrationsOnPaymentConfirm({
+    organizationId: input.organizationId,
+    eventId: input.eventId,
+    contactCompanyId: input.contactCompanyId,
+    participantId: result.participant.id,
+    actorUserId: input.actorUserId,
   });
 
   const [participant, slots] = await Promise.all([

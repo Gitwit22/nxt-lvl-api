@@ -103,6 +103,7 @@ router.patch("/:registrationId/payment-status", async (req, res) => {
       organizationId: user!.organizationId,
       registrationId: req.params.registrationId,
       paymentStatus,
+      contactCompanyId: req.body?.contactCompanyId === null ? null : readString(req.body?.contactCompanyId),
       amountExpected: readFloat(req.body?.amountExpected),
       amountPaid: readFloat(req.body?.amountPaid),
       paymentMethod: req.body?.paymentMethod === null ? null : readString(req.body?.paymentMethod),

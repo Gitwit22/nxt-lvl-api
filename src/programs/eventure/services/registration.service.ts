@@ -11,6 +11,7 @@ import {
   updateRegistrationById,
   type CreateEventureRegistrationInput,
 } from "../repositories/registration.repository.js";
+import { assignRegistrationToSlot } from "./workspace.service.js";
 import { EventureServiceError } from "./eventure-error.js";
 
 export async function listAttendeesForEvent(organizationId: string, eventId: string) {
@@ -101,6 +102,7 @@ export async function updatePaymentStatusForRegistration(input: {
   organizationId: string;
   registrationId: string;
   paymentStatus: string;
+  contactCompanyId?: string | null;
   amountExpected?: number;
   amountPaid?: number;
   paymentMethod?: string | null;
@@ -114,8 +116,12 @@ export async function updatePaymentStatusForRegistration(input: {
     throw new EventureServiceError("paymentStatus is required.", 400);
   }
 
-  return patchRegistrationForOrganization(input.organizationId, input.registrationId, {
+  const contactCompanyId =
+    input.contactCompanyId !== undefined ? input.contactCompanyId : current.contactCompanyId;
+
+  const updated = await patchRegistrationForOrganization(input.organizationId, input.registrationId, {
     paymentStatus: input.paymentStatus,
+    contactCompanyId,
     amountExpected: input.amountExpected ?? current.amountExpected,
     amountPaid: input.amountPaid ?? current.amountPaid,
     paymentMethod: input.paymentMethod ?? current.paymentMethod,
@@ -124,6 +130,24 @@ export async function updatePaymentStatusForRegistration(input: {
     paymentRecordedAt: new Date(),
     paymentRecordedByUserId: input.actorUserId ?? null,
   });
+
+  // Best-effort: attempt slot assignment when status becomes "paid" and company is known.
+  if (input.paymentStatus === "paid" && contactCompanyId) {
+    try {
+      await assignRegistrationToSlot({
+        organizationId: input.organizationId,
+        eventId: current.eventId,
+        registrationId: input.registrationId,
+        contactCompanyId,
+        attendeeFullName: current.attendee?.fullName,
+        actorUserId: input.actorUserId,
+      });
+    } catch {
+      // Non-fatal — slot assignment failure does not fail the status update.
+    }
+  }
+
+  return updated;
 }
 
 export async function listCheckInsForOrganizationEvent(organizationId: string, eventId: string) {
