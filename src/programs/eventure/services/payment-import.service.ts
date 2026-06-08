@@ -139,7 +139,9 @@ type StoredPaymentRow = {
   };
 };
 
-type EventSponsorWithOrganization = Awaited<ReturnType<typeof prisma.eventureEventSponsor.findMany>>[number];
+type EventSponsorWithOrganization = Prisma.EventureEventSponsorGetPayload<{
+  include: { sponsorOrganization: { select: { name: true } } };
+}>;
 
 const COL_ALIASES: Record<string, string[]> = {
   company: ["company", "sponsor", "organization", "companyname", "sponsorcompany"],
@@ -238,7 +240,7 @@ function scoreHeaderRow(row: string[]): number {
   return row.reduce((score, cell) => {
     const normalized = normalizeColName(cell);
     if (!normalized) return score;
-    return score + Object.values(COL_ALIASES).some((aliases) => aliases.includes(normalized)) ? 1 : 0;
+    return score + (Object.values(COL_ALIASES).some((aliases) => aliases.includes(normalized)) ? 1 : 0);
   }, 0);
 }
 
@@ -816,7 +818,6 @@ export async function confirmPaymentImportForEvent(input: PaymentImportConfirmIn
           eventId: true,
           sponsorOrganizationId: true,
           sponsorOrganization: { select: { name: true } },
-          attendeeCount: true,
         },
       });
 
@@ -846,7 +847,6 @@ export async function confirmPaymentImportForEvent(input: PaymentImportConfirmIn
               balance: balanceResolved,
               paymentStatus: "confirmed",
               paymentMethod: normalized.paymentMethod ?? existingPayment.paymentMethod,
-              paymentReference: normalized.paymentReference ?? existingPayment.paymentReference,
               notes: normalized.paymentNotes ?? existingPayment.notes,
               paymentConfirmedAt: new Date(),
             },
@@ -861,7 +861,6 @@ export async function confirmPaymentImportForEvent(input: PaymentImportConfirmIn
               balance: balanceResolved,
               paymentStatus: "confirmed",
               paymentMethod: normalized.paymentMethod ?? null,
-              paymentReference: normalized.paymentReference ?? null,
               notes: normalized.paymentNotes ?? null,
               paymentConfirmedAt: new Date(),
             },
