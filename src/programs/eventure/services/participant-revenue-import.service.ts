@@ -78,8 +78,12 @@ function readRawString(raw: Record<string, unknown>, aliases: string[]): string 
 function readRawRevenueAmount(raw: Record<string, unknown>): number | undefined {
   const text = readRawString(raw, ["revenue amount", "revenue amt", "revenue total", "amount"]);
   if (!text) return undefined;
-  const normalized = text.replace(/[^\d.-]/g, "");
-  if (!normalized) return undefined;
+
+  // Parse the first numeric token only; this avoids joining values like
+  // "2500 / 4000" into a single invalid number (25004000).
+  const match = text.match(/-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?/);
+  if (!match) return undefined;
+  const normalized = match[0].replace(/,/g, "");
   const value = Number(normalized);
   return Number.isFinite(value) ? value : undefined;
 }
