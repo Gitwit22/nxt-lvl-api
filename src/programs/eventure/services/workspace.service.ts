@@ -279,6 +279,10 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
     const participant = participantByCompany.get(sponsor.sponsorOrganizationId) ?? null;
     const primaryContact = sponsor.sponsorOrganization.contacts[0] ?? null;
 
+    // Exclude pure contact-only entries: companies with neither a payment record
+    // nor a participant record have no payment activity for this event.
+    if (payment === null && participant === null) return null;
+
     return {
       contactCompanyId: sponsor.sponsorOrganizationId,
       companyName: sponsor.sponsorOrganization.name,
@@ -291,7 +295,7 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
       participant,
       convertedToParticipant: Boolean(participant?.paymentConfirmed),
     };
-  });
+  }).filter((row): row is Exclude<typeof row, null> => row !== null);
 }
 
 export async function listAttendeesForEvent(organizationId: string, eventId: string) {
