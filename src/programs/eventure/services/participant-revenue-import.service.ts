@@ -101,7 +101,7 @@ function parseMoneyToken(token: string): number | undefined {
 }
 
 function readRawRevenueAmountText(raw: Record<string, unknown>): string | undefined {
-  return readRawString(raw, ["revenue amount", "revenue amt", "revenue total", "amount"]);
+  return readRawString(raw, ["revenue amount", "revenue amt", "revenue total", "total amount"]);
 }
 
 function parseRevenueAmountValues(raw: Record<string, unknown>): { values: number[]; warnings: string[] } {
@@ -501,24 +501,42 @@ export async function confirmParticipantRevenueImportForEvent(input: {
     }
 
     continue;
+  }
 
-    await prisma.eventureUnmatchedRevenue.create({
-      data: {
-        organizationId: input.organizationId,
-        eventId: input.eventId,
-        importBatchId: input.importBatchId,
-        importRowId: row.id,
-        rowNumber: row.rowNumber,
-        sourceCompanyName: companyAnchor,
-        ticketBuyer,
-        attendeeName,
-        attendeeEmail,
-        amount: revenueAmount,
-        description: revenueDescription,
-        status: "unmatched",
-      },
+  // Second pass: create participants for approved rows that have a matched company
+  // but no revenue entries (e.g. rows where the revenue column was blank/missing).
+  // These attendees are confirmed participants but payment will be recorded separately.
+  for (const row of importRows) {
+    const rowDecision = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
+    if (rowDecision?.decision === "ignore" || rowDecision?.decision === "skip") {
+      continue;
+    }
+
+    const normalized = (row.normalizedData ?? {}) as Record<string, unknown>;
+    const suggestedCompany = (normalized.suggestedCompany ?? {}) as Record<string, unknown>;
+    const contactCompanyId =
+      rowDecision?.finalCompanyId?.trim() ||
+      (typeof suggestedCompany.id === "string" ? suggestedCompany.id : undefined);
+
+    if (!contactCompanyId) continue;
+    if (groupedRevenue.has(contactCompanyId)) continue;
+
+    const companyName = typeof suggestedCompany.name === "string" ? suggestedCompany.name.trim() : "";
+    if (!companyName) continue;
+
+    const flightAssignment = (normalized.flight === "AM" ? "AM" : "PM") as "AM" | "PM";
+    const attendeeName = typeof normalized.attendeeName === "string" ? normalized.attendeeName.trim() : undefined;
+
+    groupedRevenue.set(contactCompanyId, {
+      contactCompanyId,
+      companyName,
+      flightAssignment,
+      attendeeNames: new Set<string>(attendeeName ? [attendeeName] : []),
+      registrationLinks: row.createdRegistrationId
+        ? [{ registrationId: row.createdRegistrationId, attendeeName }]
+        : [],
+      lineItems: [],
     });
-    unmatchedRevenueRowsCreated += 1;
   }
 
   for (const group of groupedRevenue.values()) {
@@ -583,31 +601,41 @@ export async function confirmParticipantRevenueImportForEvent(input: {
       });
     }
 
-    const totalAmount = group.lineItems.reduce((sum, item) => sum + item.amount, 0);
-    const { payment } = await recordEventurePaymentTransaction({
-      organizationId: input.organizationId,
-      eventId: input.eventId,
-      contactCompanyId: group.contactCompanyId,
-      participantId: participant.id,
-      amountDue: totalAmount,
-      amountPaid: totalAmount,
-      notes: group.lineItems.map((item) => item.description).filter(Boolean).join(" | ") || undefined,
-      changedByUserId: input.createdByUserId,
-      transactionType: "import_participant_revenue",
-      source: "participant_revenue_import",
-      lineItems: group.lineItems,
-    });
-    paymentsUpserted += 1;
+    if (group.lineItems.length > 0) {
+      const totalAmount = group.lineItems.reduce((sum, item) => sum + item.amount, 0);
+      const { payment } = await recordEventurePaymentTransaction({
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: group.contactCompanyId,
+        participantId: participant.id,
+        amountDue: totalAmount,
+        amountPaid: totalAmount,
+        notes: group.lineItems.map((item) => item.description).filter(Boolean).join(" | ") || undefined,
+        changedByUserId: input.createdByUserId,
+        transactionType: "import_participant_revenue",
+        source: "participant_revenue_import",
+        lineItems: group.lineItems,
+      });
+      paymentsUpserted += 1;
 
-    await prisma.eventureParticipant.update({
-      where: { id: participant.id },
-      data: {
-        attendeeCount: attendeeCountTarget,
-        paymentConfirmed: true,
-        paymentId: payment.id,
-        status: "confirmed",
-      },
-    });
+      await prisma.eventureParticipant.update({
+        where: { id: participant.id },
+        data: {
+          attendeeCount: attendeeCountTarget,
+          paymentConfirmed: true,
+          paymentId: payment.id,
+          status: "confirmed",
+        },
+      });
+    } else {
+      await prisma.eventureParticipant.update({
+        where: { id: participant.id },
+        data: {
+          attendeeCount: attendeeCountTarget,
+          status: "confirmed",
+        },
+      });
+    }
     participantsConfirmed += 1;
 
     for (const registrationLink of group.registrationLinks) {
