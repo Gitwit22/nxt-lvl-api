@@ -570,6 +570,7 @@ export async function confirmAttendeeImportForEvent(input: {
   createdByUserId: string;
   importBatchId: string;
   rowDecisions?: AttendeeImportConfirmRowDecisionInput[];
+  skipParticipantCreation?: boolean;
 }): Promise<AttendeeImportConfirmResponse> {
   const batch = await prisma.eventureImportBatch.findFirst({
     where: {
@@ -772,7 +773,7 @@ export async function confirmAttendeeImportForEvent(input: {
         registrationsCreated += 1;
       }
 
-      if (finalCompanyId && decision !== "leave_individual") {
+      if (finalCompanyId && decision !== "leave_individual" && !input.skipParticipantCreation) {
         // Business rule: only paid/comped attendees become Participants and get AttendeeSlots.
         // Registrations are always created above regardless of payment status.
         if (!isPaidStatus(normalized.paymentStatus)) {

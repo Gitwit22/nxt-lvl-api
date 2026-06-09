@@ -10,13 +10,16 @@ import {
 import { EventureServiceError } from "./eventure-error.js";
 import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
 import { normalizeCompanyName } from "./sponsor-import.service.js";
-import { reconcileAttendeeSlots } from "./workspace.service.js";
+import { assignRegistrationToSlot, reconcileAttendeeSlots } from "./workspace.service.js";
 
 export type ParticipantRevenueImportPreviewRow = AttendeeImportPreviewResponse["rows"][number] & {
   revenue: {
     company?: string;
     amount?: number;
     description?: string;
+    companies?: string[];
+    amounts?: number[];
+    warnings?: string[];
   };
 };
 
@@ -76,16 +79,116 @@ function readRawString(raw: Record<string, unknown>, aliases: string[]): string 
 }
 
 function readRawRevenueAmount(raw: Record<string, unknown>): number | undefined {
-  const text = readRawString(raw, ["revenue amount", "revenue amt", "revenue total", "amount"]);
-  if (!text) return undefined;
+  const parsed = parseRevenueAmountValues(raw);
+  if (parsed.values.length === 0) return undefined;
+  return parsed.values.reduce((sum, value) => sum + value, 0);
+}
 
-  // Parse the first numeric token only; this avoids joining values like
-  // "2500 / 4000" into a single invalid number (25004000).
-  const match = text.match(/-?\d{1,3}(?:,\d{3})*(?:\.\d+)?|-?\d+(?:\.\d+)?/);
+function splitRevenueTokens(value?: string): string[] {
+  if (!value) return [];
+  return value
+    .split("/")
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
+function parseMoneyToken(token: string): number | undefined {
+  const match = token.match(/-?\$?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?/);
   if (!match) return undefined;
-  const normalized = match[0].replace(/,/g, "");
+  const normalized = match[0].replace(/[$,]/g, "");
   const value = Number(normalized);
   return Number.isFinite(value) ? value : undefined;
+}
+
+function readRawRevenueAmountText(raw: Record<string, unknown>): string | undefined {
+  return readRawString(raw, ["revenue amount", "revenue amt", "revenue total", "amount"]);
+}
+
+function parseRevenueAmountValues(raw: Record<string, unknown>): { values: number[]; warnings: string[] } {
+  const text = readRawRevenueAmountText(raw);
+  if (!text) return { values: [], warnings: [] };
+
+  const warnings: string[] = [];
+  const values = splitRevenueTokens(text)
+    .map((token) => {
+      const value = parseMoneyToken(token);
+      if (value === undefined) {
+        warnings.push(`Could not parse revenue amount token \"${token}\".`);
+      }
+      return value;
+    })
+    .filter((value): value is number => value !== undefined);
+
+  if (values.length === 0) {
+    const singleValue = parseMoneyToken(text);
+    if (singleValue !== undefined) {
+      values.push(singleValue);
+    }
+  }
+
+  return { values, warnings };
+}
+
+type ParsedRevenueEntry = {
+  companyName: string;
+  amount: number;
+  description?: string;
+  warnings: string[];
+};
+
+function parseRevenueEntries(raw: Record<string, unknown>): { entries: ParsedRevenueEntry[]; warnings: string[]; companies: string[]; amounts: number[] } {
+  const revenueCompany = readRawString(raw, ["company (revenue file)", "revenue company"]);
+  const revenueDescription = readRawString(raw, ["revenue description", "description", "memo", "notes"]);
+  const companyTokens = splitRevenueTokens(revenueCompany);
+  const { values: amountTokens, warnings } = parseRevenueAmountValues(raw);
+
+  if (amountTokens.length === 0) {
+    return { entries: [], warnings, companies: companyTokens, amounts: amountTokens };
+  }
+
+  if (companyTokens.length === 0) {
+    return {
+      entries: [],
+      warnings: warnings.concat("Revenue amount exists but Company (Revenue File) is blank."),
+      companies: companyTokens,
+      amounts: amountTokens,
+    };
+  }
+
+  const entries: ParsedRevenueEntry[] = [];
+
+  if (companyTokens.length === amountTokens.length) {
+    for (let index = 0; index < amountTokens.length; index += 1) {
+      entries.push({
+        companyName: companyTokens[index],
+        amount: amountTokens[index],
+        description: revenueDescription,
+        warnings: [],
+      });
+    }
+    return { entries, warnings, companies: companyTokens, amounts: amountTokens };
+  }
+
+  if (companyTokens.length === 1) {
+    for (const amount of amountTokens) {
+      entries.push({
+        companyName: companyTokens[0],
+        amount,
+        description: revenueDescription,
+        warnings: [],
+      });
+    }
+    return { entries, warnings, companies: companyTokens, amounts: amountTokens };
+  }
+
+  return {
+    entries: [],
+    warnings: warnings.concat(
+      `Revenue company and amount counts do not align (${companyTokens.length} companies, ${amountTokens.length} amounts).`,
+    ),
+    companies: companyTokens,
+    amounts: amountTokens,
+  };
 }
 
 function readNormalizedString(normalized: Record<string, unknown>, field: string): string | undefined {
@@ -117,6 +220,54 @@ async function resolveContactCompanyId(input: {
   return company?.id;
 }
 
+async function resolveOrCreateContactCompany(input: {
+  organizationId: string;
+  companyName: string;
+  preferredCompanyId?: string;
+}): Promise<{ id: string; name: string; created: boolean }> {
+  if (input.preferredCompanyId) {
+    const existingById = await prisma.eventureSponsorOrganization.findFirst({
+      where: {
+        id: input.preferredCompanyId,
+        organizationId: input.organizationId,
+        archivedAt: null,
+      },
+      select: { id: true, name: true },
+    });
+
+    if (existingById) {
+      return { id: existingById.id, name: existingById.name, created: false };
+    }
+  }
+
+  const existingId = await resolveContactCompanyId({
+    organizationId: input.organizationId,
+    companyName: input.companyName,
+  });
+
+  if (existingId) {
+    const existing = await prisma.eventureSponsorOrganization.findUnique({
+      where: { id: existingId },
+      select: { id: true, name: true },
+    });
+    if (existing) {
+      return { id: existing.id, name: existing.name, created: false };
+    }
+  }
+
+  const created = await prisma.eventureSponsorOrganization.create({
+    data: {
+      organizationId: input.organizationId,
+      name: input.companyName,
+      normalizedName: normalizeCompanyName(input.companyName),
+      importSource: "participant_revenue_import",
+    },
+    select: { id: true, name: true },
+  });
+
+  return { id: created.id, name: created.name, created: true };
+}
+
 export async function previewParticipantRevenueImportForEvent(input: {
   organizationId: string;
   eventId: string;
@@ -132,23 +283,24 @@ export async function previewParticipantRevenueImportForEvent(input: {
   });
 
   const rows = base.rows.map((row) => {
-    const revenueCompany = readRawString(row.raw, ["company (revenue file)", "revenue company", "company"]);
+    const parsedRevenue = parseRevenueEntries(row.raw);
+    const revenueAmount = parsedRevenue.amounts.reduce((sum, value) => sum + value, 0);
     const revenueDescription = readRawString(row.raw, ["revenue description", "description", "memo", "notes"]);
-    const revenueAmount = readRawRevenueAmount(row.raw);
-    // For revenue-only rows (have amount but no attendee email), treat the attendeeName as the company name
-    const isRevenueOnlyRow = revenueAmount !== undefined && !row.normalized.attendeeEmail;
-    const companyAnchor = revenueCompany ?? (row.normalized.ticketBuyer as string | undefined) ?? (isRevenueOnlyRow ? (row.normalized.attendeeName as string | undefined) : undefined);
+    const companyAnchor = parsedRevenue.companies[0];
 
     return {
       ...row,
       normalized: {
         ...row.normalized,
-        amount: revenueAmount ?? row.normalized.amount,
+        amount: revenueAmount || row.normalized.amount,
       },
       revenue: {
         company: companyAnchor,
-        amount: revenueAmount,
+        amount: parsedRevenue.amounts.length > 0 ? revenueAmount : undefined,
         description: revenueDescription,
+        companies: parsedRevenue.companies,
+        amounts: parsedRevenue.amounts,
+        warnings: parsedRevenue.warnings,
       },
     };
   });
@@ -187,6 +339,7 @@ export async function confirmParticipantRevenueImportForEvent(input: {
     createdByUserId: input.createdByUserId,
     importBatchId: input.importBatchId,
     rowDecisions: input.rowDecisions,
+    skipParticipantCreation: true,
   });
 
   const decisionByRowId = new Map((input.rowDecisions ?? []).filter((item) => item.importRowId).map((item) => [item.importRowId as string, item]));
@@ -203,6 +356,7 @@ export async function confirmParticipantRevenueImportForEvent(input: {
       rowNumber: true,
       rawData: true,
       normalizedData: true,
+      createdRegistrationId: true,
     },
     orderBy: { rowNumber: "asc" },
   });
@@ -219,6 +373,22 @@ export async function confirmParticipantRevenueImportForEvent(input: {
   let unmatchedRevenueRowsCreated = 0;
   let paymentsUpserted = 0;
   let participantsConfirmed = 0;
+  let companiesCreated = 0;
+
+  const groupedRevenue = new Map<string, {
+    contactCompanyId: string;
+    companyName: string;
+    flightAssignment: string;
+    attendeeNames: Set<string>;
+    registrationLinks: Array<{ registrationId: string; attendeeName?: string }>;
+    lineItems: Array<{
+      category: string;
+      amount: number;
+      description?: string | null;
+      sourceImportBatchId: string;
+      sourceImportRowId: string;
+    }>;
+  }>();
 
   for (const row of importRows) {
     const rowDecision = decisionByRowId.get(row.id) ?? decisionByRowNumber.get(row.rowNumber);
@@ -231,97 +401,106 @@ export async function confirmParticipantRevenueImportForEvent(input: {
     const suggestedCompany = (normalized.suggestedCompany ?? {}) as Record<string, unknown>;
     const edited = rowDecision?.editedNormalized;
 
-    const revenueCompany = readRawString(raw, ["company (revenue file)", "revenue company", "company"]);
-    const revenueDescription = readRawString(raw, ["revenue description", "description", "memo", "notes"]);
-    const revenueAmount = readRawRevenueAmount(raw);
+    const parsedRevenue = parseRevenueEntries(raw);
+    if (parsedRevenue.amounts.length === 0) continue;
 
-    if (revenueAmount === undefined) continue;
-
-    revenueRowsConfirmed += 1;
-
-    const suggestedCompanyId = rowDecision?.finalCompanyId?.trim() || (typeof suggestedCompany.id === "string" ? suggestedCompany.id.trim() : "");
-    const ticketBuyer = edited?.ticketBuyer?.trim() || readNormalizedString(normalized, "ticketBuyer");
+    const explicitCompanyOverride = rowDecision?.finalCompanyId?.trim() || undefined;
     const attendeeName = edited?.attendeeName?.trim() || readNormalizedString(normalized, "attendeeName");
     const attendeeEmail = edited?.attendeeEmail?.trim() || readNormalizedString(normalized, "attendeeEmail");
-    // For revenue-only rows (have amount but no attendee email), treat attendeeName as company name
-    const isRevenueOnlyRow = !attendeeEmail;
-    const companyAnchor = revenueCompany ?? ticketBuyer ?? (isRevenueOnlyRow ? attendeeName : undefined);
 
-    const hasCompanyAnchor = Boolean((companyAnchor && companyAnchor.trim()) || suggestedCompanyId);
-    if (hasCompanyAnchor) {
-      const contactCompanyId = await resolveContactCompanyId({
-        organizationId: input.organizationId,
-        companyName: companyAnchor ?? readNormalizedString(suggestedCompany, "name"),
-        suggestedCompanyId,
-      });
-
-      if (contactCompanyId) {
-        const amountDue = revenueAmount;
-        const amountPaid = revenueAmount;
-
-        const { payment } = await recordEventurePaymentTransaction({
+    if (parsedRevenue.entries.length === 0) {
+      await prisma.eventureUnmatchedRevenue.create({
+        data: {
           organizationId: input.organizationId,
           eventId: input.eventId,
-          contactCompanyId,
-          amountDue,
-          amountPaid,
-          notes: revenueDescription,
-          changedByUserId: input.createdByUserId,
-          transactionType: "import_participant_revenue",
-          source: "participant_revenue_import",
-          lineItems: [
-            {
-              category: "PARTICIPANT_REVENUE",
-              amount: amountPaid,
-              description: revenueDescription ?? "Imported participant revenue",
-              sourceImportBatchId: input.importBatchId,
-              sourceImportRowId: row.id,
-            },
-          ],
-        });
-
-        paymentsUpserted += 1;
-
-        // Link the matching Participant to this payment and confirm it
-        const participant = await prisma.eventureParticipant.findFirst({
-          where: {
-            organizationId: input.organizationId,
-            eventId: input.eventId,
-            contactCompanyId,
-          },
-          select: {
-            id: true,
-            companyName: true,
-            attendeeCount: true,
-            flightAssignment: true,
-          },
-        });
-
-        if (participant) {
-          await prisma.eventureParticipant.update({
-            where: { id: participant.id },
-            data: {
-              paymentConfirmed: true,
-              paymentId: payment.id,
-            },
-          });
-          participantsConfirmed += 1;
-
-          if (participant.attendeeCount > 0) {
-            await reconcileAttendeeSlots({
-              organizationId: input.organizationId,
-              eventId: input.eventId,
-              participantId: participant.id,
-              companyName: participant.companyName,
-              attendeeCount: participant.attendeeCount,
-              flightAssignment: participant.flightAssignment ?? "PM",
-            });
-          }
-        }
-      }
-
+          importBatchId: input.importBatchId,
+          importRowId: row.id,
+          rowNumber: row.rowNumber,
+          sourceCompanyName: undefined,
+          ticketBuyer: edited?.ticketBuyer?.trim() || readNormalizedString(normalized, "ticketBuyer"),
+          attendeeName,
+          attendeeEmail,
+          amount: parsedRevenue.amounts.reduce((sum, value) => sum + value, 0) || undefined,
+          description: readRawString(raw, ["revenue description", "description", "memo", "notes"]),
+          status: "unmatched",
+          notes: parsedRevenue.warnings.join(" ") || "No payment record.",
+        },
+      });
+      unmatchedRevenueRowsCreated += 1;
       continue;
     }
+
+    const flightAssignment = readNormalizedString(normalized, "flight") === "AM" ? "AM" : "PM";
+
+    for (const entry of parsedRevenue.entries) {
+      revenueRowsConfirmed += 1;
+
+      const companyRecord = await resolveOrCreateContactCompany({
+        organizationId: input.organizationId,
+        companyName: entry.companyName,
+        preferredCompanyId: explicitCompanyOverride,
+      });
+
+      if (companyRecord.created) {
+        companiesCreated += 1;
+      }
+
+      const existingGroup = groupedRevenue.get(companyRecord.id) ?? {
+        contactCompanyId: companyRecord.id,
+        companyName: entry.companyName,
+        flightAssignment,
+        attendeeNames: new Set<string>(),
+        registrationLinks: [],
+        lineItems: [],
+      };
+
+      existingGroup.companyName = entry.companyName;
+      if (existingGroup.flightAssignment !== "AM" && flightAssignment === "AM") {
+        existingGroup.flightAssignment = "AM";
+      }
+      if (attendeeName) {
+        existingGroup.attendeeNames.add(attendeeName);
+      }
+      if (row.createdRegistrationId) {
+        existingGroup.registrationLinks.push({
+          registrationId: row.createdRegistrationId,
+          attendeeName,
+        });
+      }
+      existingGroup.lineItems.push({
+        category: "PARTICIPANT_REVENUE",
+        amount: entry.amount,
+        description: entry.description ?? "Imported participant revenue",
+        sourceImportBatchId: input.importBatchId,
+        sourceImportRowId: row.id,
+      });
+
+      groupedRevenue.set(companyRecord.id, existingGroup);
+    }
+
+    const suggestedCompanyName = readNormalizedString(suggestedCompany, "name");
+    const revenueCompanyName = parsedRevenue.companies[0];
+    if (revenueCompanyName && suggestedCompanyName && normalizeCompanyName(revenueCompanyName) !== normalizeCompanyName(suggestedCompanyName)) {
+      await prisma.eventureUnmatchedRevenue.create({
+        data: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          importBatchId: input.importBatchId,
+          importRowId: row.id,
+          rowNumber: row.rowNumber,
+          sourceCompanyName: revenueCompanyName,
+          attendeeName,
+          attendeeEmail,
+          amount: parsedRevenue.amounts.reduce((sum, value) => sum + value, 0),
+          description: `Revenue company mismatch: suggested ${suggestedCompanyName}`,
+          status: "needs_review",
+          notes: `Revenue company \"${revenueCompanyName}\" overrides suggested company \"${suggestedCompanyName}\".`,
+        },
+      });
+      unmatchedRevenueRowsCreated += 1;
+    }
+
+    continue;
 
     await prisma.eventureUnmatchedRevenue.create({
       data: {
@@ -342,11 +521,113 @@ export async function confirmParticipantRevenueImportForEvent(input: {
     unmatchedRevenueRowsCreated += 1;
   }
 
+  for (const group of groupedRevenue.values()) {
+    let participant = await prisma.eventureParticipant.findFirst({
+      where: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        contactCompanyId: group.contactCompanyId,
+      },
+      select: {
+        id: true,
+        companyName: true,
+        attendeeCount: true,
+        flightAssignment: true,
+      },
+    });
+
+    if (!participant) {
+      participant = await prisma.eventureParticipant.create({
+        data: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: group.contactCompanyId,
+          companyName: group.companyName,
+          paymentConfirmed: false,
+          attendeeCount: 0,
+          flightAssignment: group.flightAssignment,
+          status: "confirmed",
+        },
+        select: {
+          id: true,
+          companyName: true,
+          attendeeCount: true,
+          flightAssignment: true,
+        },
+      });
+    } else if (participant.companyName !== group.companyName || participant.flightAssignment !== group.flightAssignment) {
+      participant = await prisma.eventureParticipant.update({
+        where: { id: participant.id },
+        data: {
+          companyName: group.companyName,
+          flightAssignment: group.flightAssignment,
+        },
+        select: {
+          id: true,
+          companyName: true,
+          attendeeCount: true,
+          flightAssignment: true,
+        },
+      });
+    }
+
+    const attendeeCountTarget = Math.max(participant.attendeeCount, group.registrationLinks.length, group.attendeeNames.size);
+    if (attendeeCountTarget > 0) {
+      await reconcileAttendeeSlots({
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: participant.id,
+        companyName: group.companyName,
+        attendeeCount: attendeeCountTarget,
+        flightAssignment: group.flightAssignment,
+      });
+    }
+
+    const totalAmount = group.lineItems.reduce((sum, item) => sum + item.amount, 0);
+    const { payment } = await recordEventurePaymentTransaction({
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      contactCompanyId: group.contactCompanyId,
+      participantId: participant.id,
+      amountDue: totalAmount,
+      amountPaid: totalAmount,
+      notes: group.lineItems.map((item) => item.description).filter(Boolean).join(" | ") || undefined,
+      changedByUserId: input.createdByUserId,
+      transactionType: "import_participant_revenue",
+      source: "participant_revenue_import",
+      lineItems: group.lineItems,
+    });
+    paymentsUpserted += 1;
+
+    await prisma.eventureParticipant.update({
+      where: { id: participant.id },
+      data: {
+        attendeeCount: attendeeCountTarget,
+        paymentConfirmed: true,
+        paymentId: payment.id,
+        status: "confirmed",
+      },
+    });
+    participantsConfirmed += 1;
+
+    for (const registrationLink of group.registrationLinks) {
+      await assignRegistrationToSlot({
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        registrationId: registrationLink.registrationId,
+        contactCompanyId: group.contactCompanyId,
+        attendeeFullName: registrationLink.attendeeName,
+        actorUserId: input.createdByUserId,
+      });
+    }
+  }
+
   return {
     ...base,
     importType: "participant_revenue_attendee",
     summary: {
       ...base.summary,
+      companiesCreated: base.summary.companiesCreated + companiesCreated,
       revenueRowsConfirmed,
       unmatchedRevenueRowsCreated,
       paymentsUpserted,
