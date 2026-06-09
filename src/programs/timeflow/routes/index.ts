@@ -2004,7 +2004,7 @@ router.get("/clients", requireTimeflowAuth, async (req, res) => {
   };
 
   const clients = await store.timeflowClient.findMany({
-    where: { organizationId, userId, isActive: true },
+    where: { organizationId, userId },
     orderBy: { name: "asc" },
   });
   res.json(clients);
@@ -2138,7 +2138,7 @@ router.get("/projects", requireTimeflowAuth, async (req, res) => {
     timeflowProject: { findMany: (args: Record<string, unknown>) => Promise<Record<string, unknown>[]> };
   };
 
-  const where: Record<string, unknown> = { organizationId, userId, isActive: true };
+  const where: Record<string, unknown> = { organizationId, userId };
   if (typeof clientId === "string") where.clientId = clientId;
 
   const projects = await store.timeflowProject.findMany({
