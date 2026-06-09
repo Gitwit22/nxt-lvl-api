@@ -2,6 +2,17 @@ import { prisma } from "../../../core/db/prisma.js";
 import { EventureServiceError } from "./eventure-error.js";
 import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
 
+type CreateParticipantInput = {
+  organizationId: string;
+  eventId: string;
+  createdByUserId?: string;
+  companyName?: string;
+  participantName?: string;
+  email?: string;
+  phone?: string;
+  slotCount?: number;
+};
+
 type ConfirmPaymentInput = {
   organizationId: string;
   eventId: string;
@@ -554,6 +565,112 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
     participant,
     attendeeSlots: slots,
   };
+}
+
+export async function createParticipantForEvent(input: CreateParticipantInput) {
+  const companyName = input.companyName?.trim();
+  const participantName = input.participantName?.trim();
+
+  if (!companyName && !participantName) {
+    throw new EventureServiceError("Either companyName or participantName is required.", 400);
+  }
+
+  const displayName = companyName || participantName!;
+  const isIndividual = !companyName && !!participantName;
+
+  const event = await prisma.eventureEvent.findFirst({
+    where: { id: input.eventId, organizationId: input.organizationId },
+  });
+  if (!event) {
+    throw new EventureServiceError("Event not found.", 404);
+  }
+
+  const normalizedName = displayName.trim().toLowerCase();
+
+  let company = await prisma.eventureSponsorOrganization.findFirst({
+    where: { organizationId: input.organizationId, normalizedName },
+  });
+
+  if (!company) {
+    company = await prisma.eventureSponsorOrganization.create({
+      data: {
+        organizationId: input.organizationId,
+        name: displayName,
+        normalizedName,
+        mainEmail: input.email || undefined,
+        mainPhone: input.phone || undefined,
+      },
+    });
+  }
+
+  const contactName = isIndividual ? participantName! : participantName;
+  if (contactName && (input.email || input.phone)) {
+    const existingContact = await prisma.eventureSponsorContact.findFirst({
+      where: { organizationId: input.organizationId, sponsorOrganizationId: company.id, name: contactName },
+    });
+    if (!existingContact) {
+      await prisma.eventureSponsorContact.create({
+        data: {
+          organizationId: input.organizationId,
+          sponsorOrganizationId: company.id,
+          name: contactName,
+          email: input.email || null,
+          phone: input.phone || null,
+          isPrimary: true,
+        },
+      });
+    }
+  }
+
+  const existingParticipant = await prisma.eventureParticipant.findFirst({
+    where: { organizationId: input.organizationId, eventId: input.eventId, contactCompanyId: company.id },
+  });
+  if (existingParticipant) {
+    throw new EventureServiceError("A participant for this company or person already exists for this event.", 409);
+  }
+
+  const slotCount = Number.isInteger(input.slotCount) && (input.slotCount ?? 0) > 0 ? input.slotCount! : 0;
+
+  const participant = await prisma.eventureParticipant.create({
+    data: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      contactCompanyId: company.id,
+      companyName: displayName,
+      attendeeCount: slotCount,
+      status: "pending",
+    },
+  });
+
+  if (slotCount > 0) {
+    await prisma.eventureAttendeeSlot.createMany({
+      data: Array.from({ length: slotCount }, (_, i) => ({
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        participantId: participant.id,
+        companyName: displayName,
+        slotNumber: i + 1,
+        displayName: `${displayName} - Slot ${i + 1}`,
+        flightAssignment: "PM",
+      })),
+    });
+  }
+
+  return prisma.eventureParticipant.findUniqueOrThrow({
+    where: { id: participant.id },
+    include: {
+      contactCompany: {
+        include: {
+          contacts: {
+            where: { archivedAt: null },
+            orderBy: [{ isPrimary: "desc" }, { updatedAt: "desc" }],
+          },
+        },
+      },
+      attendeeSlots: { orderBy: [{ slotNumber: "asc" }] },
+      payment: true,
+    },
+  });
 }
 
 export async function listParticipantsForEvent(organizationId: string, eventId: string) {

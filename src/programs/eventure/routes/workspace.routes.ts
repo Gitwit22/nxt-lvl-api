@@ -4,6 +4,7 @@ import { requireAuth } from "../../../core/middleware/auth.middleware.js";
 import {
   cleanupUnconfirmedParticipants,
   confirmPaymentAndSyncParticipant,
+  createParticipantForEvent,
   createStandalonePaymentTransaction,
   createAssignmentForEvent,
   listAttendeesForEvent,
@@ -185,6 +186,34 @@ router.get("/participants", async (req, res) => {
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listParticipantsForEvent(user!.organizationId, eventId);
     res.json({ items });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.post("/participants", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const companyName = readString(req.body?.companyName);
+    const participantName = readString(req.body?.participantName);
+    const email = readString(req.body?.email);
+    const phone = readString(req.body?.phone);
+    const rawSlotCount = readNumber(req.body?.slotCount);
+    const slotCount = rawSlotCount !== undefined && Number.isInteger(rawSlotCount) && rawSlotCount >= 0 ? rawSlotCount : 0;
+
+    const item = await createParticipantForEvent({
+      organizationId: user!.organizationId,
+      eventId,
+      createdByUserId: user!.userId,
+      companyName,
+      participantName,
+      email,
+      phone,
+      slotCount,
+    });
+
+    res.status(201).json({ item });
   } catch (error) {
     handleError(res, error);
   }
