@@ -328,7 +328,10 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
     const payment = paymentByCompany.get(sponsor.sponsorOrganizationId) ?? null;
     const participant = participantByCompany.get(sponsor.sponsorOrganizationId) ?? null;
     const paymentTransactions = transactionsByCompany.get(sponsor.sponsorOrganizationId) ?? [];
-    const primaryContact = sponsor.sponsorOrganization.contacts[0] ?? null;
+    const primaryContact =
+      sponsor.sponsorOrganization.contacts.find((c) => c.isPrimary) ??
+      sponsor.sponsorOrganization.contacts[0] ??
+      null;
 
     // Exclude pure contact-only entries: companies with neither a payment record
     // nor a participant record have no payment activity for this event.
