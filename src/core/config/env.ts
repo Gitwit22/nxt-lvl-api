@@ -112,6 +112,11 @@ export const PLATFORM_SETUP_TOKEN = process.env.PLATFORM_SETUP_TOKEN || "";
 // Base URL of the Mission Hub frontend — used to build invite links
 export const FRONTEND_BASE_URL = process.env.FRONTEND_BASE_URL ?? "http://localhost:5174";
 
+// Base URL of the Eventure frontend — used for Eventure invite activation links.
+export const EVENTURE_APP_URL =
+  process.env.EVENTURE_APP_URL ??
+  (NODE_ENV === "production" ? "https://eventure.nltops.com" : "http://localhost:5173");
+
 // ── Required secrets — fail fast at boot if missing ───────────────────────────
 // Never provide default values for signing secrets. A missing secret must crash
 // the server at startup rather than silently using a well-known fallback that

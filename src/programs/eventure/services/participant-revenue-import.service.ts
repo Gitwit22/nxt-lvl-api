@@ -261,6 +261,7 @@ async function resolveOrCreateContactCompany(input: {
       organizationId: input.organizationId,
       name: input.companyName,
       normalizedName: normalizeCompanyName(input.companyName),
+      sponsorStatus: "active",
       importSource: "participant_revenue_import",
     },
     select: { id: true, name: true },

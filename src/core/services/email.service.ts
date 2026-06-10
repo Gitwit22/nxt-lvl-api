@@ -4,7 +4,7 @@ import {
   SendEmailUseCase,
   ConsoleEmailLogger,
 } from "@nxtlvl/notification-core";
-import { FRONTEND_BASE_URL } from "../config/env.js";
+import { EVENTURE_APP_URL, FRONTEND_BASE_URL } from "../config/env.js";
 import { logger } from "../../logger.js";
 
 // ---------------------------------------------------------------------------
@@ -322,7 +322,7 @@ function buildInviteHtml(params: InviteEmailParams & { link: string }): string {
 
 // ─── Eventure Personnel Invite Email ─────────────────────────────────────────
 
-const EVENTURE_APP_URL = (process.env.EVENTURE_APP_URL ?? process.env.FRONTEND_BASE_URL ?? "").replace(/\/$/, "");
+const EVENTURE_APP_BASE_URL = EVENTURE_APP_URL.replace(/\/$/, "");
 
 export interface EventurePersonnelInviteEmailParams {
   to: string;
@@ -339,7 +339,7 @@ export async function sendEventurePersonnelInviteEmail(params: EventurePersonnel
     return false;
   }
 
-  const link = `${EVENTURE_APP_URL}/eventure/invite/accept?token=${encodeURIComponent(params.rawToken)}`;
+  const link = `${EVENTURE_APP_BASE_URL}/eventure/invite/accept?token=${encodeURIComponent(params.rawToken)}`;
   const subject = `You've been invited to ${params.organizationName} – Eventure`;
   const html = buildEventureInviteHtml({ ...params, link });
   const text = buildEventureInviteText({ ...params, link });

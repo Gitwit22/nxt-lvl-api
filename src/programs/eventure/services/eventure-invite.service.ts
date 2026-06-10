@@ -1,6 +1,6 @@
 import crypto from "crypto";
 import { prisma } from "../../../core/db/prisma.js";
-import { FRONTEND_BASE_URL } from "../../../core/config/env.js";
+import { EVENTURE_APP_URL } from "../../../core/config/env.js";
 import { sendEventurePersonnelInviteEmail } from "../../../core/services/email.service.js";
 
 // ─── Errors ──────────────────────────────────────────────────────────────────
@@ -54,8 +54,10 @@ function inviteExpiresAt(): Date {
   return new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
 }
 
+const EVENTURE_APP_BASE_URL = EVENTURE_APP_URL.replace(/\/$/, "");
+
 function buildInviteLink(rawToken: string): string {
-  return `${FRONTEND_BASE_URL.replace(/\/$/, "")}/eventure/invite/accept?token=${encodeURIComponent(rawToken)}`;
+  return `${EVENTURE_APP_BASE_URL}/eventure/invite/accept?token=${encodeURIComponent(rawToken)}`;
 }
 
 // ─── Issue Invite ─────────────────────────────────────────────────────────────

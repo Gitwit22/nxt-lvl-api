@@ -2,7 +2,6 @@ import { prisma } from "../../../core/db/prisma.js";
 import { EventureServiceError } from "./eventure-error.js";
 import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
 import {
-  assertEligibleCompanyStatus,
   assertEligiblePaymentStatus,
   isEligiblePaymentStatus,
 } from "./participant-eligibility.service.js";
@@ -105,6 +104,29 @@ async function ensureEventAndCompany(input: { organizationId: string; eventId: s
     },
     include: {
       sponsorOrganization: true,
+    },
+  });
+}
+
+async function ensureSponsorOrganizationActive(input: {
+  organizationId: string;
+  sponsorOrganizationId: string;
+  sponsorStatus?: string | null;
+}): Promise<void> {
+  const normalized = (input.sponsorStatus ?? "").trim().toLowerCase();
+  if (normalized === "active") {
+    return;
+  }
+
+  await prisma.eventureSponsorOrganization.updateMany({
+    where: {
+      id: input.sponsorOrganizationId,
+      organizationId: input.organizationId,
+      archivedAt: null,
+      OR: [{ sponsorStatus: null }, { sponsorStatus: { not: "active" } }],
+    },
+    data: {
+      sponsorStatus: "active",
     },
   });
 }
@@ -526,7 +548,11 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
   }
 
   const eventSponsor = await ensureEventAndCompany(input);
-  assertEligibleCompanyStatus(eventSponsor.sponsorOrganization.sponsorStatus);
+  await ensureSponsorOrganizationActive({
+    organizationId: input.organizationId,
+    sponsorOrganizationId: eventSponsor.sponsorOrganization.id,
+    sponsorStatus: eventSponsor.sponsorOrganization.sponsorStatus,
+  });
   const companyName = eventSponsor.sponsorOrganization.name;
 
   const result = await prisma.$transaction(async (tx) => {
@@ -697,8 +723,11 @@ export async function createParticipantForEvent(input: CreateParticipantInput) {
     },
     include: { sponsorOrganization: true },
   });
-
-  assertEligibleCompanyStatus(eventSponsor.sponsorOrganization.sponsorStatus);
+  await ensureSponsorOrganizationActive({
+    organizationId: input.organizationId,
+    sponsorOrganizationId: eventSponsor.sponsorOrganization.id,
+    sponsorStatus: eventSponsor.sponsorOrganization.sponsorStatus,
+  });
 
   const latestPayment = await prisma.eventurePayment.findFirst({
     where: {
@@ -840,7 +869,11 @@ export async function createStandalonePaymentTransaction(input: CreatePaymentTra
   }
 
   const eventSponsor = await ensureEventAndCompany(input);
-  assertEligibleCompanyStatus(eventSponsor.sponsorOrganization.sponsorStatus);
+  await ensureSponsorOrganizationActive({
+    organizationId: input.organizationId,
+    sponsorOrganizationId: eventSponsor.sponsorOrganization.id,
+    sponsorStatus: eventSponsor.sponsorOrganization.sponsorStatus,
+  });
 
   const participant = await prisma.eventureParticipant.findUnique({
     where: {

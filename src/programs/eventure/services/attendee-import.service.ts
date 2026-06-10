@@ -681,6 +681,7 @@ export async function confirmAttendeeImportForEvent(input: {
                 organizationId: input.organizationId,
                 name: companyName,
                 normalizedName,
+                sponsorStatus: "active",
                 mainEmail: normalized.ticketBuyerEmail,
                 notes: `Created from attendee import batch ${batch.id}`,
                 importSource: "attendee_list",
