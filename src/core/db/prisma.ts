@@ -1,8 +1,20 @@
-import { PrismaClient, Prisma } from "@prisma/client";
+import { PrismaClient } from "@prisma/client";
 
-type EventurePrismaClient = PrismaClient & {
-	eventureInvite: Prisma.EventureInviteDelegate<any, any>;
-	eventurePersonnel: Prisma.EventurePersonnelDelegate<any, any>;
+type EventureInviteDelegate = {
+	create(args: any): Promise<any>;
+	findFirst(args: any): Promise<any>;
+	findUnique(args: any): Promise<any>;
+	update(args: any): Promise<any>;
+	delete(args: any): Promise<any>;
 };
 
-export const prisma = new PrismaClient() as EventurePrismaClient;
+type EventurePersonnelDelegate = {
+	update(args: any): Promise<any>;
+};
+
+type EventurePrismaClient = PrismaClient & {
+	eventureInvite: EventureInviteDelegate;
+	eventurePersonnel: EventurePersonnelDelegate;
+};
+
+export const prisma = new PrismaClient() as unknown as EventurePrismaClient;
