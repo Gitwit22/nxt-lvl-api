@@ -450,19 +450,22 @@ export async function listSponsorFollowUpsForEvent(organizationId: string, event
 
 export async function getSponsorDashboardForEvent(organizationId: string, eventId: string) {
   const sponsors = await listSponsorsForEvent(organizationId, eventId);
-  const paymentTotals = await prisma.eventurePayment.aggregate({
-    where: {
-      organizationId,
-      eventId,
-    },
-    _sum: {
-      amountDue: true,
-      amountPaid: true,
-    },
-  });
 
-  const totalCommittedAmount = paymentTotals._sum.amountDue ?? 0;
-  const totalPaidAmount = paymentTotals._sum.amountPaid ?? 0;
+  // Fetch all payment records and deduplicate to the most-recent per company,
+  // exactly matching the logic used by listPaymentsForEvent so that totals are consistent.
+  const allPayments = await prisma.eventurePayment.findMany({
+    where: { organizationId, eventId },
+    orderBy: [{ updatedAt: "desc" }],
+  });
+  const paymentByCompany = new Map<string, (typeof allPayments)[number]>();
+  for (const payment of allPayments) {
+    if (!paymentByCompany.has(payment.contactCompanyId)) {
+      paymentByCompany.set(payment.contactCompanyId, payment);
+    }
+  }
+  const uniquePayments = Array.from(paymentByCompany.values());
+  const totalCommittedAmount = uniquePayments.reduce((sum, p) => sum + (p.amountDue ?? 0), 0);
+  const totalPaidAmount = uniquePayments.reduce((sum, p) => sum + (p.amountPaid ?? 0), 0);
 
   const unpaidOrInvoicedCount = sponsors.filter((sponsor) =>
     ["unpaid", "invoice_needed", "invoiced", "pending_event_payment"].includes(normalizeValue(sponsor.paymentStatus)),
