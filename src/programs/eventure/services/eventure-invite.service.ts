@@ -181,6 +181,66 @@ export async function resendEventureInvite(
   return { emailSent, inviteLink: buildInviteLink(raw) };
 }
 
+// ─── Revoke / Remove Invite ─────────────────────────────────────────────────
+
+export async function revokeEventureInvite(
+  organizationId: string,
+  inviteId: string,
+): Promise<{ ok: true; status: "revoked" }> {
+  const invite = await prisma.eventureInvite.findFirst({
+    where: { id: inviteId, organizationId },
+  });
+
+  if (!invite) {
+    throw new EventureInviteServiceError("Invite not found", 404, "invite_not_found");
+  }
+  if (invite.status === "accepted") {
+    throw new EventureInviteServiceError("Invite already accepted", 409, "invite_already_accepted");
+  }
+
+  await prisma.$transaction([
+    prisma.eventureInvite.update({
+      where: { id: invite.id },
+      data: {
+        status: "revoked",
+        revokedAt: invite.revokedAt ?? new Date(),
+      },
+    }),
+    prisma.eventurePersonnel.update({
+      where: { id: invite.personnelId },
+      data: { inviteStatus: "revoked" },
+    }),
+  ]);
+
+  return { ok: true, status: "revoked" };
+}
+
+export async function removeEventureInvite(
+  organizationId: string,
+  inviteId: string,
+): Promise<{ ok: true }> {
+  const invite = await prisma.eventureInvite.findFirst({
+    where: { id: inviteId, organizationId },
+  });
+
+  if (!invite) {
+    throw new EventureInviteServiceError("Invite not found", 404, "invite_not_found");
+  }
+  if (invite.status === "accepted") {
+    throw new EventureInviteServiceError("Accepted invites cannot be removed", 409, "invite_already_accepted");
+  }
+
+  await prisma.$transaction([
+    prisma.eventureInvite.delete({ where: { id: invite.id } }),
+    prisma.eventurePersonnel.update({
+      where: { id: invite.personnelId },
+      data: { inviteStatus: "none" },
+    }),
+  ]);
+
+  return { ok: true };
+}
+
 // ─── Validate Token ───────────────────────────────────────────────────────────
 
 export async function validateEventureInviteToken(rawToken: string) {

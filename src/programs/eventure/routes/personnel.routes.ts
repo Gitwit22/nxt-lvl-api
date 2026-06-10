@@ -2,7 +2,13 @@ import express from "express";
 import { getRequestUser } from "../../../core/auth/auth.service.js";
 import { requireAuth } from "../../../core/middleware/auth.middleware.js";
 import { prisma } from "../../../core/db/prisma.js";
-import { issueEventureInvite, resendEventureInvite, EventureInviteServiceError } from "../services/eventure-invite.service.js";
+import {
+  issueEventureInvite,
+  resendEventureInvite,
+  revokeEventureInvite,
+  removeEventureInvite,
+  EventureInviteServiceError,
+} from "../services/eventure-invite.service.js";
 
 const router = express.Router({ mergeParams: true });
 
@@ -179,6 +185,40 @@ router.post("/:personnelId/invite/resend", requireAuth, async (req, res) => {
     if (!invite) { res.status(404).json({ error: "No invite found for this personnel" }); return; }
 
     const result = await resendEventureInvite(user.organizationId, invite.id);
+    res.json(result);
+  } catch (error) { handleError(res, error); }
+});
+
+// POST /api/eventure/personnel/:personnelId/invite/revoke — revoke active invite
+router.post("/:personnelId/invite/revoke", requireAuth, async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    if (!user) { res.status(401).json({ error: "Authentication required" }); return; }
+
+    const { personnelId } = req.params as { personnelId: string };
+    const invite = await prisma.eventureInvite.findFirst({
+      where: { personnelId, organizationId: user.organizationId },
+    });
+    if (!invite) { res.status(404).json({ error: "No invite found for this personnel" }); return; }
+
+    const result = await revokeEventureInvite(user.organizationId, invite.id);
+    res.json(result);
+  } catch (error) { handleError(res, error); }
+});
+
+// DELETE /api/eventure/personnel/:personnelId/invite — remove invite record
+router.delete("/:personnelId/invite", requireAuth, async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    if (!user) { res.status(401).json({ error: "Authentication required" }); return; }
+
+    const { personnelId } = req.params as { personnelId: string };
+    const invite = await prisma.eventureInvite.findFirst({
+      where: { personnelId, organizationId: user.organizationId },
+    });
+    if (!invite) { res.status(404).json({ error: "No invite found for this personnel" }); return; }
+
+    const result = await removeEventureInvite(user.organizationId, invite.id);
     res.json(result);
   } catch (error) { handleError(res, error); }
 });
