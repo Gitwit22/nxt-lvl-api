@@ -1268,6 +1268,13 @@ model EventureSponsorshipPackage {
   programBookBenefit  String?
   coscBenefit         String?
   tributeBenefit      String?
+  description         String?  @db.Text
+  foursomesCount      Int?
+  foursomeValue       Float?
+  nonGolferTicketsCount Int?
+  nonGolferTicketValue Float?
+  isLimited           Boolean  @default(false)
+  isCustomPrice       Boolean  @default(false)
   sourceImportBatchId String?
   sourceImportRowId   String?
   importSource        String?
@@ -1275,7 +1282,8 @@ model EventureSponsorshipPackage {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  event EventureEvent? @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  event               EventureEvent?         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  payments            EventurePayment[]      @relation("PaymentSponsorshipPackage")
 
   @@unique([organizationId, eventId, name])
   @@index([organizationId, name])
@@ -1830,6 +1838,7 @@ model EventurePayment {
   eventId             String
   contactCompanyId    String
   participantId       String?
+  sponsorshipPackageId String?
   amountDue           Float    @default(0)
   amountPaid          Float    @default(0)
   balance             Float    @default(0)
@@ -1840,15 +1849,17 @@ model EventurePayment {
   createdAt           DateTime @default(now())
   updatedAt           DateTime @updatedAt
 
-  event               EventureEvent               @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  contactCompany      EventureSponsorOrganization @relation(fields: [contactCompanyId], references: [id], onDelete: Cascade)
-  primaryForParticipant EventureParticipant[]     @relation("ParticipantPrimaryPayment")
+  event               EventureEvent                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  contactCompany      EventureSponsorOrganization  @relation(fields: [contactCompanyId], references: [id], onDelete: Cascade)
+  sponsorshipPackage  EventureSponsorshipPackage?  @relation("PaymentSponsorshipPackage", fields: [sponsorshipPackageId], references: [id], onDelete: SetNull)
+  primaryForParticipant EventureParticipant[]      @relation("ParticipantPrimaryPayment")
   history             EventurePaymentHistory[]
   transactions        EventurePaymentTransaction[]
 
   @@index([organizationId, eventId, contactCompanyId])
   @@index([organizationId, eventId, paymentStatus])
   @@index([organizationId, participantId])
+  @@index([organizationId, sponsorshipPackageId])
 }
 
 model EventurePaymentTransaction {

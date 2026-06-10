@@ -132,9 +132,6 @@ export async function resendEventureInvite(
   if (invite.status === "accepted") {
     throw new EventureInviteServiceError("Invite already accepted", 409, "invite_already_accepted");
   }
-  if (invite.status === "revoked") {
-    throw new EventureInviteServiceError("Invite has been revoked", 409, "invite_revoked");
-  }
 
   const lastSent = invite.resentAt ?? invite.createdAt;
   const msSinceLast = Date.now() - new Date(lastSent).getTime();
@@ -171,12 +168,10 @@ export async function resendEventureInvite(
     },
   });
 
-  if (emailSent) {
-    await prisma.eventurePersonnel.update({
-      where: { id: invite.personnelId },
-      data: { inviteStatus: "invite_pending" },
-    });
-  }
+  await prisma.eventurePersonnel.update({
+    where: { id: invite.personnelId },
+    data: { inviteStatus: emailSent ? "invite_pending" : "invite_created" },
+  });
 
   return { emailSent, inviteLink: buildInviteLink(raw) };
 }

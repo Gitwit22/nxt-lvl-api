@@ -63,11 +63,35 @@ router.post("/", requireAuth, async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
 
-    // Prevent duplicate active personnel for the same org + email
+    // Prevent duplicate active personnel for the same org + email.
+    // If an existing, not-yet-accepted personnel record exists, treat this as a re-invite.
     const existing = await prisma.eventurePersonnel.findFirst({
       where: { organizationId: user.organizationId, email: normalizedEmail, archivedAt: null },
     });
     if (existing) {
+      if (!existing.userId && existing.inviteStatus !== "accepted") {
+        const existingInvite = await prisma.eventureInvite.findFirst({
+          where: { organizationId: user.organizationId, personnelId: existing.id },
+        });
+
+        if (existingInvite) {
+          const inviteResult = await resendEventureInvite(user.organizationId, existingInvite.id, 0);
+          const refreshed = await prisma.eventurePersonnel.findUnique({ where: { id: existing.id } });
+          res.status(200).json({
+            item: refreshed ?? existing,
+            invite: {
+              inviteId: existingInvite.id,
+              emailSent: inviteResult.emailSent,
+              emailStatus: inviteResult.emailSent ? "sent" : "failed",
+              inviteStatus: inviteResult.emailSent ? "invite_pending" : "invite_created",
+              inviteLink: inviteResult.inviteLink,
+            },
+            code: "existing_reinvited",
+          });
+          return;
+        }
+      }
+
       res.status(409).json({ error: "A personnel record with this email already exists", code: "duplicate_email" });
       return;
     }
