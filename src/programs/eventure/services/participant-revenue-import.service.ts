@@ -9,6 +9,7 @@ import {
 } from "./attendee-import.service.js";
 import { EventureServiceError } from "./eventure-error.js";
 import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
+import { isEligibleCompanyStatus } from "./participant-eligibility.service.js";
 import { normalizeCompanyName } from "./sponsor-import.service.js";
 import { assignRegistrationToSlot, reconcileAttendeeSlots } from "./workspace.service.js";
 
@@ -540,6 +541,40 @@ export async function confirmParticipantRevenueImportForEvent(input: {
   }
 
   for (const group of groupedRevenue.values()) {
+    if (group.lineItems.length === 0) {
+      continue;
+    }
+
+    const company = await prisma.eventureSponsorOrganization.findFirst({
+      where: {
+        id: group.contactCompanyId,
+        organizationId: input.organizationId,
+        archivedAt: null,
+      },
+      select: { sponsorStatus: true },
+    });
+
+    if (!isEligibleCompanyStatus(company?.sponsorStatus)) {
+      continue;
+    }
+
+    await prisma.eventureEventSponsor.upsert({
+      where: {
+        organizationId_eventId_sponsorOrganizationId: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          sponsorOrganizationId: group.contactCompanyId,
+        },
+      },
+      update: {
+      },
+      create: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        sponsorOrganizationId: group.contactCompanyId,
+      },
+    });
+
     let participant = await prisma.eventureParticipant.findFirst({
       where: {
         organizationId: input.organizationId,
@@ -561,10 +596,10 @@ export async function confirmParticipantRevenueImportForEvent(input: {
           eventId: input.eventId,
           contactCompanyId: group.contactCompanyId,
           companyName: group.companyName,
-          paymentConfirmed: false,
+          paymentConfirmed: true,
           attendeeCount: 0,
           flightAssignment: group.flightAssignment,
-          status: "confirmed",
+          status: "active",
         },
         select: {
           id: true,
@@ -624,15 +659,7 @@ export async function confirmParticipantRevenueImportForEvent(input: {
           attendeeCount: attendeeCountTarget,
           paymentConfirmed: true,
           paymentId: payment.id,
-          status: "confirmed",
-        },
-      });
-    } else {
-      await prisma.eventureParticipant.update({
-        where: { id: participant.id },
-        data: {
-          attendeeCount: attendeeCountTarget,
-          status: "confirmed",
+          status: "active",
         },
       });
     }

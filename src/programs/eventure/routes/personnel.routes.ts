@@ -90,6 +90,27 @@ router.post("/", requireAuth, async (req, res) => {
           });
           return;
         }
+
+        const assignedRole = existing.programRole === "program_director"
+          ? "Program Director"
+          : "Team Member";
+
+        const recreatedInvite = await issueEventureInvite({
+          organizationId: user.organizationId,
+          personnelId: existing.id,
+          recipientEmail: existing.email,
+          recipientName: existing.name,
+          assignedRole,
+          createdByAdminId: user.userId,
+        });
+
+        const refreshed = await prisma.eventurePersonnel.findUnique({ where: { id: existing.id } });
+        res.status(200).json({
+          item: refreshed ?? existing,
+          invite: recreatedInvite,
+          code: "existing_invite_recreated",
+        });
+        return;
       }
 
       res.status(409).json({ error: "A personnel record with this email already exists", code: "duplicate_email" });

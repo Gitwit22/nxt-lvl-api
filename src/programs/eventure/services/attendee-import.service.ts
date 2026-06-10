@@ -9,17 +9,13 @@ import {
   type AttendeeImportRowStatus,
 } from "./attendee-import-parser.js";
 import { buildCompanyCandidates, matchAttendeeCompany } from "./attendee-company-matcher.js";
+import { isEligibleCompanyStatus, isEligiblePaymentStatus } from "./participant-eligibility.service.js";
 import { normalizeCompanyName } from "./sponsor-import.service.js";
 
 export type AttendeeImportParserStrategy = "native";
 
-// Paid statuses: only these values trigger Participant + AttendeeSlot creation.
-// "confirmed" is intentionally excluded — it is used for RSVP confirmation, not financial confirmation.
-const PAID_STATUSES = new Set(["paid", "comped", "payment confirmed"]);
-
 export function isPaidStatus(value?: string | null): boolean {
-  const normalized = value?.trim().toLowerCase();
-  return !!normalized && PAID_STATUSES.has(normalized);
+  return isEligiblePaymentStatus(value);
 }
 
 export type AttendeeImportRowDecision =
@@ -774,7 +770,7 @@ export async function confirmAttendeeImportForEvent(input: {
       }
 
       if (finalCompanyId && decision !== "leave_individual" && !input.skipParticipantCreation) {
-        // Business rule: only paid/comped attendees become Participants and get AttendeeSlots.
+        // Business rule: only paid attendees from eligible companies become Participants and get AttendeeSlots.
         // Registrations are always created above regardless of payment status.
         if (!isPaidStatus(normalized.paymentStatus)) {
           unpaidAttendeesSkipped += 1;
@@ -790,6 +786,46 @@ export async function confirmAttendeeImportForEvent(input: {
           });
           continue;
         }
+
+        const participantCompany = await prisma.eventureSponsorOrganization.findFirst({
+          where: {
+            id: finalCompanyId,
+            organizationId: input.organizationId,
+            archivedAt: null,
+          },
+          select: { sponsorStatus: true },
+        });
+
+        if (!isEligibleCompanyStatus(participantCompany?.sponsorStatus)) {
+          unpaidAttendeesSkipped += 1;
+          await prisma.eventureImportRow.update({
+            where: { id: row.id },
+            data: {
+              status: existingRegistration || !registrationWasCreated ? "updated" : "imported",
+              createdRegistrationId: registrationId,
+              matchedAttendeeId: attendee.id,
+              errorMessage: null,
+            },
+          });
+          continue;
+        }
+
+        await prisma.eventureEventSponsor.upsert({
+          where: {
+            organizationId_eventId_sponsorOrganizationId: {
+              organizationId: input.organizationId,
+              eventId: input.eventId,
+              sponsorOrganizationId: finalCompanyId,
+            },
+          },
+          update: {
+          },
+          create: {
+            organizationId: input.organizationId,
+            eventId: input.eventId,
+            sponsorOrganizationId: finalCompanyId,
+          },
+        });
 
         let participant = await prisma.eventureParticipant.findFirst({
           where: {
@@ -812,10 +848,10 @@ export async function confirmAttendeeImportForEvent(input: {
               eventId: input.eventId,
               contactCompanyId: finalCompanyId,
               companyName: participantCompanyName,
-              paymentConfirmed: false,
+              paymentConfirmed: true,
               attendeeCount: 0,
               flightAssignment: normalized.flight,
-              status: "pending",
+              status: "active",
             },
             select: {
               id: true,

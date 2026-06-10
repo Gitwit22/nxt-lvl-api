@@ -1,6 +1,11 @@
 import { prisma } from "../../../core/db/prisma.js";
 import { EventureServiceError } from "./eventure-error.js";
 import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
+import {
+  assertEligibleCompanyStatus,
+  assertEligiblePaymentStatus,
+  isEligiblePaymentStatus,
+} from "./participant-eligibility.service.js";
 
 type CreateParticipantInput = {
   organizationId: string;
@@ -59,7 +64,7 @@ function resolveDefaultFlight(companyName: string, labels: unknown): "AM" | "PM"
 }
 
 async function ensureEventAndCompany(input: { organizationId: string; eventId: string; contactCompanyId: string }) {
-  const [event, eventSponsor] = await Promise.all([
+  const [event, sponsorOrganization] = await Promise.all([
     prisma.eventureEvent.findFirst({
       where: {
         id: input.eventId,
@@ -67,15 +72,10 @@ async function ensureEventAndCompany(input: { organizationId: string; eventId: s
         archivedAt: null,
       },
     }),
-    prisma.eventureEventSponsor.findFirst({
+    prisma.eventureSponsorOrganization.findFirst({
       where: {
         organizationId: input.organizationId,
-        eventId: input.eventId,
-        sponsorOrganizationId: input.contactCompanyId,
-        archivedAt: null,
-      },
-      include: {
-        sponsorOrganization: true,
+        id: input.contactCompanyId,
       },
     }),
   ]);
@@ -84,11 +84,29 @@ async function ensureEventAndCompany(input: { organizationId: string; eventId: s
     throw new EventureServiceError("Event not found.", 404);
   }
 
-  if (!eventSponsor?.sponsorOrganization) {
-    throw new EventureServiceError("Contact company not linked to this event.", 404);
+  if (!sponsorOrganization) {
+    throw new EventureServiceError("Contact company not found.", 404);
   }
 
-  return eventSponsor;
+  return prisma.eventureEventSponsor.upsert({
+    where: {
+      organizationId_eventId_sponsorOrganizationId: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        sponsorOrganizationId: input.contactCompanyId,
+      },
+    },
+    update: {
+    },
+    create: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      sponsorOrganizationId: input.contactCompanyId,
+    },
+    include: {
+      sponsorOrganization: true,
+    },
+  });
 }
 
 export async function reconcileAttendeeSlots(input: {
@@ -280,21 +298,19 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
     orderBy: [{ sponsorOrganization: { name: "asc" } }],
   });
 
-  const companyIds = sponsors.map((sponsor) => sponsor.sponsorOrganizationId);
-
   const [payments, participants] = await Promise.all([
     prisma.eventurePayment.findMany({
-      where: { organizationId, eventId, contactCompanyId: { in: companyIds } },
+      where: { organizationId, eventId },
       orderBy: [{ updatedAt: "desc" }],
     }),
     prisma.eventureParticipant.findMany({
-      where: { organizationId, eventId, contactCompanyId: { in: companyIds } },
+      where: { organizationId, eventId },
       orderBy: [{ updatedAt: "desc" }],
     }),
   ]);
 
   const transactions = await prisma.eventurePaymentTransaction.findMany({
-    where: { organizationId, eventId, contactCompanyId: { in: companyIds } },
+    where: { organizationId, eventId },
     include: {
       lineItems: {
         orderBy: [{ createdAt: "asc" }],
@@ -302,6 +318,42 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
     },
     orderBy: [{ transactionAt: "desc" }, { createdAt: "desc" }],
   });
+
+  const participantSlotCounts = participants.length === 0
+    ? []
+    : await prisma.eventureAttendeeSlot.groupBy({
+      by: ["participantId"],
+      where: {
+        organizationId,
+        eventId,
+        participantId: { in: participants.map((participant) => participant.id) },
+      },
+      _count: {
+        _all: true,
+      },
+    });
+
+  const companyIds = Array.from(new Set([
+    ...sponsors.map((sponsor) => sponsor.sponsorOrganizationId),
+    ...payments.map((payment) => payment.contactCompanyId),
+    ...participants.map((participant) => participant.contactCompanyId),
+    ...transactions.map((transaction) => transaction.contactCompanyId),
+  ]));
+
+  const organizations = companyIds.length === 0
+    ? []
+    : await prisma.eventureSponsorOrganization.findMany({
+      where: {
+        organizationId,
+        id: { in: companyIds },
+      },
+      include: {
+        contacts: {
+          where: { archivedAt: null },
+          orderBy: [{ isPrimary: "desc" }, { updatedAt: "desc" }],
+        },
+      },
+    });
 
   const paymentByCompany = new Map<string, (typeof payments)[number]>();
   for (const payment of payments) {
@@ -324,33 +376,62 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
     transactionsByCompany.set(transaction.contactCompanyId, bucket);
   }
 
-  return sponsors.map((sponsor) => {
-    const payment = paymentByCompany.get(sponsor.sponsorOrganizationId) ?? null;
-    const participant = participantByCompany.get(sponsor.sponsorOrganizationId) ?? null;
-    const paymentTransactions = transactionsByCompany.get(sponsor.sponsorOrganizationId) ?? [];
+  const sponsorByCompany = new Map<string, (typeof sponsors)[number]>();
+  for (const sponsor of sponsors) {
+    if (!sponsorByCompany.has(sponsor.sponsorOrganizationId)) {
+      sponsorByCompany.set(sponsor.sponsorOrganizationId, sponsor);
+    }
+  }
+
+  const organizationByCompany = new Map<string, (typeof organizations)[number]>();
+  for (const organization of organizations) {
+    organizationByCompany.set(organization.id, organization);
+  }
+
+  const slotCountByParticipant = new Map<string, number>();
+  for (const item of participantSlotCounts) {
+    slotCountByParticipant.set(item.participantId, item._count._all);
+  }
+
+  const rows = companyIds.map((companyId) => {
+    const payment = paymentByCompany.get(companyId) ?? null;
+    const participant = participantByCompany.get(companyId) ?? null;
+    const paymentTransactions = transactionsByCompany.get(companyId) ?? [];
+    const sponsor = sponsorByCompany.get(companyId) ?? null;
+    const company = organizationByCompany.get(companyId) ?? null;
     const primaryContact =
-      sponsor.sponsorOrganization.contacts.find((c) => c.isPrimary) ??
-      sponsor.sponsorOrganization.contacts[0] ??
-      null;
+      company?.contacts.find((contact) => contact.isPrimary)
+      ?? company?.contacts[0]
+      ?? null;
+    const participantWithSyncedSlots = participant
+      ? {
+        ...participant,
+        attendeeCount: slotCountByParticipant.get(participant.id) ?? participant.attendeeCount,
+      }
+      : null;
 
     // Exclude pure contact-only entries: companies with neither a payment record
     // nor a participant record have no payment activity for this event.
     if (payment === null && participant === null && paymentTransactions.length === 0) return null;
 
     return {
-      contactCompanyId: sponsor.sponsorOrganizationId,
-      companyName: sponsor.sponsorOrganization.name,
+      contactCompanyId: companyId,
+      companyName: company?.name ?? participant?.companyName ?? "Unknown Company",
       contactName: primaryContact?.name ?? null,
-      email: primaryContact?.email ?? sponsor.sponsorOrganization.mainEmail ?? null,
-      phone: primaryContact?.phone ?? sponsor.sponsorOrganization.mainPhone ?? null,
-      labels: sponsor.sponsorOrganization.labels,
-      sponsorStatus: sponsor.sponsorOrganization.sponsorStatus,
+      email: primaryContact?.email ?? company?.mainEmail ?? null,
+      phone: primaryContact?.phone ?? company?.mainPhone ?? null,
+      labels: company?.labels ?? null,
+      companyStatus: company?.sponsorStatus ?? null,
+      sponsorStatus: company?.sponsorStatus ?? null,
       payment,
       paymentTransactions,
-      participant,
-      convertedToParticipant: Boolean(participant?.paymentConfirmed),
+      participant: participantWithSyncedSlots,
+      convertedToParticipant: Boolean(participantWithSyncedSlots?.paymentConfirmed),
     };
   }).filter((row): row is Exclude<typeof row, null> => row !== null);
+
+  rows.sort((left, right) => left.companyName.localeCompare(right.companyName));
+  return rows;
 }
 
 export async function listAttendeesForEvent(organizationId: string, eventId: string) {
@@ -445,6 +526,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
   }
 
   const eventSponsor = await ensureEventAndCompany(input);
+  assertEligibleCompanyStatus(eventSponsor.sponsorOrganization.sponsorStatus);
   const companyName = eventSponsor.sponsorOrganization.name;
 
   const result = await prisma.$transaction(async (tx) => {
@@ -590,21 +672,44 @@ export async function createParticipantForEvent(input: CreateParticipantInput) {
 
   const normalizedName = displayName.trim().toLowerCase();
 
-  let company = await prisma.eventureSponsorOrganization.findFirst({
+  const company = await prisma.eventureSponsorOrganization.findFirst({
     where: { organizationId: input.organizationId, normalizedName },
   });
 
   if (!company) {
-    company = await prisma.eventureSponsorOrganization.create({
-      data: {
-        organizationId: input.organizationId,
-        name: displayName,
-        normalizedName,
-        mainEmail: input.email || undefined,
-        mainPhone: input.phone || undefined,
-      },
-    });
+    throw new EventureServiceError("Company must already exist and be linked to the event before creating a participant.", 400);
   }
+
+  const eventSponsor = await prisma.eventureEventSponsor.upsert({
+    where: {
+      organizationId_eventId_sponsorOrganizationId: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        sponsorOrganizationId: company.id,
+      },
+    },
+    update: {
+    },
+    create: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      sponsorOrganizationId: company.id,
+    },
+    include: { sponsorOrganization: true },
+  });
+
+  assertEligibleCompanyStatus(eventSponsor.sponsorOrganization.sponsorStatus);
+
+  const latestPayment = await prisma.eventurePayment.findFirst({
+    where: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      contactCompanyId: company.id,
+    },
+    orderBy: [{ updatedAt: "desc" }],
+  });
+
+  assertEligiblePaymentStatus(latestPayment?.paymentStatus);
 
   const contactName = isIndividual ? participantName! : participantName;
   if (contactName && (input.email || input.phone)) {
@@ -640,8 +745,11 @@ export async function createParticipantForEvent(input: CreateParticipantInput) {
       eventId: input.eventId,
       contactCompanyId: company.id,
       companyName: displayName,
+      paymentId: latestPayment!.id,
+      paymentConfirmed: true,
       attendeeCount: slotCount,
-      status: "pending",
+      status: "active",
+      flightAssignment: resolveDefaultFlight(displayName, eventSponsor.sponsorOrganization.labels),
     },
   });
 
@@ -677,7 +785,7 @@ export async function createParticipantForEvent(input: CreateParticipantInput) {
 }
 
 export async function listParticipantsForEvent(organizationId: string, eventId: string) {
-  return prisma.eventureParticipant.findMany({
+  const participants = await prisma.eventureParticipant.findMany({
     where: {
       organizationId,
       eventId,
@@ -698,6 +806,32 @@ export async function listParticipantsForEvent(organizationId: string, eventId: 
     },
     orderBy: [{ companyName: "asc" }],
   });
+
+  if (participants.length === 0) {
+    return participants;
+  }
+
+  const slotCounts = await prisma.eventureAttendeeSlot.groupBy({
+    by: ["participantId"],
+    where: {
+      organizationId,
+      eventId,
+      participantId: { in: participants.map((participant) => participant.id) },
+    },
+    _count: {
+      _all: true,
+    },
+  });
+
+  const slotCountByParticipant = new Map<string, number>();
+  for (const item of slotCounts) {
+    slotCountByParticipant.set(item.participantId, item._count._all);
+  }
+
+  return participants.map((participant) => ({
+    ...participant,
+    attendeeCount: slotCountByParticipant.get(participant.id) ?? participant.attendeeCount,
+  }));
 }
 
 export async function createStandalonePaymentTransaction(input: CreatePaymentTransactionInput) {
@@ -706,6 +840,7 @@ export async function createStandalonePaymentTransaction(input: CreatePaymentTra
   }
 
   const eventSponsor = await ensureEventAndCompany(input);
+  assertEligibleCompanyStatus(eventSponsor.sponsorOrganization.sponsorStatus);
 
   const participant = await prisma.eventureParticipant.findUnique({
     where: {
@@ -741,7 +876,7 @@ export async function createStandalonePaymentTransaction(input: CreatePaymentTra
         where: { id: participant.id },
         data: {
           paymentId: result.payment.id,
-          paymentConfirmed: true,
+          paymentConfirmed: isEligiblePaymentStatus(result.payment.paymentStatus),
         },
       });
     }
