@@ -17,6 +17,9 @@ import {
   updateAttendeeSlot,
   updateParticipantAttendeeCount,
   updateParticipantFlightAssignment,
+  attachPriceOptionToParticipant,
+  listParticipantPackages,
+  removeParticipantPackage,
 } from "../services/workspace.service.js";
 import { EventureServiceError } from "../services/eventure-error.js";
 
@@ -117,13 +120,15 @@ router.post("/payments/confirm", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const contactCompanyId = readString(req.body?.contactCompanyId);
-    const attendeeCount = readNumber(req.body?.attendeeCount);
+    const attendeeCount = readNumber(req.body?.attendeeCount) ?? 0;
+    const priceOptionId = readString(req.body?.priceOptionId);
 
     if (!contactCompanyId) {
       throw new EventureServiceError("contactCompanyId is required.", 400);
     }
 
-    if (!Number.isInteger(attendeeCount)) {
+    // attendeeCount is only strictly required when no priceOptionId is given
+    if (!priceOptionId && !Number.isInteger(attendeeCount)) {
       throw new EventureServiceError("attendeeCount must be an integer.", 400);
     }
 
@@ -132,6 +137,7 @@ router.post("/payments/confirm", async (req, res) => {
       eventId,
       contactCompanyId,
       attendeeCount,
+      priceOptionId,
       amountDue: readNumber(req.body?.amountDue),
       amountPaid: readNumber(req.body?.amountPaid),
       paymentMethod: readNullableString(req.body?.paymentMethod),
@@ -408,6 +414,70 @@ router.post("/cleanup-unconfirmed-participants", async (req, res) => {
       organizationId: user!.organizationId,
       eventId,
       dryRun,
+    });
+    res.json(result);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+// ─── Participant Package endpoints ───────────────────────────────────────────
+
+router.get("/participants/:participantId/packages", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const participantId = readRouteParam(req.params["participantId"], "participantId");
+    const items = await listParticipantPackages({
+      organizationId: user!.organizationId,
+      eventId,
+      participantId,
+    });
+    res.json({ items });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.post("/participants/:participantId/packages", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const participantId = readRouteParam(req.params["participantId"], "participantId");
+    const priceOptionId = readString(req.body?.priceOptionId);
+
+    if (!priceOptionId) {
+      throw new EventureServiceError("priceOptionId is required.", 400);
+    }
+
+    const item = await attachPriceOptionToParticipant({
+      organizationId: user!.organizationId,
+      eventId,
+      participantId,
+      priceOptionId,
+      quantity: readNumber(req.body?.quantity) ?? 1,
+      unitPriceCentsOverride: readNumber(req.body?.unitPriceCentsOverride),
+      flightOverride: readNullableString(req.body?.flightOverride),
+      paymentStatus: readString(req.body?.paymentStatus),
+      notes: readNullableString(req.body?.notes),
+    });
+    res.status(201).json({ item });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.delete("/participants/:participantId/packages/:packageId", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const participantId = readRouteParam(req.params["participantId"], "participantId");
+    const packageId = readRouteParam(req.params["packageId"], "packageId");
+    const result = await removeParticipantPackage({
+      organizationId: user!.organizationId,
+      eventId,
+      participantId,
+      packageId,
     });
     res.json(result);
   } catch (error) {

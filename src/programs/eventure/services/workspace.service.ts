@@ -22,6 +22,7 @@ type ConfirmPaymentInput = {
   eventId: string;
   contactCompanyId: string;
   attendeeCount: number;
+  priceOptionId?: string;
   amountDue?: number;
   amountPaid?: number;
   paymentMethod?: string | null;
@@ -543,7 +544,22 @@ async function syncRegistrationsOnPaymentConfirm(input: {
 }
 
 export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInput) {
-  if (!Number.isInteger(input.attendeeCount) || input.attendeeCount < 0) {
+  // Resolve priceOption first so attendeeCount can default from it
+  let resolvedPriceOption: Awaited<ReturnType<typeof prisma.eventPriceOption.findFirst>> | null = null;
+  if (input.priceOptionId) {
+    resolvedPriceOption = await prisma.eventPriceOption.findFirst({
+      where: { id: input.priceOptionId, organizationId: input.organizationId, eventId: input.eventId, archivedAt: null },
+    });
+    if (!resolvedPriceOption) {
+      throw new EventureServiceError("Price option not found for this event.", 404);
+    }
+  }
+
+  const effectiveAttendeeCount = resolvedPriceOption
+    ? resolvedPriceOption.includedAttendeeSlots
+    : input.attendeeCount;
+
+  if (!Number.isInteger(effectiveAttendeeCount) || effectiveAttendeeCount < 0) {
     throw new EventureServiceError("attendeeCount must be a non-negative integer.", 400);
   }
 
@@ -579,7 +595,9 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
     });
 
     const defaultFlight = resolveDefaultFlight(companyName, eventSponsor.sponsorOrganization.labels);
-    const chosenFlight = existingParticipant?.flightAssignment || defaultFlight;
+    const chosenFlight = resolvedPriceOption?.flight
+      ? resolvedPriceOption.flight
+      : (existingParticipant?.flightAssignment || defaultFlight);
 
     const participant = existingParticipant
       ? await tx.eventureParticipant.update({
@@ -587,7 +605,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
         data: {
           companyName,
           paymentConfirmed: true,
-          attendeeCount: input.attendeeCount,
+          attendeeCount: effectiveAttendeeCount,
           status: "active",
           flightAssignment: chosenFlight,
         },
@@ -599,7 +617,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
           contactCompanyId: input.contactCompanyId,
           companyName,
           paymentConfirmed: true,
-          attendeeCount: input.attendeeCount,
+          attendeeCount: effectiveAttendeeCount,
           flightAssignment: chosenFlight,
           status: "active",
         },
@@ -636,6 +654,27 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
       },
     });
 
+    // If a catalog price option was selected, create the participant package record
+    if (resolvedPriceOption) {
+      await tx.eventParticipantPackage.create({
+        data: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: participant.id,
+          priceOptionId: resolvedPriceOption.id,
+          quantity: 1,
+          unitPriceCents: resolvedPriceOption.priceCents,
+          totalPriceCents: resolvedPriceOption.priceCents,
+          flight: resolvedPriceOption.flight ?? null,
+          golferSlots: resolvedPriceOption.includedGolfers,
+          nonGolferSlots: resolvedPriceOption.includedNonGolfers,
+          representativeSlots: resolvedPriceOption.includedRepresentativeSlots,
+          attendeeSlots: resolvedPriceOption.includedAttendeeSlots,
+          paymentStatus: "pending",
+        },
+      });
+    }
+
     return { payment, participant };
   });
 
@@ -644,7 +683,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
     eventId: input.eventId,
     participantId: result.participant.id,
     companyName: result.participant.companyName,
-    attendeeCount: input.attendeeCount,
+    attendeeCount: effectiveAttendeeCount,
     flightAssignment: result.participant.flightAssignment,
     forceRemoveNamedSlots: input.forceRemoveNamedSlots,
   });
@@ -1531,4 +1570,114 @@ export async function createAssignmentForEvent(input: {
       volunteerNeed: true,
     },
   });
+}
+
+export async function attachPriceOptionToParticipant(input: {
+  organizationId: string;
+  eventId: string;
+  participantId: string;
+  priceOptionId: string;
+  quantity?: number;
+  unitPriceCentsOverride?: number;
+  flightOverride?: string | null;
+  paymentStatus?: string;
+  notes?: string | null;
+}) {
+  const [participant, priceOption] = await Promise.all([
+    prisma.eventureParticipant.findFirst({
+      where: { id: input.participantId, organizationId: input.organizationId, eventId: input.eventId },
+    }),
+    prisma.eventPriceOption.findFirst({
+      where: { id: input.priceOptionId, organizationId: input.organizationId, eventId: input.eventId, archivedAt: null },
+    }),
+  ]);
+
+  if (!participant) throw new EventureServiceError("Participant not found.", 404);
+  if (!priceOption) throw new EventureServiceError("Price option not found for this event.", 404);
+  if (!priceOption.isActive) throw new EventureServiceError("Price option is not active.", 400);
+
+  const quantity = input.quantity ?? 1;
+  const unitPriceCents = input.unitPriceCentsOverride ?? priceOption.priceCents;
+  const totalPriceCents = unitPriceCents * quantity;
+  const flight = input.flightOverride !== undefined ? input.flightOverride : (priceOption.flight ?? null);
+  const golferSlots = priceOption.includedGolfers * quantity;
+  const nonGolferSlots = priceOption.includedNonGolfers * quantity;
+  const representativeSlots = priceOption.includedRepresentativeSlots * quantity;
+  const attendeeSlots = priceOption.includedAttendeeSlots * quantity;
+
+  const pkg = await prisma.eventParticipantPackage.create({
+    data: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      participantId: input.participantId,
+      priceOptionId: input.priceOptionId,
+      quantity,
+      unitPriceCents,
+      totalPriceCents,
+      flight,
+      golferSlots,
+      nonGolferSlots,
+      representativeSlots,
+      attendeeSlots,
+      paymentStatus: input.paymentStatus ?? "pending",
+      notes: input.notes ?? null,
+    },
+  });
+
+  // Reconcile attendee slots using derived count
+  if (attendeeSlots > 0) {
+    const resolvedFlight = flight ?? participant.flightAssignment;
+    const newAttendeeCount = Math.max(participant.attendeeCount, attendeeSlots);
+    if (newAttendeeCount !== participant.attendeeCount) {
+      await prisma.eventureParticipant.update({
+        where: { id: input.participantId },
+        data: { attendeeCount: newAttendeeCount },
+      });
+    }
+    await reconcileAttendeeSlots({
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      participantId: input.participantId,
+      companyName: participant.companyName,
+      attendeeCount: newAttendeeCount,
+      flightAssignment: resolvedFlight,
+    });
+  }
+
+  return pkg;
+}
+
+export async function listParticipantPackages(input: {
+  organizationId: string;
+  eventId: string;
+  participantId: string;
+}) {
+  return prisma.eventParticipantPackage.findMany({
+    where: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      participantId: input.participantId,
+    },
+    include: { priceOption: true },
+    orderBy: [{ createdAt: "asc" }],
+  });
+}
+
+export async function removeParticipantPackage(input: {
+  organizationId: string;
+  eventId: string;
+  participantId: string;
+  packageId: string;
+}) {
+  const existing = await prisma.eventParticipantPackage.findFirst({
+    where: {
+      id: input.packageId,
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      participantId: input.participantId,
+    },
+  });
+  if (!existing) throw new EventureServiceError("Participant package not found.", 404);
+  await prisma.eventParticipantPackage.delete({ where: { id: input.packageId } });
+  return { removedPackageId: input.packageId };
 }

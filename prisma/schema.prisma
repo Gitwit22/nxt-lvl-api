@@ -1247,6 +1247,7 @@ model EventureEvent {
   importBatches       EventureImportBatch[]
   checkInLogs         EventureCheckInLog[]
   personnel           EventureEventPersonnel[]
+  priceOptions        EventPriceOption[]
 
   @@index([organizationId, programDomain])
   @@index([organizationId, status, startDateTime])
@@ -1824,6 +1825,7 @@ model EventureParticipant {
   payment             EventurePayment?            @relation("ParticipantPrimaryPayment", fields: [paymentId], references: [id], onDelete: SetNull)
   attendeeSlots       EventureAttendeeSlot[]
   assignments         EventureAssignment[]
+  participantPackages EventParticipantPackage[]
 
   @@unique([organizationId, eventId, contactCompanyId])
   @@index([organizationId, eventId, paymentConfirmed])
@@ -2075,6 +2077,71 @@ model EventureAuditLog {
   @@index([organizationId, createdAt])
   @@index([organizationId, action])
   @@index([organizationId, resourceType, resourceId])
+}
+
+model EventPriceOption {
+  id                          String    @id @default(cuid())
+  organizationId              String
+  programDomain               String    @default("eventure")
+  eventId                     String
+  code                        String
+  name                        String
+  category                    String    // SPONSORSHIP | FOURSOME | NON_GOLFER | ADD_ON | COMP
+  flight                      String?   // AM | PM | null
+  priceCents                  Int       @default(0)
+  includedFoursomes           Int       @default(0)
+  includedGolfers             Int       @default(0)
+  includedNonGolfers          Int       @default(0)
+  includedAttendeeSlots       Int       @default(0)
+  includedRepresentativeSlots Int       @default(0)
+  participantEligible         Boolean   @default(true)
+  createsSponsorRecord        Boolean   @default(false)
+  isLimited                   Boolean   @default(false)
+  isActive                    Boolean   @default(true)
+  requiresReview              Boolean   @default(false)
+  reviewNote                  String?   @db.Text
+  description                 String?   @db.Text
+  benefits                    Json?
+  sortOrder                   Int       @default(0)
+  archivedAt                  DateTime?
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
+
+  event               EventureEvent            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  participantPackages EventParticipantPackage[]
+
+  @@unique([organizationId, eventId, code])
+  @@index([organizationId, eventId])
+  @@index([organizationId, eventId, category])
+  @@index([organizationId, eventId, isActive])
+}
+
+model EventParticipantPackage {
+  id              String   @id @default(cuid())
+  organizationId  String
+  programDomain   String   @default("eventure")
+  eventId         String
+  participantId   String
+  priceOptionId   String
+  quantity        Int      @default(1)
+  unitPriceCents  Int      @default(0)
+  totalPriceCents Int      @default(0)
+  flight          String?  // overrides option default if set
+  golferSlots     Int      @default(0)
+  nonGolferSlots  Int      @default(0)
+  representativeSlots Int  @default(0)
+  attendeeSlots   Int      @default(0)
+  paymentStatus   String   @default("pending")
+  notes           String?  @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  participant EventureParticipant @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  priceOption EventPriceOption    @relation(fields: [priceOptionId], references: [id], onDelete: Restrict)
+
+  @@index([organizationId, participantId])
+  @@index([organizationId, priceOptionId])
+  @@index([organizationId, eventId])
 }
 
 // ─── End Eventure ───────────────────────────────────────────────────────────

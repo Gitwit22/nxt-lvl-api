@@ -419,9 +419,72 @@ function normalizeReferenceKey(value?: string): string | undefined {
   return normalized ? normalized : undefined;
 }
 
+/**
+ * Canonical package code aliases for import normalization.
+ * Maps human-readable strings (as they appear in spreadsheet imports) to
+ * the canonical EventPriceOption.code values.
+ */
+const PACKAGE_ALIASES: Record<string, string> = {
+  // Title Sponsor
+  "title sponsor": "TITLE_SPONSOR",
+  "title sponsorship": "TITLE_SPONSOR",
+  "michigan roundtable classic title sponsor": "TITLE_SPONSOR",
+  // PM Presenting Sponsor
+  "pm presenting sponsor": "PM_PRESENTING_SPONSOR",
+  "pm flight presenting sponsor": "PM_PRESENTING_SPONSOR",
+  "presenting sponsor": "PM_PRESENTING_SPONSOR",
+  // Justice Lounge Sponsor
+  "justice lounge sponsor": "JUSTICE_LOUNGE_SPONSOR",
+  "19th hole justice lounge": "JUSTICE_LOUNGE_SPONSOR",
+  "justice lounge evening reception sponsor": "JUSTICE_LOUNGE_SPONSOR",
+  // Lunch Sponsor
+  "lunch sponsor": "LUNCH_SPONSOR",
+  "luncheon sponsor": "LUNCH_SPONSOR",
+  // Golf Gift Sponsor
+  "golf gift sponsor": "GOLF_GIFT_SPONSOR",
+  "golfer gift sponsor": "GOLF_GIFT_SPONSOR",
+  // Beverage Cart Sponsor
+  "beverage cart sponsor": "BEVERAGE_CART_SPONSOR",
+  "beverage cart": "BEVERAGE_CART_SPONSOR",
+  // Breakfast Sponsor
+  "breakfast sponsor": "BREAKFAST_SPONSOR",
+  // Wellness Lounge Sponsor
+  "wellness lounge sponsor": "WELLNESS_LOUNGE_SPONSOR",
+  "wellness sponsor": "WELLNESS_LOUNGE_SPONSOR",
+  // Hole Sponsor
+  "hole sponsor": "HOLE_SPONSOR",
+  "hole sponsorship": "HOLE_SPONSOR",
+  // PM Foursome
+  "pm foursome": "PM_FOURSOME",
+  "1 - pm flight foursome": "PM_FOURSOME",
+  "pm flight foursome": "PM_FOURSOME",
+  "1 pm foursome": "PM_FOURSOME",
+  // AM Foursome (DTE)
+  "am foursome": "AM_FOURSOME_DTE",
+  "am foursome dte": "AM_FOURSOME_DTE",
+  "am flight foursome": "AM_FOURSOME_DTE",
+  "1 - am flight foursome presented by dte": "AM_FOURSOME_DTE",
+  "am flight foursome presented by dte": "AM_FOURSOME_DTE",
+  // PM Non-Golfer
+  "pm non-golfer": "PM_NON_GOLFER",
+  "non-golfer pm": "PM_NON_GOLFER",
+  "pm non golfer": "PM_NON_GOLFER",
+  "non golfer pm": "PM_NON_GOLFER",
+  // AM Non-Golfer (DTE)
+  "am non-golfer": "AM_NON_GOLFER_DTE",
+  "non-golfer am": "AM_NON_GOLFER_DTE",
+  "am non golfer": "AM_NON_GOLFER_DTE",
+  "am non-golfer dte": "AM_NON_GOLFER_DTE",
+  "non-golfer am flight presented by dte": "AM_NON_GOLFER_DTE",
+};
+
 function normalizePackageKey(value?: string): string | undefined {
-  const normalized = value?.trim().toLowerCase().replace(/\s+/g, " ");
-  return normalized ? normalized : undefined;
+  if (!value) return undefined;
+  const trimmed = value.trim().toLowerCase().replace(/\s+/g, " ");
+  // Resolve through alias map first (returns canonical code, already uppercase)
+  const alias = PACKAGE_ALIASES[trimmed];
+  if (alias) return alias;
+  return trimmed || undefined;
 }
 
 function sharesMeaningfulCompanyToken(companyName: string, sponsorName: string): boolean {
