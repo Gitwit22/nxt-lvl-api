@@ -654,6 +654,15 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
       },
     });
 
+    // Ensure the participant's paymentId back-reference is set so that
+    // listParticipantsForEvent (and the overview page) can load the payment directly.
+    await tx.eventureParticipant.update({
+      where: { id: participant.id },
+      data: {
+        paymentId: payment.id,
+      },
+    });
+
     // If a catalog price option was selected, create the participant package record
     if (resolvedPriceOption) {
       await tx.eventParticipantPackage.create({
@@ -891,6 +900,27 @@ export async function listParticipantsForEvent(organizationId: string, eventId: 
     },
   });
 
+  // For any participant where paymentId wasn't set (legacy records confirmed via workspace
+  // before the back-link fix), look up the payment by contactCompanyId as a fallback.
+  const missingPaymentParticipants = participants.filter((p) => !p.paymentId);
+  const fallbackPayments = missingPaymentParticipants.length === 0
+    ? []
+    : await prisma.eventurePayment.findMany({
+      where: {
+        organizationId,
+        eventId,
+        contactCompanyId: { in: missingPaymentParticipants.map((p) => p.contactCompanyId) },
+      },
+      orderBy: [{ updatedAt: "desc" }],
+    });
+
+  const fallbackPaymentByCompany = new Map<string, (typeof fallbackPayments)[number]>();
+  for (const payment of fallbackPayments) {
+    if (!fallbackPaymentByCompany.has(payment.contactCompanyId)) {
+      fallbackPaymentByCompany.set(payment.contactCompanyId, payment);
+    }
+  }
+
   const slotCountByParticipant = new Map<string, number>();
   for (const item of slotCounts) {
     slotCountByParticipant.set(item.participantId, item._count._all);
@@ -898,6 +928,7 @@ export async function listParticipantsForEvent(organizationId: string, eventId: 
 
   return participants.map((participant) => ({
     ...participant,
+    payment: participant.payment ?? fallbackPaymentByCompany.get(participant.contactCompanyId) ?? null,
     attendeeCount: slotCountByParticipant.get(participant.id) ?? participant.attendeeCount,
   }));
 }
