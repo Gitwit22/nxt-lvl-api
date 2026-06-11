@@ -26,6 +26,17 @@ function readNullableFloat(value: unknown): number | null | undefined {
   return null;
 }
 
+function readNullableInt(value: unknown): number | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "number" && Number.isInteger(value)) return value;
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number.parseInt(value, 10);
+    if (Number.isInteger(parsed)) return parsed;
+  }
+  return null;
+}
+
 function handleError(res: express.Response, error: unknown) {
   if (error instanceof EventureServiceError) {
     res.status(error.statusCode).json({ error: error.message });
@@ -74,6 +85,8 @@ router.post("/", async (req, res) => {
       update: {
         earlyBirdPrice: readNullableFloat(body.earlyBirdPrice) ?? undefined,
         regularPrice: readNullableFloat(body.regularPrice) ?? undefined,
+        foursomesCount: readNullableInt(body.foursomesCount) ?? undefined,
+        nonGolferTicketsCount: readNullableInt(body.nonGolferTicketsCount) ?? undefined,
         archivedAt: null,
       },
       create: {
@@ -82,6 +95,8 @@ router.post("/", async (req, res) => {
         name,
         earlyBirdPrice: readNullableFloat(body.earlyBirdPrice) ?? undefined,
         regularPrice: readNullableFloat(body.regularPrice) ?? undefined,
+        foursomesCount: readNullableInt(body.foursomesCount) ?? undefined,
+        nonGolferTicketsCount: readNullableInt(body.nonGolferTicketsCount) ?? undefined,
       },
     });
     res.status(201).json({ item });
@@ -109,6 +124,8 @@ router.patch("/:packageId", async (req, res) => {
     const name = readString(body.name);
     const earlyBirdPrice = readNullableFloat(body.earlyBirdPrice);
     const regularPrice = readNullableFloat(body.regularPrice);
+    const foursomesCount = readNullableInt(body.foursomesCount);
+    const nonGolferTicketsCount = readNullableInt(body.nonGolferTicketsCount);
 
     const item = await prisma.eventureSponsorshipPackage.update({
       where: { id: packageId },
@@ -116,6 +133,8 @@ router.patch("/:packageId", async (req, res) => {
         ...(name !== undefined ? { name } : {}),
         ...(earlyBirdPrice !== undefined ? { earlyBirdPrice } : {}),
         ...(regularPrice !== undefined ? { regularPrice } : {}),
+        ...(foursomesCount !== undefined ? { foursomesCount } : {}),
+        ...(nonGolferTicketsCount !== undefined ? { nonGolferTicketsCount } : {}),
       },
     });
     res.json({ item });
