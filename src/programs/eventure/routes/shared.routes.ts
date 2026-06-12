@@ -77,9 +77,11 @@ router.get("/companies", async (req, res) => {
   try {
     const organizationId = resolveOrgId(req);
     const status = readString(req.query["status"]);
+    const search = readString(req.query["search"]);
     const items = await listSharedCompanies({
       organizationId,
       status: status === "archived" || status === "all" || status === "active" ? status : undefined,
+      search,
     });
 
     if (wantsCsv(req)) {

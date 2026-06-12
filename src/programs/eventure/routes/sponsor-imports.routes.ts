@@ -13,6 +13,11 @@ import {
   type SponsorImportRollbackMode,
   type SponsorImportParserStrategy,
 } from "../services/sponsor-import.service.js";
+import {
+  confirmLogoImportForEvent,
+  type LogoImportDecisionInput,
+  previewLogoImportForEvent,
+} from "../services/logo-import.service.js";
 import { listImportBatchesForEvent } from "../repositories/sponsor-import.repository.js";
 import { EventureServiceError } from "../services/eventure-error.js";
 
@@ -106,6 +111,30 @@ function readRowDecisions(req: express.Request): ConfirmRowDecisionInput[] | und
   }
 
   throw new EventureServiceError("rowDecisions must be a JSON array.", 400);
+}
+
+function readLogoImportDecisions(req: express.Request): LogoImportDecisionInput[] | undefined {
+  const rawValue = req.body?.decisions;
+  if (rawValue === undefined || rawValue === null || rawValue === "") return undefined;
+
+  if (Array.isArray(rawValue)) {
+    return rawValue as LogoImportDecisionInput[];
+  }
+
+  if (typeof rawValue === "string") {
+    try {
+      const parsed = JSON.parse(rawValue) as unknown;
+      if (!Array.isArray(parsed)) {
+        throw new EventureServiceError("decisions must be a JSON array.", 400);
+      }
+      return parsed as LogoImportDecisionInput[];
+    } catch (error) {
+      if (error instanceof EventureServiceError) throw error;
+      throw new EventureServiceError("decisions must be valid JSON.", 400);
+    }
+  }
+
+  throw new EventureServiceError("decisions must be a JSON array.", 400);
 }
 
 function readCreateEvent(req: express.Request): ConfirmCreateEventInput | undefined {
@@ -233,6 +262,24 @@ router.post("/preview", upload.single("file"), async (req, res) => {
   }
 });
 
+router.post("/logos/preview", upload.array("files", 200), async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const files = Array.isArray(req.files) ? req.files : [];
+
+    const result = await previewLogoImportForEvent({
+      organizationId: user!.organizationId,
+      eventId,
+      files,
+    });
+
+    res.json(result);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
 router.post("/confirm", upload.single("file"), async (req, res) => {
   try {
     const user = getRequestUser(req);
@@ -247,6 +294,26 @@ router.post("/confirm", upload.single("file"), async (req, res) => {
       createEvent: readCreateEvent(req),
       selectedTabs: readSelectedTabs(req),
       representativesAsAttendees: req.body?.representativesAsAttendees === true || req.body?.representativesAsAttendees === "true",
+    });
+
+    res.status(201).json(result);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.post("/logos/confirm", upload.array("files", 200), async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const files = Array.isArray(req.files) ? req.files : [];
+
+    const result = await confirmLogoImportForEvent({
+      organizationId: user!.organizationId,
+      eventId,
+      actorUserId: user!.userId,
+      files,
+      decisions: readLogoImportDecisions(req),
     });
 
     res.status(201).json(result);

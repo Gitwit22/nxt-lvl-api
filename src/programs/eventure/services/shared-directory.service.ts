@@ -5,6 +5,7 @@ export type SharedDirectoryFilters = {
   eventId?: string;
   includeHistory?: boolean;
   status?: "active" | "archived" | "all";
+  search?: string;
 };
 
 function normalizeStatusFilter(status?: string): "active" | "archived" | "all" {
@@ -92,11 +93,32 @@ export async function listSharedSponsors(input: SharedDirectoryFilters) {
 
 export async function listSharedCompanies(input: SharedDirectoryFilters) {
   const status = normalizeStatusFilter(input.status);
+  const search = input.search?.trim();
   const companies = await prisma.eventureSponsorOrganization.findMany({
     where: {
       organizationId: input.organizationId,
       ...(status === "active" ? { archivedAt: null } : {}),
       ...(status === "archived" ? { archivedAt: { not: null } } : {}),
+      ...(search
+        ? {
+          OR: [
+            { name: { contains: search, mode: "insensitive" } },
+            { mainEmail: { contains: search, mode: "insensitive" } },
+            { mainPhone: { contains: search, mode: "insensitive" } },
+            {
+              contacts: {
+                some: {
+                  OR: [
+                    { name: { contains: search, mode: "insensitive" } },
+                    { email: { contains: search, mode: "insensitive" } },
+                    { phone: { contains: search, mode: "insensitive" } },
+                  ],
+                },
+              },
+            },
+          ],
+        }
+        : {}),
     },
     orderBy: { name: "asc" },
   });
