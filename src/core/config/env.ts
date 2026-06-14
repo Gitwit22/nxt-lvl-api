@@ -179,6 +179,7 @@ export const ALLOWED_MIME_TYPES = new Set([
   "image/gif",
   "image/tiff",
   "image/webp",
+  "image/svg+xml",
   "text/plain",
   "text/csv",
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
