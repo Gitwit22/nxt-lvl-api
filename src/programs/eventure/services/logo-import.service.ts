@@ -3,6 +3,7 @@ import { prisma } from "../../../core/db/prisma.js";
 import { deleteFromR2, isR2Configured, uploadToR2 } from "../../../core/storage/r2.js";
 import { EventureServiceError } from "./eventure-error.js";
 import { normalizeCompanyName } from "./sponsor-import.service.js";
+import { extractLogosFromPdf } from "./pdf-logo-extractor.js";
 
 const ALLOWED_LOGO_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"]);
 
@@ -53,6 +54,13 @@ export type LogoImportPreviewResponse = {
     existingLogoRows: number;
   };
   rows: LogoImportPreviewRow[];
+  availableCompanies: Array<{
+    id: string;
+    name: string;
+    mainEmail: string | null;
+    mainPhone: string | null;
+    contacts: Array<{ id: string; name: string; email: string | null; isPrimary: boolean }>;
+  }>;
 };
 
 export type LogoImportDecisionInput = {
@@ -89,11 +97,21 @@ type CompanyCandidate = {
   normalizedName: string;
   logoUrl: string | null;
   logoKey: string | null;
+  mainEmail: string | null;
+  mainPhone: string | null;
+  contacts: Array<{ id: string; name: string; email: string | null; isPrimary: boolean }>;
 };
 
 type PreviewContext = {
   rows: LogoImportPreviewRow[];
   companiesById: Map<string, CompanyCandidate>;
+  availableCompanies: Array<{
+    id: string;
+    name: string;
+    mainEmail: string | null;
+    mainPhone: string | null;
+    contacts: Array<{ id: string; name: string; email: string | null; isPrimary: boolean }>;
+  }>;
 };
 
 function sanitizeDerivedName(fileName: string): string {
@@ -111,8 +129,10 @@ function sanitizeDerivedName(fileName: string): string {
 
 function ensureImageFile(file: Express.Multer.File): string[] {
   const errors: string[] = [];
-  if (!ALLOWED_LOGO_TYPES.has(file.mimetype)) {
-    errors.push("Unsupported file type. Use JPEG, PNG, GIF, WebP, or SVG.");
+  if (file.mimetype === "application/pdf") {
+    errors.push("No extractable JPEG images found in this PDF. Ensure it contains embedded raster logos.");
+  } else if (!ALLOWED_LOGO_TYPES.has(file.mimetype)) {
+    errors.push("Unsupported file type. Use JPEG, PNG, GIF, WebP, SVG, or a PDF containing embedded images.");
   }
   if (file.size <= 0) {
     errors.push("File is empty.");
@@ -181,11 +201,29 @@ async function buildPreviewContext(input: {
       normalizedName: true,
       logoUrl: true,
       logoKey: true,
+      mainEmail: true,
+      mainPhone: true,
+      contacts: {
+        select: {
+          id: true,
+          name: true,
+          email: true,
+          isPrimary: true,
+        },
+      },
     },
   });
 
   const companiesByNormalized = mapCompaniesByNormalizedName(companies);
   const companiesById = new Map<string, CompanyCandidate>(companies.map((company) => [company.id, company]));
+
+  const availableCompanies = companies.map((company) => ({
+    id: company.id,
+    name: company.name,
+    mainEmail: company.mainEmail,
+    mainPhone: company.mainPhone,
+    contacts: company.contacts,
+  }));
 
   const rows: LogoImportPreviewRow[] = input.files.map((file) => {
     const fileErrors = ensureImageFile(file);
@@ -251,7 +289,42 @@ async function buildPreviewContext(input: {
     }
   }
 
-  return { rows, companiesById };
+  return { rows, companiesById, availableCompanies };
+}
+
+async function preProcessFilesForLogoImport(
+  files: Express.Multer.File[],
+): Promise<Express.Multer.File[]> {
+  const result: Express.Multer.File[] = [];
+
+  for (const file of files) {
+    if (file.mimetype !== "application/pdf") {
+      result.push(file);
+      continue;
+    }
+
+    const extraction = await extractLogosFromPdf(file.buffer, file.originalname);
+
+    if (extraction.images.length === 0) {
+      // Keep the original PDF so ensureImageFile produces a clear invalid_file row.
+      result.push(file);
+      continue;
+    }
+
+    // Replace the PDF with its extracted images.
+    for (const img of extraction.images) {
+      result.push({
+        fieldname: file.fieldname,
+        originalname: img.fileName,
+        encoding: "7bit",
+        mimetype: img.mimeType,
+        buffer: img.buffer,
+        size: img.buffer.length,
+      } as Express.Multer.File);
+    }
+  }
+
+  return result;
 }
 
 export async function previewLogoImportForEvent(input: {
@@ -263,12 +336,14 @@ export async function previewLogoImportForEvent(input: {
     throw new EventureServiceError("Provide one or more image files.", 400);
   }
 
-  const context = await buildPreviewContext(input);
+  const processedFiles = await preProcessFilesForLogoImport(input.files);
+  const context = await buildPreviewContext({ ...input, files: processedFiles });
 
   return {
     eventId: input.eventId,
     summary: summarize(context.rows),
     rows: context.rows,
+    availableCompanies: context.availableCompanies,
   };
 }
 
@@ -283,10 +358,11 @@ export async function confirmLogoImportForEvent(input: {
     throw new EventureServiceError("Provide one or more image files.", 400);
   }
 
-  const context = await buildPreviewContext(input);
+  const processedFiles = await preProcessFilesForLogoImport(input.files);
+  const context = await buildPreviewContext({ ...input, files: processedFiles });
   const filesByName = new Map<string, Express.Multer.File>();
 
-  for (const file of input.files) {
+  for (const file of processedFiles) {
     if (!filesByName.has(file.originalname)) {
       filesByName.set(file.originalname, file);
     }
