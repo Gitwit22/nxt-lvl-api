@@ -3,7 +3,7 @@ import path from "path";
 import { getRequestUser } from "../../../core/auth/auth.service.js";
 import { requireAuth } from "../../../core/middleware/auth.middleware.js";
 import { upload } from "../../../validators.js";
-import { isR2Configured, uploadToR2, deleteFromR2 } from "../../../core/storage/r2.js";
+import { isR2Configured, uploadToR2, deleteFromR2, getR2SignedDownloadUrl } from "../../../core/storage/r2.js";
 import { prisma } from "../../../core/db/prisma.js";
 import {
   archiveSponsorContactForEvent,
@@ -23,6 +23,25 @@ import {
 import { EventureServiceError } from "../services/eventure-error.js";
 
 const ALLOWED_LOGO_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"];
+
+/**
+ * Returns true when the value looks like an R2 object key rather than a full URL or data URI.
+ */
+function isStoredAsR2Key(value: string): boolean {
+  return !value.startsWith("http://") && !value.startsWith("https://") && !value.startsWith("data:");
+}
+
+/**
+ * If the stored logoUrl is a raw R2 key, generate a short-lived signed URL;
+ * otherwise return the URL as-is.
+ */
+async function resolveLogoUrl(org: { logoUrl: string | null; logoKey: string | null }): Promise<string | null> {
+  if (!org.logoUrl) return null;
+  if (!isStoredAsR2Key(org.logoUrl)) return org.logoUrl;
+  if (!isR2Configured()) return null;
+  const key = org.logoKey || org.logoUrl;
+  return getR2SignedDownloadUrl(key, { disposition: "inline", expiresIn: 3600 });
+}
 
 const router = express.Router({ mergeParams: true });
 
@@ -195,7 +214,13 @@ router.get("/", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listSponsorsForEvent(user!.organizationId, eventId);
-    res.json({ items });
+    const resolvedItems = await Promise.all(
+      items.map(async (sponsor) => {
+        const logoUrl = await resolveLogoUrl(sponsor.sponsorOrganization);
+        return { ...sponsor, sponsorOrganization: { ...sponsor.sponsorOrganization, logoUrl } };
+      }),
+    );
+    res.json({ items: resolvedItems });
   } catch (error) {
     handleError(res, error);
   }
@@ -263,7 +288,9 @@ router.get("/:sponsorId", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const sponsorId = readRouteParam(req.params["sponsorId"], "sponsorId");
-    const item = await getSponsorForEvent(user!.organizationId, eventId, sponsorId);
+    const raw = await getSponsorForEvent(user!.organizationId, eventId, sponsorId);
+    const logoUrl = await resolveLogoUrl(raw.sponsorOrganization);
+    const item = { ...raw, sponsorOrganization: { ...raw.sponsorOrganization, logoUrl } };
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -376,8 +403,11 @@ router.post("/:sponsorId/logo", upload.single("file"), async (req, res) => {
         await deleteFromR2(org.logoKey).catch(() => void 0);
       }
       const result = await uploadToR2(key, req.file.buffer, req.file.mimetype);
-      logoUrl = result.fileUrl;
       logoKey = result.key;
+      // If R2_PUBLIC_URL is not set, fileUrl is the raw key; resolve a signed URL for the response
+      logoUrl = isStoredAsR2Key(result.fileUrl)
+        ? await getR2SignedDownloadUrl(logoKey, { disposition: "inline", expiresIn: 3600 })
+        : result.fileUrl;
     } else {
       // Local fallback: store buffer as base64 data URL (dev only)
       logoUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;

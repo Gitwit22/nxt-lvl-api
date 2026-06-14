@@ -11,6 +11,7 @@ import {
   findMatchingContact,
 } from "../repositories/sponsor.repository.js";
 import { EventureServiceError } from "./eventure-error.js";
+import { normalizeCompanyName } from "./sponsor-import.service.js";
 
 function normalizeValue(value?: string | null): string {
   return (value ?? "").trim().toLowerCase();
@@ -74,7 +75,7 @@ async function resolveSponsorOrganization(
       where: { id: existing.id },
       data: {
         name: mergeField(existing.name, input.sponsorOrganization?.name),
-        normalizedName: normalizeName(mergeField(existing.name, input.sponsorOrganization?.name)),
+        normalizedName: normalizeCompanyName(mergeField(existing.name, input.sponsorOrganization?.name) ?? ""),
         addressLine1: mergeField(existing.addressLine1, input.sponsorOrganization?.addressLine1),
         city: mergeField(existing.city, input.sponsorOrganization?.city),
         state: mergeField(existing.state, input.sponsorOrganization?.state),
@@ -100,7 +101,7 @@ async function resolveSponsorOrganization(
     throw new EventureServiceError("sponsorOrganization.name is required.", 400);
   }
 
-  const normalizedName = normalizeName(requestedName);
+  const normalizedName = normalizeCompanyName(requestedName);
   const existing = await prisma.eventureSponsorOrganization.findFirst({
     where: { organizationId, normalizedName },
     include: {

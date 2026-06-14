@@ -16,6 +16,25 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
+function readJson(value: unknown): Record<string, unknown> | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value === "string") {
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  if (typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  return undefined;
+}
+
 function readInteger(value: unknown): number | undefined {
   if (typeof value === "number" && Number.isInteger(value)) return value;
   if (typeof value === "string" && value.trim()) {
@@ -136,6 +155,7 @@ router.patch("/:eventId", async (req, res) => {
       linkedCampaignId: readString(req.body?.linkedCampaignId),
       linkedSponsorId: readString(req.body?.linkedSponsorId),
       notes: readString(req.body?.notes),
+      extendedInfo: readJson(req.body?.extendedInfo),
     });
 
     res.json({ item: event });

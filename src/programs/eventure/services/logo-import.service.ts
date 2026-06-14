@@ -140,12 +140,24 @@ function ensureImageFile(file: Express.Multer.File): string[] {
   return errors;
 }
 
+/**
+ * Build a lookup map keyed by normalizedName (as stored in the DB).
+ * Companies created via UI use a simpler normalization (lowercase + trim) while
+ * CSV-imported companies use the more aggressive normalizeCompanyName. We handle
+ * both by also adding an entry keyed on normalizeCompanyName(company.name) so
+ * logo filenames always find a match regardless of creation path.
+ */
 function mapCompaniesByNormalizedName(companies: CompanyCandidate[]): Map<string, CompanyCandidate> {
   const map = new Map<string, CompanyCandidate>();
   for (const company of companies) {
-    if (!company.normalizedName) continue;
-    if (!map.has(company.normalizedName)) {
+    // Primary key: whatever is stored in the DB (may be simple or aggressive normalization)
+    if (company.normalizedName && !map.has(company.normalizedName)) {
       map.set(company.normalizedName, company);
+    }
+    // Fallback key: aggressive normalization applied to the display name
+    const aggressive = normalizeCompanyName(company.name);
+    if (aggressive && !map.has(aggressive)) {
+      map.set(aggressive, company);
     }
   }
   return map;

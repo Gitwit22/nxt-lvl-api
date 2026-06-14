@@ -1,4 +1,5 @@
 import { prisma } from "../../../core/db/prisma.js";
+import type { Prisma } from "@prisma/client";
 
 export type EventureEventRecord = Awaited<ReturnType<typeof prisma.eventureEvent.findFirst>>;
 
@@ -28,6 +29,7 @@ export type CreateEventureEventInput = {
 
 export type UpdateEventureEventInput = Partial<Omit<CreateEventureEventInput, "organizationId" | "createdByUserId">> & {
   archivedAt?: Date | null;
+  extendedInfo?: Prisma.InputJsonValue | null;
 };
 
 export async function listEventureEvents(organizationId: string) {
@@ -116,6 +118,7 @@ export async function updateEventureEvent(organizationId: string, eventId: strin
       linkedCampaignId: input.linkedCampaignId,
       linkedSponsorId: input.linkedSponsorId,
       notes: input.notes,
+      extendedInfo: input.extendedInfo,
       archivedAt: input.archivedAt,
     },
   });

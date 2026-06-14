@@ -555,11 +555,8 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
     }
   }
 
-  const effectiveAttendeeCount = resolvedPriceOption
-    ? resolvedPriceOption.includedAttendeeSlots
-    : input.attendeeCount;
-
-  if (!Number.isInteger(effectiveAttendeeCount) || effectiveAttendeeCount < 0) {
+  // When no priceOption is given effectiveAttendeeCount equals input.attendeeCount; validate eagerly.
+  if (!input.priceOptionId && (!Number.isInteger(input.attendeeCount) || input.attendeeCount < 0)) {
     throw new EventureServiceError("attendeeCount must be a non-negative integer.", 400);
   }
 
@@ -593,6 +590,11 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
         },
       },
     });
+
+    // When adding a catalog package on top of an existing participant, accumulate new slots.
+    const effectiveAttendeeCount = resolvedPriceOption
+      ? (existingParticipant?.attendeeCount ?? 0) + resolvedPriceOption.includedAttendeeSlots
+      : input.attendeeCount;
 
     const defaultFlight = resolveDefaultFlight(companyName, eventSponsor.sponsorOrganization.labels);
     const chosenFlight = resolvedPriceOption?.flight
@@ -684,7 +686,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
       });
     }
 
-    return { payment, participant };
+    return { payment, participant, effectiveAttendeeCount };
   });
 
   await reconcileAttendeeSlots({
@@ -692,7 +694,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
     eventId: input.eventId,
     participantId: result.participant.id,
     companyName: result.participant.companyName,
-    attendeeCount: effectiveAttendeeCount,
+    attendeeCount: result.effectiveAttendeeCount,
     flightAssignment: result.participant.flightAssignment,
     forceRemoveNamedSlots: input.forceRemoveNamedSlots,
   });
@@ -880,6 +882,10 @@ export async function listParticipantsForEvent(organizationId: string, eventId: 
         orderBy: [{ slotNumber: "asc" }],
       },
       payment: true,
+      participantPackages: {
+        include: { priceOption: true },
+        orderBy: [{ createdAt: "asc" }],
+      },
     },
     orderBy: [{ companyName: "asc" }],
   });
