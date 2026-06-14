@@ -1,5 +1,5 @@
 import path from "node:path";
-import { PDFDocument, PDFName, PDFDict, PDFRawStream, PDFRef, PDFArray } from "pdf-lib";
+import { PDFDocument, PDFName, PDFDict, PDFRawStream, PDFRef, PDFArray, PDFObject } from "pdf-lib";
 
 export type ExtractedLogoImage = {
   buffer: Buffer;
@@ -100,9 +100,9 @@ async function extractViaStructured(pdfBuffer: Buffer, baseName: string): Promis
       if (seenRefs.has(refKey)) continue;
       seenRefs.add(refKey);
 
-      let xObj: ReturnType<typeof pdfDoc.context.lookup>;
+      let xObj: PDFObject | undefined;
       try {
-        xObj = pdfDoc.context.lookup(objOrRef);
+        xObj = pdfDoc.context.lookup(objOrRef) as PDFObject;
       } catch {
         continue;
       }

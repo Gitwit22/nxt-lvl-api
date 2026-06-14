@@ -1,4 +1,5 @@
 import express from "express";
+import { Prisma } from "@prisma/client";
 import { getRequestUser } from "../../../core/auth/auth.service.js";
 import { requireAuth } from "../../../core/middleware/auth.middleware.js";
 import {
@@ -16,21 +17,21 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function readJson(value: unknown): Record<string, unknown> | null | undefined {
+function readJson(value: unknown): Prisma.InputJsonValue | null | undefined {
   if (value === undefined) return undefined;
   if (value === null) return null;
   if (typeof value === "string") {
     try {
       const parsed: unknown = JSON.parse(value);
       if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed as Record<string, unknown>;
+        return parsed as Prisma.InputJsonValue;
       }
     } catch {
       return undefined;
     }
   }
   if (typeof value === "object" && !Array.isArray(value)) {
-    return value as Record<string, unknown>;
+    return value as Prisma.InputJsonValue;
   }
   return undefined;
 }
