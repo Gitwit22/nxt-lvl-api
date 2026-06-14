@@ -477,7 +477,8 @@ export async function confirmLogoImportForEvent(input: {
           await deleteFromR2(company.logoKey).catch(() => void 0);
         }
         const uploadResult = await uploadToR2(key, file.buffer, file.mimetype);
-        logoUrl = uploadResult.fileUrl;
+        // Store the raw key as logoUrl so resolveLogoUrl can always generate a signed URL.
+        logoUrl = uploadResult.key;
         logoKey = uploadResult.key;
       } else {
         logoUrl = `data:${file.mimetype};base64,${file.buffer.toString("base64")}`;

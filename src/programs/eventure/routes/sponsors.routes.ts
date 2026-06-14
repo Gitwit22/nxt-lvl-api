@@ -36,11 +36,17 @@ function isStoredAsR2Key(value: string): boolean {
  * otherwise return the URL as-is.
  */
 async function resolveLogoUrl(org: { logoUrl: string | null; logoKey: string | null }): Promise<string | null> {
+  // When R2 is active, always generate a fresh signed URL from the raw key.
+  // This is reliable even when R2_PUBLIC_URL is misconfigured or points to the app domain.
+  if (isR2Configured() && org.logoKey) {
+    return getR2SignedDownloadUrl(org.logoKey, { disposition: "inline", expiresIn: 3600 });
+  }
   if (!org.logoUrl) return null;
-  if (!isStoredAsR2Key(org.logoUrl)) return org.logoUrl;
-  if (!isR2Configured()) return null;
-  const key = org.logoKey || org.logoUrl;
-  return getR2SignedDownloadUrl(key, { disposition: "inline", expiresIn: 3600 });
+  // Fallback: raw key stored as logoUrl (R2_PUBLIC_URL was not set when uploaded)
+  if (isStoredAsR2Key(org.logoUrl) && isR2Configured()) {
+    return getR2SignedDownloadUrl(org.logoUrl, { disposition: "inline", expiresIn: 3600 });
+  }
+  return org.logoUrl;
 }
 
 const router = express.Router({ mergeParams: true });
@@ -404,10 +410,9 @@ router.post("/:sponsorId/logo", upload.single("file"), async (req, res) => {
       }
       const result = await uploadToR2(key, req.file.buffer, req.file.mimetype);
       logoKey = result.key;
-      // If R2_PUBLIC_URL is not set, fileUrl is the raw key; resolve a signed URL for the response
-      logoUrl = isStoredAsR2Key(result.fileUrl)
-        ? await getR2SignedDownloadUrl(logoKey, { disposition: "inline", expiresIn: 3600 })
-        : result.fileUrl;
+      // Store the raw key as logoUrl so resolveLogoUrl always has the key available.
+      // Using the key (not a potentially wrong public URL) ensures signed URLs always work.
+      logoUrl = result.key;
     } else {
       // Local fallback: store buffer as base64 data URL (dev only)
       logoUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
@@ -419,7 +424,12 @@ router.post("/:sponsorId/logo", upload.single("file"), async (req, res) => {
       data: { logoUrl, logoKey },
     });
 
-    res.json({ logoUrl });
+    // For the immediate UI response, always return a signed URL so the browser can display it.
+    const responseLogoUrl = isR2Configured() && logoKey
+      ? await getR2SignedDownloadUrl(logoKey, { disposition: "inline", expiresIn: 3600 })
+      : logoUrl;
+
+    res.json({ logoUrl: responseLogoUrl });
   } catch (error) {
     handleError(res, error);
   }
