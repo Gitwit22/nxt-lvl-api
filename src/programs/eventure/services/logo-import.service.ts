@@ -8,17 +8,23 @@ import { extractLogosFromPdf } from "./pdf-logo-extractor.js";
 const ALLOWED_LOGO_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/svg+xml"]);
 
 const STRIP_TOKENS = new Set([
-  "logo",
-  "logos",
-  "brand",
-  "branding",
-  "mark",
-  "icon",
-  "official",
-  "final",
-  "new",
-  "v2",
-  "v3",
+  // Logo/brand markers
+  "logo", "logos", "brand", "branding", "mark", "icon", "official", "final", "new",
+  "v1", "v2", "v3", "v4", "v5", "v6", "v7", "v8", "v9",
+  // Layout/orientation descriptors
+  "horizontal", "vertical", "horz", "vert", "stacked", "inline", "square",
+  "landscape", "portrait", "transparent", "transparency", "lockup",
+  // Technical print/color specs
+  "cmyk", "rgb", "rgba", "pms", "pantone", "lettermark", "wordmark",
+  "fullcolor", "fullcolour",
+  // Quality/resolution
+  "high", "res", "resolution", "highres", "hires", "retina",
+  // Generic file-naming modifiers
+  "primary", "secondary", "full", "color", "colour",
+  // Common noise suffixes
+  "signature", "registered", "trademark", "approved", "txt", "tag",
+  // English stopwords common in logo filenames
+  "only", "an", "the", "of", "a",
 ]);
 
 export type LogoImportPreviewRowStatus =
@@ -116,15 +122,42 @@ type PreviewContext = {
 
 function sanitizeDerivedName(fileName: string): string {
   const withoutExt = path.basename(fileName, path.extname(fileName));
-  const split = withoutExt
-    .replace(/[_\-.]+/g, " ")
-    .split(/\s+/)
-    .map((token) => token.trim())
-    .filter(Boolean)
-    .filter((token) => !STRIP_TOKENS.has(token.toLowerCase()));
+  const processed = withoutExt
+    // Strip parenthesized noise: (1), (2), (copy), (High Resolution) …
+    .replace(/\([^)]*\)/g, " ")
+    // Strip @token suffixes: @2x, @3x
+    .replace(/@\S*/g, " ")
+    // Strip possessives: Kristina's → Kristina
+    .replace(/'\s*s\b/gi, "")
+    // Split camelCase: FeldmanLogo → Feldman Logo, MetroWireOnly → Metro Wire Only
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]{2,})([A-Z][a-z])/g, "$1 $2")
+    // Replace common separators with spaces
+    .replace(/[_\-.]+/g, " ");
 
-  if (split.length === 0) return withoutExt;
-  return split.join(" ");
+  const tokens = processed
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean)
+    .filter((t) => !STRIP_TOKENS.has(t.toLowerCase()))
+    // Drop pure numbers (1, 2, 01 …) and resolution suffixes (2x, 3x)
+    .filter((t) => !/^\d+$/.test(t) && !/^\d+x$/i.test(t));
+
+  // Drop isolated single-char tokens (R, C, V …) when other tokens remain
+  const withoutSingleChars = tokens.length > 1 ? tokens.filter((t) => t.length > 1) : tokens;
+  const result = withoutSingleChars.length > 0 ? withoutSingleChars : tokens;
+
+  if (result.length === 0) return withoutExt;
+  return result.join(" ");
+}
+
+/**
+ * A logo-filename-oriented normalization that also treats "and" as equivalent
+ * to "&" (both are stripped by normalizeCompanyName which removes non-alpha).
+ * This lets "Duke and Duke" match a company stored as "Duke & Duke".
+ */
+function normalizeLogoKey(value: string): string {
+  return normalizeCompanyName(value.replace(/\band\b/gi, "&"));
 }
 
 function ensureImageFile(file: Express.Multer.File): string[] {
@@ -150,17 +183,51 @@ function ensureImageFile(file: Express.Multer.File): string[] {
 function mapCompaniesByNormalizedName(companies: CompanyCandidate[]): Map<string, CompanyCandidate> {
   const map = new Map<string, CompanyCandidate>();
   for (const company of companies) {
-    // Primary key: whatever is stored in the DB (may be simple or aggressive normalization)
+    // Primary key: whatever is stored in the DB
     if (company.normalizedName && !map.has(company.normalizedName)) {
       map.set(company.normalizedName, company);
     }
-    // Fallback key: aggressive normalization applied to the display name
+    // Fallback: aggressive normalization on the display name
     const aggressive = normalizeCompanyName(company.name);
     if (aggressive && !map.has(aggressive)) {
       map.set(aggressive, company);
     }
+    // Fallback: logo-key variant (treats 'and' same as '&')
+    const logoKey = normalizeLogoKey(company.name);
+    if (logoKey && !map.has(logoKey)) {
+      map.set(logoKey, company);
+    }
   }
   return map;
+}
+
+/**
+ * Try to find a company that is a prefix/suffix of the normalized logo filename.
+ * e.g. "barton malow transparent" → matches company "barton malow"
+ *      "cass lock" → matches company "cass lock contracting services"
+ */
+function findByPrefixMatch(
+  normalizedFileName: string,
+  companiesByNormalized: Map<string, CompanyCandidate>,
+): CompanyCandidate | undefined {
+  // Forward prefix: file key starts with a company key (file is shorter than company name)
+  // e.g. "cass lock" starts with company key "cass lock" → not needed (exact), but
+  // covers "cass lock" matching "cass lock contracting" if file key = shorter one.
+  for (const [key, candidate] of companiesByNormalized) {
+    if (key.length >= 5 && normalizedFileName.startsWith(key + " ")) {
+      return candidate;
+    }
+  }
+
+  // Reverse prefix: file key starts with a company key (company shorter than file)
+  // e.g. normalizedFileName = "huntington primary stacked…", key = "huntington"
+  for (const [key, candidate] of companiesByNormalized) {
+    if (key.length >= 5 && normalizedFileName.startsWith(key)) {
+      return candidate;
+    }
+  }
+
+  return undefined;
 }
 
 function summarize(rows: LogoImportPreviewRow[]) {
@@ -255,7 +322,11 @@ async function buildPreviewContext(input: {
       };
     }
 
-    const company = normalizedFileName ? companiesByNormalized.get(normalizedFileName) : undefined;
+    const company = normalizedFileName
+      ? (companiesByNormalized.get(normalizedFileName) ??
+         companiesByNormalized.get(normalizeLogoKey(derivedCompanyName)) ??
+         findByPrefixMatch(normalizedFileName, companiesByNormalized))
+      : undefined;
 
     if (!company) {
       return {
