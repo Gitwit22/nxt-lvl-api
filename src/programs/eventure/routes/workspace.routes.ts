@@ -290,11 +290,13 @@ router.delete("/participants/:participantId", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const participantId = readRouteParam(req.params["participantId"], "participantId");
+    const deletePayments = req.query["deletePayments"] === "true";
 
     const item = await removeParticipantFromEvent({
       organizationId: user!.organizationId,
       eventId,
       participantId,
+      deletePayments,
     });
 
     res.json({ item });

@@ -1122,6 +1122,7 @@ export async function removeParticipantFromEvent(input: {
   organizationId: string;
   eventId: string;
   participantId: string;
+  deletePayments?: boolean;
 }) {
   const participant = await prisma.eventureParticipant.findFirst({
     where: {
@@ -1140,38 +1141,78 @@ export async function removeParticipantFromEvent(input: {
   }
 
   await prisma.$transaction(async (tx) => {
-    await tx.eventurePayment.updateMany({
-      where: {
-        organizationId: input.organizationId,
-        eventId: input.eventId,
-        participantId: participant.id,
-      },
-      data: {
-        participantId: null,
-      },
-    });
+    if (input.deletePayments) {
+      // Collect all payment IDs for this company+event so we can cascade-delete them.
+      const payments = await tx.eventurePayment.findMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: participant.contactCompanyId,
+        },
+        select: { id: true },
+      });
+      const paymentIds = payments.map((p) => p.id);
 
-    await tx.eventurePaymentTransaction.updateMany({
-      where: {
-        organizationId: input.organizationId,
-        eventId: input.eventId,
-        participantId: participant.id,
-      },
-      data: {
-        participantId: null,
-      },
-    });
+      // Delete line items, history, and transactions before payments (FK constraints).
+      await tx.eventurePaymentLineItem.deleteMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: participant.contactCompanyId,
+        },
+      });
 
-    await tx.eventurePaymentLineItem.updateMany({
-      where: {
-        organizationId: input.organizationId,
-        eventId: input.eventId,
-        participantId: participant.id,
-      },
-      data: {
-        participantId: null,
-      },
-    });
+      await tx.eventurePaymentHistory.deleteMany({
+        where: {
+          organizationId: input.organizationId,
+          paymentId: { in: paymentIds },
+        },
+      });
+
+      await tx.eventurePaymentTransaction.deleteMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: participant.contactCompanyId,
+        },
+      });
+
+      await tx.eventurePayment.deleteMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          contactCompanyId: participant.contactCompanyId,
+        },
+      });
+    } else {
+      // Keep payment history but unlink participant references.
+      await tx.eventurePayment.updateMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: participant.id,
+        },
+        data: { participantId: null },
+      });
+
+      await tx.eventurePaymentTransaction.updateMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: participant.id,
+        },
+        data: { participantId: null },
+      });
+
+      await tx.eventurePaymentLineItem.updateMany({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: participant.id,
+        },
+        data: { participantId: null },
+      });
+    }
 
     await tx.eventureUnmatchedRevenue.updateMany({
       where: {
@@ -1179,9 +1220,7 @@ export async function removeParticipantFromEvent(input: {
         eventId: input.eventId,
         matchedParticipantId: participant.id,
       },
-      data: {
-        matchedParticipantId: null,
-      },
+      data: { matchedParticipantId: null },
     });
 
     await tx.eventureParticipant.delete({
@@ -1192,6 +1231,7 @@ export async function removeParticipantFromEvent(input: {
   return {
     removedParticipantId: participant.id,
     contactCompanyId: participant.contactCompanyId,
+    paymentsDeleted: input.deletePayments ?? false,
   };
 }
 
