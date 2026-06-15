@@ -1661,10 +1661,19 @@ export async function attachPriceOptionToParticipant(input: {
     },
   });
 
-  // Reconcile attendee slots using derived count
-  if (attendeeSlots > 0) {
+  // Fetch ALL packages (including the one just created) for additive totals.
+  const allPkgs = await prisma.eventParticipantPackage.findMany({
+    where: { organizationId: input.organizationId, eventId: input.eventId, participantId: input.participantId },
+    orderBy: [{ createdAt: "asc" }],
+  });
+
+  const totalPkgAttendeeSlots = allPkgs.reduce((sum, p) => sum + p.attendeeSlots, 0);
+  const totalPkgPriceDollars = allPkgs.reduce((sum, p) => sum + p.totalPriceCents, 0) / 100;
+
+  // Reconcile attendee slots using the additive sum across all packages.
+  if (totalPkgAttendeeSlots > 0) {
     const resolvedFlight = flight ?? participant.flightAssignment;
-    const newAttendeeCount = Math.max(participant.attendeeCount, attendeeSlots);
+    const newAttendeeCount = Math.max(participant.attendeeCount, totalPkgAttendeeSlots);
     if (newAttendeeCount !== participant.attendeeCount) {
       await prisma.eventureParticipant.update({
         where: { id: input.participantId },
@@ -1679,6 +1688,40 @@ export async function attachPriceOptionToParticipant(input: {
       attendeeCount: newAttendeeCount,
       flightAssignment: resolvedFlight,
     });
+
+    // If this package's notes contain a buyer name, assign it to the first slot
+    // in this package's block so the name appears in the attendee list.
+    if (pkg.notes?.trim() && pkg.attendeeSlots > 0) {
+      const pkgIndex = allPkgs.findIndex((p) => p.id === pkg.id);
+      const blockStart = allPkgs.slice(0, pkgIndex).reduce((sum, p) => sum + p.attendeeSlots, 0) + 1;
+      const firstSlot = await prisma.eventureAttendeeSlot.findFirst({
+        where: {
+          organizationId: input.organizationId,
+          eventId: input.eventId,
+          participantId: input.participantId,
+          slotNumber: blockStart,
+        },
+      });
+      if (firstSlot && !firstSlot.actualName?.trim()) {
+        await prisma.eventureAttendeeSlot.update({
+          where: { id: firstSlot.id },
+          data: { actualName: pkg.notes.trim() },
+        });
+      }
+    }
+  }
+
+  // Sync the payment's amountDue to the running total of all attached packages.
+  if (totalPkgPriceDollars > 0) {
+    const payment = await prisma.eventurePayment.findFirst({
+      where: { organizationId: input.organizationId, eventId: input.eventId, participantId: input.participantId },
+    });
+    if (payment) {
+      await prisma.eventurePayment.update({
+        where: { id: payment.id },
+        data: { amountDue: totalPkgPriceDollars, balance: totalPkgPriceDollars - payment.amountPaid },
+      });
+    }
   }
 
   return pkg;
@@ -1716,5 +1759,21 @@ export async function removeParticipantPackage(input: {
   });
   if (!existing) throw new EventureServiceError("Participant package not found.", 404);
   await prisma.eventParticipantPackage.delete({ where: { id: input.packageId } });
+
+  // Re-sync payment amountDue after removal.
+  const remainingPkgs = await prisma.eventParticipantPackage.findMany({
+    where: { organizationId: input.organizationId, eventId: input.eventId, participantId: existing.participantId },
+  });
+  const totalAfterRemoval = remainingPkgs.reduce((sum, p) => sum + p.totalPriceCents, 0) / 100;
+  const payment = await prisma.eventurePayment.findFirst({
+    where: { organizationId: input.organizationId, eventId: input.eventId, participantId: existing.participantId },
+  });
+  if (payment) {
+    await prisma.eventurePayment.update({
+      where: { id: payment.id },
+      data: { amountDue: totalAfterRemoval, balance: totalAfterRemoval - payment.amountPaid },
+    });
+  }
+
   return { removedPackageId: input.packageId };
 }
