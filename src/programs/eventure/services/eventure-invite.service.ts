@@ -287,52 +287,68 @@ export async function acceptEventureInvite(input: AcceptEventureInviteInput) {
   const metadata = await validateEventureInviteToken(input.rawToken);
   const hash = hashToken(input.rawToken);
 
+  // Hash password before the transaction — bcrypt is CPU-intensive and should not hold a DB connection open
   const bcrypt = await import("bcryptjs");
   const passwordHash = await bcrypt.hash(input.password, 12);
 
   const name = input.displayName ?? metadata.recipientName;
   const email = metadata.recipientEmail.trim().toLowerCase();
 
-  // Create user account (or find existing)
-  let user = await prisma.user.findFirst({ where: { email } });
-  if (!user) {
-    user = await prisma.user.create({
-      data: {
-        email,
-        displayName: name,
-        passwordHash,
-        role: "uploader",
-        platformRole: "user",
-        organizationId: metadata.organizationId,
-      },
+  const result = await prisma.$transaction(async (tx) => {
+    // Create or update user account.
+    // If a user already exists (e.g. re-invited or pre-existing account), update their
+    // password and display name with what they entered on the invite form.
+    let user = await tx.user.findFirst({ where: { email } });
+    if (!user) {
+      user = await tx.user.create({
+        data: {
+          email,
+          displayName: name,
+          passwordHash,
+          role: "uploader",
+          platformRole: "user",
+          organizationId: metadata.organizationId,
+        },
+      });
+    } else {
+      user = await tx.user.update({
+        where: { id: user.id },
+        data: {
+          passwordHash,
+          displayName: name,
+          organizationId: metadata.organizationId,
+        },
+      });
+    }
+
+    // Ensure org membership
+    const existingMembership = await tx.membership.findFirst({
+      where: { userId: user.id, organizationId: metadata.organizationId },
     });
-  }
+    if (!existingMembership) {
+      await tx.membership.create({
+        data: {
+          userId: user.id,
+          organizationId: metadata.organizationId,
+          role: "member",
+        },
+      });
+    }
 
-  // Ensure org membership
-  const existingMembership = await prisma.membership.findFirst({
-    where: { userId: user.id, organizationId: metadata.organizationId },
-  });
-  if (!existingMembership) {
-    await prisma.membership.create({
-      data: {
-        userId: user.id,
-        organizationId: metadata.organizationId,
-        role: "member",
-      },
+    // Link personnel record
+    await tx.eventurePersonnel.update({
+      where: { id: metadata.personnelId },
+      data: { userId: user.id, inviteStatus: "accepted" },
     });
-  }
 
-  // Link personnel record
-  await prisma.eventurePersonnel.update({
-    where: { id: metadata.personnelId },
-    data: { userId: user.id, inviteStatus: "accepted" },
+    // Mark invite accepted
+    await tx.eventureInvite.update({
+      where: { tokenHash: hash },
+      data: { status: "accepted", acceptedAt: new Date() },
+    });
+
+    return { userId: user.id, email: user.email };
   });
 
-  // Mark invite accepted
-  await prisma.eventureInvite.update({
-    where: { tokenHash: hash },
-    data: { status: "accepted", acceptedAt: new Date() },
-  });
-
-  return { userId: user.id, email: user.email };
+  return result;
 }
