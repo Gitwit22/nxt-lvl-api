@@ -230,6 +230,66 @@ function findByPrefixMatch(
   return undefined;
 }
 
+function tokenizeNormalizedName(value: string): string[] {
+  return value
+    .split(/\s+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length > 1);
+}
+
+function calculateTokenScore(fileTokens: string[], companyTokens: string[]): number {
+  if (fileTokens.length === 0 || companyTokens.length === 0) return 0;
+
+  const companyTokenSet = new Set(companyTokens);
+  const sharedCount = fileTokens.filter((token) => companyTokenSet.has(token)).length;
+  if (sharedCount === 0) return 0;
+
+  const companyCoverage = sharedCount / companyTokens.length;
+  const fileCoverage = sharedCount / fileTokens.length;
+
+  // Require a stronger overlap to avoid accidental false positives.
+  if (sharedCount < 2 && companyCoverage < 0.9 && fileCoverage < 0.9) return 0;
+
+  return (sharedCount * 20) + (companyCoverage * 100) + (fileCoverage * 50);
+}
+
+function findByTokenSimilarityMatch(
+  normalizedFileName: string,
+  companies: CompanyCandidate[],
+): CompanyCandidate | undefined {
+  const fileTokens = tokenizeNormalizedName(normalizedFileName);
+  if (fileTokens.length === 0) return undefined;
+
+  const scored = companies
+    .map((company) => {
+      const normalizedCompanyName = normalizeCompanyName(company.name);
+      const companyTokens = tokenizeNormalizedName(normalizedCompanyName);
+      const score = calculateTokenScore(fileTokens, companyTokens);
+      const hasPhraseMatch =
+        normalizedFileName.includes(normalizedCompanyName)
+        || normalizedCompanyName.includes(normalizedFileName);
+      return {
+        company,
+        score: hasPhraseMatch ? score + 30 : score,
+      };
+    })
+    .filter((entry) => entry.score > 0)
+    .sort((a, b) => b.score - a.score);
+
+  if (scored.length === 0) return undefined;
+  if (scored.length === 1) return scored[0]?.company;
+
+  const top = scored[0];
+  const runnerUp = scored[1];
+  if (!top) return undefined;
+  if (!runnerUp) return top.company;
+
+  // If two candidates are very close, keep it unmatched for user safety.
+  if (top.score - runnerUp.score < 8) return undefined;
+
+  return top.company;
+}
+
 function summarize(rows: LogoImportPreviewRow[]) {
   const summary = {
     totalFiles: rows.length,
@@ -325,7 +385,8 @@ async function buildPreviewContext(input: {
     const company = normalizedFileName
       ? (companiesByNormalized.get(normalizedFileName) ??
          companiesByNormalized.get(normalizeLogoKey(derivedCompanyName)) ??
-         findByPrefixMatch(normalizedFileName, companiesByNormalized))
+        findByPrefixMatch(normalizedFileName, companiesByNormalized) ??
+        findByTokenSimilarityMatch(normalizedFileName, companies))
       : undefined;
 
     if (!company) {
