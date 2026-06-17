@@ -12,6 +12,7 @@ import {
 } from "../repositories/sponsor.repository.js";
 import { EventureServiceError } from "./eventure-error.js";
 import { normalizeCompanyName } from "./sponsor-import.service.js";
+import { listPaymentsForEvent } from "./workspace.service.js";
 
 function normalizeValue(value?: string | null): string {
   return (value ?? "").trim().toLowerCase();
@@ -450,23 +451,15 @@ export async function listSponsorFollowUpsForEvent(organizationId: string, event
 }
 
 export async function getSponsorDashboardForEvent(organizationId: string, eventId: string) {
-  const sponsors = await listSponsorsForEvent(organizationId, eventId);
+  const [sponsors, paymentRows] = await Promise.all([
+    listSponsorsForEvent(organizationId, eventId),
+    // Use the same workspace payment rows as the Payments tab so financial
+    // totals are always in sync between the overview and the payments view.
+    listPaymentsForEvent(organizationId, eventId),
+  ]);
 
-  // Fetch all payment records and deduplicate to the most-recent per company,
-  // exactly matching the logic used by listPaymentsForEvent so that totals are consistent.
-  const allPayments = await prisma.eventurePayment.findMany({
-    where: { organizationId, eventId },
-    orderBy: [{ updatedAt: "desc" }],
-  });
-  const paymentByCompany = new Map<string, (typeof allPayments)[number]>();
-  for (const payment of allPayments) {
-    if (!paymentByCompany.has(payment.contactCompanyId)) {
-      paymentByCompany.set(payment.contactCompanyId, payment);
-    }
-  }
-  const uniquePayments = Array.from(paymentByCompany.values());
-  const totalCommittedAmount = uniquePayments.reduce((sum, p) => sum + (p.amountDue ?? 0), 0);
-  const totalPaidAmount = uniquePayments.reduce((sum, p) => sum + (p.amountPaid ?? 0), 0);
+  const totalCommittedAmount = paymentRows.reduce((sum, row) => sum + (row.payment?.amountDue ?? 0), 0);
+  const totalPaidAmount = paymentRows.reduce((sum, row) => sum + (row.payment?.amountPaid ?? 0), 0);
 
   const unpaidOrInvoicedCount = sponsors.filter((sponsor) =>
     ["unpaid", "invoice_needed", "invoiced", "pending_event_payment"].includes(normalizeValue(sponsor.paymentStatus)),
