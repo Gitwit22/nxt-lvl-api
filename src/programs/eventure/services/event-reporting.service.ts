@@ -382,31 +382,49 @@ function buildFinancialTotals(context: ReportContext): {
   availableBalance: number;
   collectionRate: number;
 } {
-  const exceptions = buildDataQualityExceptions(context);
-  const unknownSponsorIds = new Set(
-    exceptions
-      .filter((issue) => issue.recordType === "SPONSOR" && issue.reason.toLowerCase().includes("could not be classified"))
-      .map((issue) => issue.recordId),
-  );
-
-  const eligibleSponsors = context.sponsors.filter((sponsor) => !unknownSponsorIds.has(sponsor.id));
-  const expectedRevenue = eligibleSponsors.reduce((sum, sponsor) => sum + parseAmount(sponsor.committedAmount), 0);
-
-  let paymentCredits = 0;
-  let refundDebits = 0;
-
-  for (const transaction of context.paymentTransactions) {
-    if (mapPaymentTransactionStatus(transaction.status) !== "COMPLETED") continue;
-    const amount = parseAmount(transaction.totalAmount);
-    const type = normalizeValue(transaction.transactionType);
-    if (type === "refund") {
-      refundDebits += amount;
-    } else {
-      paymentCredits += amount;
+  // Keep latest payment record per company so totals mirror the Payments tab
+  // and are not inflated by historical transaction replay.
+  const latestPaymentByCompany = new Map<string, ReportContext["payments"][number]>();
+  for (const payment of context.payments) {
+    const existing = latestPaymentByCompany.get(payment.contactCompanyId);
+    if (!existing || payment.updatedAt.getTime() > existing.updatedAt.getTime()) {
+      latestPaymentByCompany.set(payment.contactCompanyId, payment);
     }
   }
 
-  const collectedRevenue = Math.max(0, paymentCredits - refundDebits);
+  // Use sponsor commitment as fallback when a payment row has not been created yet.
+  const sponsorCommittedByCompany = new Map<string, number>();
+  for (const sponsor of context.sponsors) {
+    if (!sponsorCommittedByCompany.has(sponsor.sponsorOrganizationId)) {
+      sponsorCommittedByCompany.set(sponsor.sponsorOrganizationId, parseAmount(sponsor.committedAmount));
+    }
+  }
+
+  const companyIds = new Set<string>([
+    ...Array.from(latestPaymentByCompany.keys()),
+    ...Array.from(sponsorCommittedByCompany.keys()),
+  ]);
+
+  let expectedRevenue = 0;
+  let collectedRevenue = 0;
+
+  for (const companyId of companyIds) {
+    const payment = latestPaymentByCompany.get(companyId);
+    const sponsorCommitted = sponsorCommittedByCompany.get(companyId) ?? 0;
+
+    expectedRevenue += payment ? parseAmount(payment.amountDue) : sponsorCommitted;
+    collectedRevenue += payment ? parseAmount(payment.amountPaid) : 0;
+  }
+
+  // Refunds remain informational from the transaction ledger.
+  let refundDebits = 0;
+  for (const transaction of context.paymentTransactions) {
+    if (mapPaymentTransactionStatus(transaction.status) !== "COMPLETED") continue;
+    if (normalizeValue(transaction.transactionType) === "refund") {
+      refundDebits += parseAmount(transaction.totalAmount);
+    }
+  }
+
   const outstandingRevenue = Math.max(0, expectedRevenue - collectedRevenue);
   const availableBalance = collectedRevenue;
   const collectionRate = expectedRevenue > 0 ? collectedRevenue / expectedRevenue : 0;
