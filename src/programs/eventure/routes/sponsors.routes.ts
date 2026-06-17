@@ -237,6 +237,7 @@ router.get("/dashboard", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const item = await getSponsorDashboardForEvent(user!.organizationId, eventId);
+    res.setHeader("Cache-Control", "no-store");
     res.json({ item });
   } catch (error) {
     handleError(res, error);
