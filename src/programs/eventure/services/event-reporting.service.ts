@@ -181,6 +181,13 @@ async function loadContext(organizationId: string, eventId: string, filters: Eve
         ...(includeArchived ? {} : { archivedAt: null }),
         ...(companyFilter ? { sponsorOrganizationId: companyFilter } : {}),
       },
+      include: {
+        sponsorOrganization: {
+          select: {
+            name: true,
+          },
+        },
+      },
       orderBy: [{ createdAt: "asc" }],
     }),
     prisma.eventureParticipant.findMany({
@@ -233,20 +240,6 @@ async function loadContext(organizationId: string, eventId: string, filters: Eve
     }),
   ]);
 
-  const organizationIds = Array.from(new Set(sponsors.map((sponsor) => sponsor.sponsorOrganizationId).filter(Boolean)));
-  const organizations = organizationIds.length > 0
-    ? await prisma.eventureSponsorOrganization.findMany({
-      where: {
-        organizationId,
-        id: { in: organizationIds },
-      },
-      select: {
-        id: true,
-        name: true,
-      },
-    })
-    : [];
-
   const filteredTransactions = paymentTransactions.filter((transaction) => {
     if (filters.source && filters.source.length > 0 && !filters.source.map(normalizeValue).includes(normalizeValue(transaction.source))) {
       return false;
@@ -261,10 +254,9 @@ async function loadContext(organizationId: string, eventId: string, filters: Eve
     return transactionIsIncludedByDateRange(transaction.transactionAt, filters);
   });
 
-  const orgMap = new Map(organizations.map((org) => [org.id, org.name]));
-  const sponsorsWithOrg = sponsors.map((sponsor) => ({
+  const sponsorsWithOrg = sponsors.map(({ sponsorOrganization, ...sponsor }) => ({
     ...sponsor,
-    sponsorOrganizationName: orgMap.get(sponsor.sponsorOrganizationId) ?? null,
+    sponsorOrganizationName: sponsorOrganization?.name ?? null,
   }));
 
   return {

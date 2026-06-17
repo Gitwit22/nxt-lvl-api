@@ -51,6 +51,10 @@ async function resolveLogoUrl(org: { logoUrl: string | null; logoKey: string | n
 
 const router = express.Router({ mergeParams: true });
 
+function setShortLivedReadCache(res: express.Response) {
+  res.setHeader("Cache-Control", "private, max-age=15, stale-while-revalidate=45");
+}
+
 type SponsorOrganizationInput = {
   name?: string;
   mainEmail?: string | null;
@@ -226,6 +230,7 @@ router.get("/", async (req, res) => {
         return { ...sponsor, sponsorOrganization: { ...sponsor.sponsorOrganization, logoUrl } };
       }),
     );
+    setShortLivedReadCache(res);
     res.json({ items: resolvedItems });
   } catch (error) {
     handleError(res, error);
@@ -249,6 +254,7 @@ router.get("/follow-ups", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listSponsorFollowUpsForEvent(user!.organizationId, eventId);
+    setShortLivedReadCache(res);
     res.json({ items });
   } catch (error) {
     handleError(res, error);
@@ -298,6 +304,7 @@ router.get("/:sponsorId", async (req, res) => {
     const raw = await getSponsorForEvent(user!.organizationId, eventId, sponsorId);
     const logoUrl = await resolveLogoUrl(raw.sponsorOrganization);
     const item = { ...raw, sponsorOrganization: { ...raw.sponsorOrganization, logoUrl } };
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);

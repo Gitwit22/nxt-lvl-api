@@ -1861,6 +1861,8 @@ model EventurePayment {
 
   @@index([organizationId, eventId, contactCompanyId])
   @@index([organizationId, eventId, paymentStatus])
+  @@index([organizationId, eventId, updatedAt])
+  @@index([organizationId, eventId, paymentStatus, updatedAt])
   @@index([organizationId, participantId])
   @@index([organizationId, sponsorshipPackageId])
 }
@@ -1891,6 +1893,8 @@ model EventurePaymentTransaction {
   lineItems           EventurePaymentLineItem[]
 
   @@index([organizationId, eventId, contactCompanyId, transactionAt])
+  @@index([organizationId, eventId, transactionAt])
+  @@index([organizationId, eventId, status, transactionAt])
   @@index([organizationId, paymentId])
   @@index([organizationId, participantId])
   @@index([organizationId, referenceKey])

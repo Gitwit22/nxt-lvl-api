@@ -25,6 +25,10 @@ import { EventureServiceError } from "../services/eventure-error.js";
 
 const router = express.Router({ mergeParams: true });
 
+function setShortLivedReadCache(res: express.Response) {
+  res.setHeader("Cache-Control", "private, max-age=15, stale-while-revalidate=45");
+}
+
 function readRouteParam(value: unknown, fieldName: string): string {
   if (typeof value === "string" && value.trim()) return value.trim();
   throw new EventureServiceError(`${fieldName} is required.`, 400);
@@ -109,6 +113,7 @@ router.get("/payments", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listPaymentsForEvent(user!.organizationId, eventId);
+    setShortLivedReadCache(res);
     res.json({ items });
   } catch (error) {
     handleError(res, error);
@@ -191,6 +196,7 @@ router.get("/participants", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listParticipantsForEvent(user!.organizationId, eventId);
+    setShortLivedReadCache(res);
     res.json({ items });
   } catch (error) {
     handleError(res, error);
@@ -230,6 +236,7 @@ router.get("/attendees", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listAttendeesForEvent(user!.organizationId, eventId);
+    setShortLivedReadCache(res);
     res.json({ items });
   } catch (error) {
     handleError(res, error);
@@ -355,6 +362,7 @@ router.get("/assignments", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listAssignmentsForEvent(user!.organizationId, eventId);
+    setShortLivedReadCache(res);
     res.json({ items });
   } catch (error) {
     handleError(res, error);
@@ -396,6 +404,7 @@ router.get("/volunteers", async (req, res) => {
     const user = getRequestUser(req);
     const eventId = readRouteParam(req.params["eventId"], "eventId");
     const items = await listVolunteersForEvent(user!.organizationId, eventId);
+    setShortLivedReadCache(res);
     res.json({ items });
   } catch (error) {
     handleError(res, error);
@@ -435,6 +444,7 @@ router.get("/participants/:participantId/packages", async (req, res) => {
       eventId,
       participantId,
     });
+    setShortLivedReadCache(res);
     res.json({ items });
   } catch (error) {
     handleError(res, error);

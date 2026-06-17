@@ -6,6 +6,10 @@ import { EventReportingService, type EventReportFilters } from "../services/even
 
 const router = express.Router({ mergeParams: true });
 
+function setShortLivedReadCache(res: express.Response) {
+  res.setHeader("Cache-Control", "private, max-age=15, stale-while-revalidate=45");
+}
+
 function readRouteParam(value: unknown, fieldName: string): string {
   if (typeof value === "string" && value.trim()) return value.trim();
   throw new EventureServiceError(`${fieldName} is required.`, 400);
@@ -85,6 +89,7 @@ router.get("/summary", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -100,6 +105,7 @@ router.get("/financial", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -115,6 +121,7 @@ router.get("/financial/reconciliation", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -130,6 +137,7 @@ router.get("/financial/aging", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -145,6 +153,7 @@ router.get("/packages", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -160,6 +169,7 @@ router.get("/participants", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -175,6 +185,7 @@ router.get("/attendees", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -190,6 +201,7 @@ router.get("/flights", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -205,6 +217,7 @@ router.get("/check-ins", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -220,6 +233,7 @@ router.get("/follow-ups", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -235,6 +249,7 @@ router.get("/data-quality", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
@@ -250,6 +265,7 @@ router.get("/export", async (req, res) => {
       eventId,
       readFilters(req.query as Record<string, unknown>),
     );
+    setShortLivedReadCache(res);
     res.json({ item });
   } catch (error) {
     handleError(res, error);
