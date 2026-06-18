@@ -96,6 +96,55 @@ function readLineItems(value: unknown) {
   });
 }
 
+type PaymentFollowUpFieldKey =
+  | "attendee_count"
+  | "amount_due"
+  | "amount_paid"
+  | "payment_method"
+  | "notes"
+  | "additional_donation_amount"
+  | "additional_donation_description";
+
+const PAYMENT_FOLLOW_UP_FIELD_KEYS = new Set<PaymentFollowUpFieldKey>([
+  "attendee_count",
+  "amount_due",
+  "amount_paid",
+  "payment_method",
+  "notes",
+  "additional_donation_amount",
+  "additional_donation_description",
+]);
+
+function readPaymentFieldFollowUps(value: unknown) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw new EventureServiceError("paymentFieldFollowUps must be an array when provided.", 400);
+  }
+
+  return value.map((item, index) => {
+    if (!item || typeof item !== "object") {
+      throw new EventureServiceError(`paymentFieldFollowUps[${index}] must be an object.`, 400);
+    }
+
+    const record = item as Record<string, unknown>;
+    const fieldKey = readString(record["fieldKey"]);
+    const fieldLabel = readString(record["fieldLabel"]);
+    const note = readNullableString(record["note"]);
+    const checked = readBoolean(record["checked"]);
+
+    if (!fieldKey || !PAYMENT_FOLLOW_UP_FIELD_KEYS.has(fieldKey as PaymentFollowUpFieldKey)) {
+      throw new EventureServiceError(`paymentFieldFollowUps[${index}].fieldKey is invalid.`, 400);
+    }
+
+    return {
+      fieldKey: fieldKey as PaymentFollowUpFieldKey,
+      fieldLabel,
+      note,
+      checked: checked ?? true,
+    };
+  });
+}
+
 function handleError(res: express.Response, error: unknown) {
   if (error instanceof EventureServiceError) {
     res.status(error.statusCode).json({ error: error.message });
@@ -148,6 +197,7 @@ router.post("/payments/confirm", async (req, res) => {
       paymentMethod: readNullableString(req.body?.paymentMethod),
       notes: readNullableString(req.body?.notes),
       lineItems: readLineItems(req.body?.lineItems),
+      paymentFieldFollowUps: readPaymentFieldFollowUps(req.body?.paymentFieldFollowUps),
       actorUserId: user!.userId,
       forceRemoveNamedSlots: readBoolean(req.body?.forceRemoveNamedSlots),
     });
@@ -182,6 +232,7 @@ router.post("/payments/transactions", async (req, res) => {
       paymentMethod: readNullableString(req.body?.paymentMethod),
       notes: readNullableString(req.body?.notes),
       lineItems: readLineItems(req.body?.lineItems),
+      paymentFieldFollowUps: readPaymentFieldFollowUps(req.body?.paymentFieldFollowUps),
       actorUserId: user!.userId,
     });
 

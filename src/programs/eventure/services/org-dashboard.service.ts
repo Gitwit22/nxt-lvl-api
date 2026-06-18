@@ -686,8 +686,8 @@ export class OrgDashboardService {
       }
 
       const dedupeKeys = new Set<string>();
-      let grossCollected = 0;
-      let refunds = 0;
+      let transactionGrossCollected = 0;
+      let transactionRefunds = 0;
       for (const transaction of transactionRows) {
         if (!isCompletedTransactionStatus(transaction.status)) continue;
         const key = dedupeTransactionKey(transaction);
@@ -696,19 +696,26 @@ export class OrgDashboardService {
 
         const amount = parseAmount(transaction.totalAmount);
         if (isRefundTransactionType(transaction.transactionType)) {
-          refunds += amount;
+          transactionRefunds += amount;
         } else {
-          grossCollected += amount;
+          transactionGrossCollected += amount;
         }
       }
 
-      const fallbackCollected = Array.from(latestPaymentByCompany.values()).reduce((sum, row) => sum + parseAmount(row.amountPaid), 0);
-      if (grossCollected === 0 && refunds === 0 && fallbackCollected > 0) {
-        grossCollected = fallbackCollected;
+      let collectedFromPayments = 0;
+      for (const [companyId, expectedAmount] of expectedByCompany.entries()) {
+        const paidAmount = parseAmount(latestPaymentByCompany.get(companyId)?.amountPaid);
+        const normalizedPaid = expectedAmount > 0 ? Math.min(paidAmount, expectedAmount) : paidAmount;
+        collectedFromPayments += normalizedPaid;
       }
 
       const expected = Array.from(expectedByCompany.values()).reduce((sum, amount) => sum + amount, 0);
-      const netCollected = Math.max(0, grossCollected - refunds);
+      const usePaymentLedger = collectedFromPayments > 0;
+      const grossCollected = usePaymentLedger ? collectedFromPayments : transactionGrossCollected;
+      const refunds = usePaymentLedger ? 0 : transactionRefunds;
+      const netCollected = usePaymentLedger
+        ? collectedFromPayments
+        : Math.max(0, transactionGrossCollected - transactionRefunds);
       const outstanding = Math.max(0, expected - netCollected);
 
       let participantsWithBalances = 0;

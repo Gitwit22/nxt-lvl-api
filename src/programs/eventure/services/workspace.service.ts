@@ -32,6 +32,7 @@ type ConfirmPaymentInput = {
     amount: number;
     description?: string | null;
   }>;
+  paymentFieldFollowUps?: PaymentFieldFollowUpInput[];
   actorUserId?: string;
   forceRemoveNamedSlots?: boolean;
 };
@@ -49,8 +50,135 @@ type CreatePaymentTransactionInput = {
     amount: number;
     description?: string | null;
   }>;
+  paymentFieldFollowUps?: PaymentFieldFollowUpInput[];
   actorUserId?: string;
 };
+
+type PaymentFollowUpFieldKey =
+  | "attendee_count"
+  | "amount_due"
+  | "amount_paid"
+  | "payment_method"
+  | "notes"
+  | "additional_donation_amount"
+  | "additional_donation_description";
+
+type PaymentFieldFollowUpInput = {
+  fieldKey: PaymentFollowUpFieldKey;
+  fieldLabel?: string;
+  note?: string | null;
+  checked?: boolean;
+};
+
+const PAYMENT_FIELD_FOLLOW_UP_TYPE = "payment_field";
+const PAYMENT_FIELD_FOLLOW_UP_SOURCE = "workspace_payment_field";
+const PAYMENT_FIELD_IMPORT_SOURCE_PREFIX = "payment_field:";
+const DEFAULT_PAYMENT_FIELD_LABELS: Record<PaymentFollowUpFieldKey, string> = {
+  attendee_count: "Attendee Count",
+  amount_due: "Amount Due",
+  amount_paid: "Amount Paid",
+  payment_method: "Payment Method",
+  notes: "Notes",
+  additional_donation_amount: "Additional Donation Amount",
+  additional_donation_description: "Donation Description",
+};
+
+function parsePaymentFieldKeyFromImportSource(importSource?: string | null): PaymentFollowUpFieldKey | null {
+  if (!importSource?.startsWith(PAYMENT_FIELD_IMPORT_SOURCE_PREFIX)) return null;
+  const key = importSource.slice(PAYMENT_FIELD_IMPORT_SOURCE_PREFIX.length) as PaymentFollowUpFieldKey;
+  if (!DEFAULT_PAYMENT_FIELD_LABELS[key]) return null;
+  return key;
+}
+
+async function syncPaymentFieldFollowUps(
+  tx: Pick<typeof prisma, "eventureSponsorFollowUp">,
+  input: {
+    organizationId: string;
+    eventId: string;
+    eventSponsorId: string;
+    sponsorOrganizationId: string;
+    paymentFieldFollowUps?: PaymentFieldFollowUpInput[];
+  },
+) {
+  if (!input.paymentFieldFollowUps) return;
+
+  const selectedMap = new Map<PaymentFollowUpFieldKey, { fieldLabel: string; note: string | null }>();
+  for (const item of input.paymentFieldFollowUps) {
+    if (item.checked === false) continue;
+    const fieldLabel = item.fieldLabel?.trim() || DEFAULT_PAYMENT_FIELD_LABELS[item.fieldKey];
+    const note = item.note?.trim() || null;
+    selectedMap.set(item.fieldKey, { fieldLabel, note });
+  }
+
+  const existing = await tx.eventureSponsorFollowUp.findMany({
+    where: {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      sponsorOrganizationId: input.sponsorOrganizationId,
+      type: PAYMENT_FIELD_FOLLOW_UP_TYPE,
+      source: PAYMENT_FIELD_FOLLOW_UP_SOURCE,
+      archivedAt: null,
+    },
+  });
+
+  const existingByField = new Map<PaymentFollowUpFieldKey, (typeof existing)[number]>();
+  const staleIds: string[] = [];
+  for (const followUp of existing) {
+    const fieldKey = parsePaymentFieldKeyFromImportSource(followUp.importSource);
+    if (!fieldKey) {
+      staleIds.push(followUp.id);
+      continue;
+    }
+
+    existingByField.set(fieldKey, followUp);
+    if (!selectedMap.has(fieldKey)) {
+      staleIds.push(followUp.id);
+    }
+  }
+
+  if (staleIds.length > 0) {
+    await tx.eventureSponsorFollowUp.deleteMany({
+      where: {
+        id: { in: staleIds },
+        organizationId: input.organizationId,
+      },
+    });
+  }
+
+  for (const [fieldKey, selected] of selectedMap) {
+    const title = `Payment Follow-Up: ${selected.fieldLabel}`;
+    const existingForField = existingByField.get(fieldKey);
+
+    if (existingForField && !staleIds.includes(existingForField.id)) {
+      await tx.eventureSponsorFollowUp.update({
+        where: { id: existingForField.id },
+        data: {
+          eventSponsorId: input.eventSponsorId,
+          title,
+          description: selected.note,
+          status: "open",
+          archivedAt: null,
+        },
+      });
+      continue;
+    }
+
+    await tx.eventureSponsorFollowUp.create({
+      data: {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        eventSponsorId: input.eventSponsorId,
+        sponsorOrganizationId: input.sponsorOrganizationId,
+        type: PAYMENT_FIELD_FOLLOW_UP_TYPE,
+        title,
+        description: selected.note,
+        status: "open",
+        source: PAYMENT_FIELD_FOLLOW_UP_SOURCE,
+        importSource: `${PAYMENT_FIELD_IMPORT_SOURCE_PREFIX}${fieldKey}`,
+      },
+    });
+  }
+}
 
 function readLabelList(raw: unknown): string[] {
   if (!Array.isArray(raw)) return [];
@@ -649,6 +777,14 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
         ],
     });
 
+      await syncPaymentFieldFollowUps(tx, {
+        organizationId: input.organizationId,
+        eventId: input.eventId,
+        eventSponsorId: eventSponsor.id,
+        sponsorOrganizationId: input.contactCompanyId,
+        paymentFieldFollowUps: input.paymentFieldFollowUps,
+      });
+
     await tx.eventurePayment.update({
       where: { id: payment.id },
       data: {
@@ -989,6 +1125,14 @@ export async function createStandalonePaymentTransaction(input: CreatePaymentTra
         },
       });
     }
+
+    await syncPaymentFieldFollowUps(tx, {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      eventSponsorId: eventSponsor.id,
+      sponsorOrganizationId: input.contactCompanyId,
+      paymentFieldFollowUps: input.paymentFieldFollowUps,
+    });
 
     return result;
   });

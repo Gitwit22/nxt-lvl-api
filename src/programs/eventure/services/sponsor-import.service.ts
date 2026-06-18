@@ -10,11 +10,9 @@ import {
   createImportBatch,
   createImportRow,
   createSponsorContact,
-  createSponsorFollowUp,
   createSponsorOrganization,
   failImportBatch,
   getSponsorOrganizationByNormalizedName,
-  findExistingOpenFollowUp,
   getImportBatchWithRows,
   getActiveEventForOrganization,
   getEventSponsorByComposite,
@@ -122,7 +120,7 @@ export function resolveSelectedTabs(
       volunteers: true,
       history: true,
       historyFromSponsorsList: true,
-      followUps: true,
+      followUps: false,
       paymentStatus: true,
       legacyMode: true,
     }
@@ -134,7 +132,8 @@ export function resolveSelectedTabs(
       volunteers: selectedTabs.volunteers ?? true,
       history: selectedTabs.history ?? false,
       historyFromSponsorsList: selectedTabs.historyFromSponsorsList ?? false,
-      followUps: selectedTabs.followUps ?? false,
+      // Legacy import-generated follow-ups are retired in favor of payment-field follow-ups.
+      followUps: false,
       paymentStatus: selectedTabs.paymentStatus ?? false,
       legacyMode: false,
     };
@@ -3047,35 +3046,6 @@ export async function confirmSponsorImportForEvent(input: {
               },
             });
           }
-        }
-      }
-
-      if (usesEventAssignment(mode) && eventSponsor && selectedTabs.followUps) {
-        for (const suggestion of rowForMatch.suggestedFollowUps) {
-          const existingFollowUp = await findExistingOpenFollowUp({
-            organizationId: input.organizationId,
-            eventId: effectiveEventId!,
-            eventSponsorId: eventSponsor.id,
-            sponsorOrganizationId: sponsorOrganization.id,
-            type: suggestion.type,
-          });
-
-          if (existingFollowUp) continue;
-
-          await createSponsorFollowUp({
-            organizationId: input.organizationId,
-            eventId: effectiveEventId!,
-            eventSponsorId: eventSponsor.id,
-            sponsorOrganizationId: sponsorOrganization.id,
-            type: suggestion.type,
-            title: suggestion.title,
-            description: suggestion.description,
-            assignedToName: suggestion.assignedToName,
-            sourceImportBatchId: importBatch.id,
-            sourceImportRowId: row.id,
-            importSource: "sponsor_import",
-          });
-          followUpsCreated += 1;
         }
       }
 

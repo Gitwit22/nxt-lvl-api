@@ -80,6 +80,7 @@ export async function listSponsorFollowUps(organizationId: string, eventId: stri
     where: {
       organizationId,
       eventId,
+      archivedAt: null,
     },
     include: {
       sponsorOrganization: true,
@@ -445,6 +446,8 @@ export async function createSponsorFollowUp(input: {
   status?: string;
   source?: string;
   sourceImportBatchId?: string;
+  sourceImportRowId?: string;
+  importSource?: string;
 }) {
   return prisma.eventureSponsorFollowUp.create({
     data: {
@@ -459,6 +462,8 @@ export async function createSponsorFollowUp(input: {
       status: input.status ?? "open",
       source: input.source ?? "csv_import",
       sourceImportBatchId: input.sourceImportBatchId,
+      sourceImportRowId: input.sourceImportRowId,
+      importSource: input.importSource,
     },
   });
 }
