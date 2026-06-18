@@ -23,6 +23,8 @@ import { eventureTasksRouter } from "./tasks.routes.js";
 import { eventurePersonnelRouter } from "./personnel.routes.js";
 import { eventurePersonnelInvitesRouter } from "./personnel-invites.routes.js";
 import { eventureEventPersonnelRouter } from "./event-personnel.routes.js";
+import { eventureVolunteerContactsRouter } from "./volunteer-contacts.routes.js";
+import { eventureEventVolunteerContactsRouter } from "./event-volunteer-contacts.routes.js";
 
 const router = express.Router();
 
@@ -59,12 +61,14 @@ router.use("/events/:eventId/history", eventureHistoryRouter);
 router.use("/events/:eventId/reports", eventureReportsRouter);
 router.use("/events/:eventId/workspace", eventureWorkspaceRouter);
 router.use("/events/:eventId/personnel", eventureEventPersonnelRouter);
+router.use("/events/:eventId/volunteer-contacts", eventureEventVolunteerContactsRouter);
 router.use("/tasks", eventureTasksRouter);
 router.use("/sponsor-imports", eventureSponsorImportsOrgRouter);
 router.use("/shared", eventureSharedRouter);
 router.use("/registrations", eventureRegistrationsRouter);
 router.use("/orders", ordersRouter);
 router.use("/personnel", eventurePersonnelRouter);
+router.use("/volunteer-contacts", eventureVolunteerContactsRouter);
 router.use("/invites", eventurePersonnelInvitesRouter);
 
 export { router as eventureRouter };

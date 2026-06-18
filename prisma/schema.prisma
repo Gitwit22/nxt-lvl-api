@@ -1248,11 +1248,55 @@ model EventureEvent {
   importBatches       EventureImportBatch[]
   checkInLogs         EventureCheckInLog[]
   personnel           EventureEventPersonnel[]
+  volunteerContacts   EventureEventVolunteerContact[]
   priceOptions        EventPriceOption[]
 
   @@index([organizationId, programDomain])
   @@index([organizationId, status, startDateTime])
   @@index([organizationId, createdByUserId])
+}
+
+model EventureVolunteerContact {
+  id                String   @id @default(cuid())
+  organizationId    String
+  name              String
+  email             String?
+  phone             String?
+  skills            Json     @default("[]")
+  notes             String?  @db.Text
+  archivedAt        DateTime?
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  eventCopies       EventureEventVolunteerContact[]
+
+  @@index([organizationId, archivedAt])
+  @@index([organizationId, name])
+  @@index([organizationId, email])
+}
+
+model EventureEventVolunteerContact {
+  id                      String   @id @default(cuid())
+  organizationId          String
+  eventId                 String
+  sourceVolunteerContactId String?
+  name                    String
+  email                   String?
+  phone                   String?
+  skills                  Json     @default("[]")
+  notes                   String?  @db.Text
+  pulledAt                DateTime @default(now())
+  pulledByUserId          String?
+  archivedAt              DateTime?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+
+  event                   EventureEvent             @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  sourceVolunteerContact  EventureVolunteerContact? @relation(fields: [sourceVolunteerContactId], references: [id], onDelete: SetNull)
+
+  @@unique([eventId, sourceVolunteerContactId])
+  @@index([organizationId, eventId, archivedAt])
+  @@index([organizationId, sourceVolunteerContactId])
 }
 
 model EventureSponsorshipPackage {
