@@ -21,6 +21,12 @@ import {
   listParticipantPackages,
   removeParticipantPackage,
 } from "../services/workspace.service.js";
+import {
+  assignAttendeeToSlot,
+  unassignAttendeeFromSlot,
+  bulkFillSlots,
+  type BulkFillRow,
+} from "../services/attendee-assignment.service.js";
 import { EventureServiceError } from "../services/eventure-error.js";
 
 const router = express.Router({ mergeParams: true });
@@ -400,6 +406,10 @@ router.patch("/attendee-slots/:slotId", async (req, res) => {
       actualName: readNullableString(req.body?.actualName),
       notes: readNullableString(req.body?.notes),
       checkedIn: readBoolean(req.body?.checkedIn),
+      mealPreference: readNullableString(req.body?.mealPreference),
+      dietaryOverride: readNullableString(req.body?.dietaryOverride),
+      tshirtSize: readNullableString(req.body?.tshirtSize),
+      badgePrinted: readBoolean(req.body?.badgePrinted),
     });
 
     res.json({ item });
@@ -543,6 +553,101 @@ router.delete("/participants/:participantId/packages/:packageId", async (req, re
       packageId,
     });
     res.json(result);
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+// ─── Attendee slot assignment endpoints ──────────────────────────────────────
+
+router.put("/attendee-slots/:slotId/attendee", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const slotId = readRouteParam(req.params["slotId"], "slotId");
+    const attendeeId = readString(req.body?.attendeeId);
+
+    if (!attendeeId) {
+      throw new EventureServiceError("attendeeId is required.", 400);
+    }
+
+    await assignAttendeeToSlot({
+      slotId,
+      attendeeId,
+      eventId,
+      organizationId: user!.organizationId,
+      userId: user!.userId,
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+router.delete("/attendee-slots/:slotId/attendee", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const slotId = readRouteParam(req.params["slotId"], "slotId");
+
+    await unassignAttendeeFromSlot({
+      slotId,
+      eventId,
+      organizationId: user!.organizationId,
+    });
+
+    res.json({ success: true });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
+// ─── Bulk fill slots for a participant ───────────────────────────────────────
+
+router.post("/participants/:participantId/bulk-fill", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const participantId = readRouteParam(req.params["participantId"], "participantId");
+    const allowPartial = readBoolean(req.body?.allowPartial) ?? false;
+
+    const rawRows = req.body?.rows;
+    if (!Array.isArray(rawRows) || rawRows.length === 0) {
+      throw new EventureServiceError("rows must be a non-empty array.", 400);
+    }
+
+    const rows: BulkFillRow[] = rawRows.map((row: unknown, index: number) => {
+      if (!row || typeof row !== "object") {
+        throw new EventureServiceError(`rows[${index}] must be an object.`, 400);
+      }
+      const r = row as Record<string, unknown>;
+      const rowId = readString(r["rowId"]);
+      if (!rowId) {
+        throw new EventureServiceError(`rows[${index}].rowId is required.`, 400);
+      }
+      return {
+        rowId,
+        firstName: readNullableString(r["firstName"]),
+        lastName: readNullableString(r["lastName"]),
+        email: readNullableString(r["email"]),
+        phone: readNullableString(r["phone"]),
+        companyId: readNullableString(r["companyId"]),
+        companyName: readNullableString(r["companyName"]),
+        title: readNullableString(r["title"]),
+      };
+    });
+
+    const results = await bulkFillSlots({
+      participantId,
+      rows,
+      eventId,
+      organizationId: user!.organizationId,
+      userId: user!.userId,
+      allowPartial,
+    });
+
+    res.json({ results });
   } catch (error) {
     handleError(res, error);
   }

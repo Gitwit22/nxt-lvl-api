@@ -511,4 +511,43 @@ router.get("/company-logos/export", async (req, res) => {
   }
 });
 
+// ─── Attendee CSV exports ─────────────────────────────────────────────────────
+
+import { buildAttendeeExportRows, rowsToCSV, type AttendeeExportReportType } from "../services/attendee-export.service.js";
+
+const ATTENDEE_EXPORT_TYPES: AttendeeExportReportType[] = [
+  "attendee-contact-list",
+  "flight-manifest",
+  "check-in-report",
+  "meal-dietary",
+  "badge-print",
+];
+
+const EXPORT_FILENAMES: Record<AttendeeExportReportType, string> = {
+  "attendee-contact-list": "attendee-contact-list.csv",
+  "flight-manifest": "flight-manifest.csv",
+  "check-in-report": "check-in-report.csv",
+  "meal-dietary": "meal-dietary.csv",
+  "badge-print": "badge-print.csv",
+};
+
+for (const reportType of ATTENDEE_EXPORT_TYPES) {
+  router.get(`/export/${reportType}`, async (req, res) => {
+    try {
+      const user = getRequestUser(req);
+      const eventId = readRouteParam(req.params["eventId"], "eventId");
+
+      const { columns, rows } = await buildAttendeeExportRows(eventId, user!.organizationId, reportType);
+      const csv = rowsToCSV(rows, columns);
+
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", `attachment; filename="${EXPORT_FILENAMES[reportType]}"`);
+      res.setHeader("Cache-Control", "no-store");
+      res.send(csv);
+    } catch (error) {
+      handleError(res, error);
+    }
+  });
+}
+
 export { router as eventureReportsRouter };

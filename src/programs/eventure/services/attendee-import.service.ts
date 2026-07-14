@@ -11,12 +11,30 @@ import {
 import { buildCompanyCandidates, matchAttendeeCompany } from "./attendee-company-matcher.js";
 import { isEligibleCompanyStatus, isEligiblePaymentStatus } from "./participant-eligibility.service.js";
 import { normalizeCompanyName } from "./sponsor-import.service.js";
+import {
+  findMatchingAttendee,
+  isPlaceholderName,
+  normalizeEmail as canonicalNormalizeEmail,
+  normalizePhone as canonicalNormalizePhone,
+} from "./attendee-identity.service.js";
 
 export type AttendeeImportParserStrategy = "native";
 
 export function isPaidStatus(value?: string | null): boolean {
   return isEligiblePaymentStatus(value);
 }
+
+// ── Attendee identity classification ────────────────────────────────────────
+
+export type AttendeeImportClassification =
+  | "exact_email_match"      // Found via normalised email — high confidence
+  | "exact_phone_match"      // Found via normalised phone — high confidence
+  | "name_company_match"     // Found via name + company — medium confidence
+  | "ambiguous_match"        // Multiple possible matches — requires review
+  | "new_attendee"           // No match found; row will create a new record
+  | "placeholder_ignored"    // Name matches placeholder pattern (Guest 1, TBD…)
+  | "no_open_slot"           // Identity resolved but no slot available for participant
+  | "participant_unresolved"; // Company not matched to a participant
 
 export type AttendeeImportRowDecision =
   | "approve"
@@ -67,6 +85,7 @@ export type AttendeeImportPreviewRow = {
     phone?: string;
     company?: string;
   };
+  attendeeClassification: AttendeeImportClassification;
   warnings: string[];
   errors: string[];
 };
@@ -251,6 +270,91 @@ function serializeExistingAttendee(attendee: {
   };
 }
 
+async function classifyAttendeeRow(input: {
+  organizationId: string;
+  attendeeName?: string;
+  attendeeEmail?: string;
+  attendeePhone?: string;
+  ticketBuyer?: string;
+  participantResolved: boolean;
+  openSlotsAvailable: boolean;
+}): Promise<{ classification: AttendeeImportClassification; matchCount: number }> {
+  // Placeholder names never become global attendee records
+  if (isPlaceholderName(input.attendeeName)) {
+    return { classification: "placeholder_ignored", matchCount: 0 };
+  }
+
+  // Company not matched to any participant — slot assignment is impossible
+  if (!input.participantResolved) {
+    return { classification: "participant_unresolved", matchCount: 0 };
+  }
+
+  const nEmail = canonicalNormalizeEmail(input.attendeeEmail);
+  const nPhone = canonicalNormalizePhone(input.attendeePhone);
+
+  // Step 1: exact normalised email
+  if (nEmail) {
+    const matches = await prisma.eventureAttendee.findMany({
+      where: { organizationId: input.organizationId, normalizedEmail: nEmail, archivedAt: null },
+      take: 2,
+      select: { id: true },
+    });
+    if (matches.length === 1) {
+      return {
+        classification: input.openSlotsAvailable ? "exact_email_match" : "no_open_slot",
+        matchCount: 1,
+      };
+    }
+    if (matches.length > 1) return { classification: "ambiguous_match", matchCount: matches.length };
+  }
+
+  // Step 2: exact normalised phone
+  if (nPhone) {
+    const matches = await prisma.eventureAttendee.findMany({
+      where: { organizationId: input.organizationId, normalizedPhone: nPhone, archivedAt: null },
+      take: 2,
+      select: { id: true },
+    });
+    if (matches.length === 1) {
+      return {
+        classification: input.openSlotsAvailable ? "exact_phone_match" : "no_open_slot",
+        matchCount: 1,
+      };
+    }
+    if (matches.length > 1) return { classification: "ambiguous_match", matchCount: matches.length };
+  }
+
+  // Step 3: name + company
+  const nameParts = splitAttendeeName(input.attendeeName);
+  const company = input.ticketBuyer ?? "";
+  if (nameParts.firstName && nameParts.lastName && company) {
+    const matches = await prisma.eventureAttendee.findMany({
+      where: {
+        organizationId: input.organizationId,
+        archivedAt: null,
+        firstName: { equals: nameParts.firstName, mode: "insensitive" },
+        lastName: { equals: nameParts.lastName, mode: "insensitive" },
+        company: { equals: company, mode: "insensitive" },
+      },
+      take: 2,
+      select: { id: true },
+    });
+    if (matches.length === 1) {
+      return {
+        classification: input.openSlotsAvailable ? "name_company_match" : "no_open_slot",
+        matchCount: 1,
+      };
+    }
+    if (matches.length > 1) return { classification: "ambiguous_match", matchCount: matches.length };
+  }
+
+  // No match
+  return {
+    classification: input.openSlotsAvailable ? "new_attendee" : "no_open_slot",
+    matchCount: 0,
+  };
+}
+
 async function upsertAttendeeFromImport(input: {
   organizationId: string;
   createdByUserId: string;
@@ -353,6 +457,14 @@ export async function previewAttendeeImportForEvent(input: {
 
   const companies = await buildCompanyCandidates(input.organizationId);
 
+  // Pre-fetch open slot counts per participant so classification can check availability
+  const openSlotsByParticipant = await prisma.eventureAttendeeSlot.groupBy({
+    by: ["participantId"],
+    where: { organizationId: input.organizationId, eventId: input.eventId, attendeeId: null },
+    _count: { participantId: true },
+  });
+  const openSlotsMap = new Map(openSlotsByParticipant.map((r) => [r.participantId, r._count.participantId]));
+
   const duplicateKeys = new Set<string>();
   const previewRows = await Promise.all(parsed.rows.map(async (row) => {
     const match = matchAttendeeCompany({
@@ -392,6 +504,30 @@ export async function previewAttendeeImportForEvent(input: {
         })
       : null;
 
+    // Determine open slot availability for the matched participant
+    const participantId = match.suggestedCompanyId
+      ? (await prisma.eventureParticipant.findFirst({
+          where: { organizationId: input.organizationId, eventId: input.eventId, contactCompanyId: match.suggestedCompanyId },
+          select: { id: true },
+        }))?.id
+      : undefined;
+    const openSlotsAvailable = participantId ? (openSlotsMap.get(participantId) ?? 0) > 0 : false;
+    const participantResolved = match.matchStatus === "Matched" && Boolean(match.suggestedCompanyId);
+
+    const { classification } = await classifyAttendeeRow({
+      organizationId: input.organizationId,
+      attendeeName: row.attendeeName,
+      attendeeEmail: row.attendeeEmail,
+      attendeePhone: row.attendeePhone,
+      ticketBuyer: row.ticketBuyer,
+      participantResolved,
+      openSlotsAvailable,
+    });
+
+    if (classification === "ambiguous_match") {
+      warnings.push("Multiple possible attendee matches found. Review required before commit.");
+    }
+
     const status = rowStatusFromIssues(warnings, errors, duplicate);
 
     return {
@@ -420,6 +556,7 @@ export async function previewAttendeeImportForEvent(input: {
         reason: match.reason,
       },
       existingAttendee: existingAttendee ? serializeExistingAttendee(existingAttendee) : undefined,
+      attendeeClassification: classification,
       warnings,
       errors,
     };
@@ -484,6 +621,17 @@ export async function previewAttendeeImportForEvent(input: {
     possibleMatchRows: rowsWithIds.filter((row) => row.suggestedCompany?.matchStatus === "Possible Match").length,
     unmatchedRows: rowsWithIds.filter((row) => row.suggestedCompany?.matchStatus === "Unmatched").length,
     newCompanySuggestedRows: rowsWithIds.filter((row) => row.suggestedCompany?.matchStatus === "New Company Suggested").length,
+    // Attendee identity classification counts
+    exactEmailMatches: rowsWithIds.filter((row) => row.attendeeClassification === "exact_email_match").length,
+    exactPhoneMatches: rowsWithIds.filter((row) => row.attendeeClassification === "exact_phone_match").length,
+    nameCompanyMatches: rowsWithIds.filter((row) => row.attendeeClassification === "name_company_match").length,
+    ambiguousMatches: rowsWithIds.filter((row) => row.attendeeClassification === "ambiguous_match").length,
+    newAttendees: rowsWithIds.filter((row) => row.attendeeClassification === "new_attendee").length,
+    placeholdersIgnored: rowsWithIds.filter((row) => row.attendeeClassification === "placeholder_ignored").length,
+    requiresReview: rowsWithIds.filter((row) =>
+      row.attendeeClassification === "ambiguous_match" ||
+      row.attendeeClassification === "participant_unresolved",
+    ).length,
   };
 
   await prisma.eventureImportBatch.update({

@@ -595,6 +595,27 @@ export async function listAttendeesForEvent(organizationId: string, eventId: str
       { companyName: "asc" },
       { slotNumber: "asc" },
     ],
+    include: {
+      attendee: {
+        select: {
+          id: true,
+          firstName: true,
+          lastName: true,
+          fullName: true,
+          email: true,
+          phone: true,
+          company: true,
+          companyId: true,
+          title: true,
+          dietaryRestrictions: true,
+          accessibilityNeeds: true,
+          emergencyContact: true,
+        },
+      },
+      representedCompany: {
+        select: { id: true, name: true },
+      },
+    },
   });
 }
 
@@ -1192,6 +1213,10 @@ export async function updateAttendeeSlot(input: {
   actualName?: string | null;
   notes?: string | null;
   checkedIn?: boolean;
+  mealPreference?: string | null;
+  dietaryOverride?: string | null;
+  tshirtSize?: string | null;
+  badgePrinted?: boolean;
 }) {
   const slot = await prisma.eventureAttendeeSlot.findFirst({
     where: {
@@ -1211,6 +1236,10 @@ export async function updateAttendeeSlot(input: {
       actualName: input.actualName === undefined ? slot.actualName : input.actualName,
       notes: input.notes === undefined ? slot.notes : input.notes,
       checkedIn: input.checkedIn === undefined ? slot.checkedIn : input.checkedIn,
+      mealPreference: input.mealPreference === undefined ? slot.mealPreference : input.mealPreference,
+      dietaryOverride: input.dietaryOverride === undefined ? slot.dietaryOverride : input.dietaryOverride,
+      tshirtSize: input.tshirtSize === undefined ? slot.tshirtSize : input.tshirtSize,
+      badgePrinted: input.badgePrinted === undefined ? slot.badgePrinted : input.badgePrinted,
     },
   });
 }

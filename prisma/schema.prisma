@@ -1390,31 +1390,44 @@ model EventureEventVolunteerNeed {
 }
 
 model EventureAttendee {
-  id                  String   @id @default(cuid())
+  id                  String    @id @default(cuid())
   organizationId      String
-  programDomain       String   @default("eventure")
+  programDomain       String    @default("eventure")
   firstName           String?
   lastName            String?
   fullName            String
   email               String?
+  normalizedEmail     String?
   phone               String?
+  normalizedPhone     String?
   company             String?
+  companyId           String?
   title               String?
-  tags                Json     @default("[]")
-  source              String   @default("manual")
-  notes               String?  @db.Text
+  dietaryRestrictions String?   @db.Text
+  accessibilityNeeds  String?   @db.Text
+  emergencyContact    Json?
+  tags                Json      @default("[]")
+  source              String    @default("manual")
+  notes               String?   @db.Text
   createdByUserId     String?
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  updatedByUserId     String?
+  archivedAt          DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
 
+  currentCompany      EventureSponsorOrganization? @relation("AttendeeCurrentCompany", fields: [companyId], references: [id], onDelete: SetNull)
   registrations       EventureRegistration[]
   checkInLogs         EventureCheckInLog[]
+  attendeeSlots       EventureAttendeeSlot[]
 
   @@index([organizationId, programDomain])
   @@index([organizationId, email])
   @@index([organizationId, phone])
   @@index([organizationId, fullName])
-  @@unique([organizationId, email, phone], map: "EventureAttendee_org_email_phone_key")
+  @@index([organizationId, normalizedEmail])
+  @@index([organizationId, normalizedPhone])
+  @@index([organizationId, lastName, firstName])
+  @@index([organizationId, companyId])
 }
 
 model EventureTicketType {
@@ -1582,6 +1595,8 @@ model EventureSponsorOrganization {
   followUps           EventureSponsorFollowUp[]
   participationHistory EventParticipationHistory[]
   registrations        EventureRegistration[]
+  attendees            EventureAttendee[]       @relation("AttendeeCurrentCompany")
+  representedBySlots   EventureAttendeeSlot[]   @relation("SlotRepresentedCompany")
 
   @@unique([organizationId, normalizedName])
   @@index([organizationId, name])
@@ -2020,31 +2035,42 @@ model EventureUnmatchedRevenue {
 }
 
 model EventureAttendeeSlot {
-  id                  String   @id @default(cuid())
-  organizationId      String
-  programDomain       String   @default("eventure")
-  eventId             String
-  participantId       String
-  companyName         String
-  registrationId      String?
-  slotNumber          Int
-  displayName         String
-  actualName          String?
-  flightAssignment    String   @default("PM")
-  checkedIn           Boolean  @default(false)
-  notes               String?  @db.Text
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  id                   String    @id @default(cuid())
+  organizationId       String
+  programDomain        String    @default("eventure")
+  eventId              String
+  participantId        String
+  companyName          String
+  registrationId       String?
+  attendeeId           String?
+  slotNumber           Int
+  displayName          String
+  actualName           String?
+  flightAssignment     String    @default("PM")
+  checkedIn            Boolean   @default(false)
+  mealPreference       String?
+  dietaryOverride      String?   @db.Text
+  tshirtSize           String?
+  badgePrinted         Boolean   @default(false)
+  representedCompanyId String?
+  companyNameSnapshot  String?
+  notes                String?   @db.Text
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 
-  event               EventureEvent        @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  participant         EventureParticipant  @relation(fields: [participantId], references: [id], onDelete: Cascade)
-  registration        EventureRegistration? @relation(fields: [registrationId], references: [id], onDelete: SetNull)
-  assignments         EventureAssignment[]
+  event                EventureEvent                @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  participant          EventureParticipant          @relation(fields: [participantId], references: [id], onDelete: Cascade)
+  registration         EventureRegistration?        @relation(fields: [registrationId], references: [id], onDelete: SetNull)
+  attendee             EventureAttendee?            @relation(fields: [attendeeId], references: [id], onDelete: SetNull)
+  representedCompany   EventureSponsorOrganization? @relation("SlotRepresentedCompany", fields: [representedCompanyId], references: [id], onDelete: SetNull)
+  assignments          EventureAssignment[]
 
   @@unique([participantId, slotNumber])
   @@index([organizationId, eventId, participantId])
   @@index([organizationId, eventId, flightAssignment])
   @@index([organizationId, eventId, registrationId])
+  @@index([organizationId, eventId, attendeeId])
+  @@index([organizationId, attendeeId])
 }
 
 model EventureAssignment {
