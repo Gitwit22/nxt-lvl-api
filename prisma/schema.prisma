@@ -2046,6 +2046,8 @@ model EventureAttendeeSlot {
   slotNumber           Int
   displayName          String
   actualName           String?
+  email                String?
+  phone                String?
   flightAssignment     String    @default("PM")
   checkedIn            Boolean   @default(false)
   mealPreference       String?

@@ -406,6 +406,8 @@ router.patch("/attendee-slots/:slotId", async (req, res) => {
       eventId,
       slotId,
       actualName: readNullableString(req.body?.actualName),
+      email: readNullableString(req.body?.email),
+      phone: readNullableString(req.body?.phone),
       notes: readNullableString(req.body?.notes),
       checkedIn: readBoolean(req.body?.checkedIn),
       mealPreference: readNullableString(req.body?.mealPreference),

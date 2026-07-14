@@ -588,7 +588,7 @@ export async function listPaymentsForEvent(organizationId: string, eventId: stri
 }
 
 export async function listAttendeesForEvent(organizationId: string, eventId: string) {
-  return prisma.eventureAttendeeSlot.findMany({
+  const slots = await prisma.eventureAttendeeSlot.findMany({
     where: {
       organizationId,
       eventId,
@@ -598,6 +598,7 @@ export async function listAttendeesForEvent(organizationId: string, eventId: str
       { slotNumber: "asc" },
     ],
     include: {
+      // New direct link (set after backfill or manual assignment)
       attendee: {
         select: {
           id: true,
@@ -614,11 +615,41 @@ export async function listAttendeesForEvent(organizationId: string, eventId: str
           emergencyContact: true,
         },
       },
+      // Legacy path: slot → registration → attendee (pre-backfill data)
+      registration: {
+        select: {
+          attendee: {
+            select: {
+              id: true,
+              firstName: true,
+              lastName: true,
+              fullName: true,
+              email: true,
+              phone: true,
+              company: true,
+              companyId: true,
+              title: true,
+              dietaryRestrictions: true,
+              accessibilityNeeds: true,
+              emergencyContact: true,
+            },
+          },
+        },
+      },
       representedCompany: {
         select: { id: true, name: true },
       },
     },
   });
+
+  // Normalize: direct attendeeId link takes priority; falls back to registration's
+  // attendee for pre-backfill slots created via the EventureRegistration flow.
+  // Slot-level email/phone (entered directly on Participants page) always takes
+  // precedence over the linked attendee's contact fields for display purposes.
+  return slots.map(({ registration, ...slot }) => ({
+    ...slot,
+    attendee: slot.attendee ?? registration?.attendee ?? null,
+  }));
 }
 
 async function syncRegistrationsOnPaymentConfirm(input: {
@@ -1226,6 +1257,8 @@ export async function updateAttendeeSlot(input: {
   eventId: string;
   slotId: string;
   actualName?: string | null;
+  email?: string | null;
+  phone?: string | null;
   notes?: string | null;
   checkedIn?: boolean;
   mealPreference?: string | null;
@@ -1249,6 +1282,8 @@ export async function updateAttendeeSlot(input: {
     where: { id: input.slotId },
     data: {
       actualName: input.actualName === undefined ? slot.actualName : input.actualName,
+      email: input.email === undefined ? slot.email : input.email,
+      phone: input.phone === undefined ? slot.phone : input.phone,
       notes: input.notes === undefined ? slot.notes : input.notes,
       checkedIn: input.checkedIn === undefined ? slot.checkedIn : input.checkedIn,
       mealPreference: input.mealPreference === undefined ? slot.mealPreference : input.mealPreference,
