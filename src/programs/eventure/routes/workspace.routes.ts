@@ -204,6 +204,8 @@ router.post("/payments/confirm", async (req, res) => {
       notes: readNullableString(req.body?.notes),
       lineItems: readLineItems(req.body?.lineItems),
       paymentFieldFollowUps: readPaymentFieldFollowUps(req.body?.paymentFieldFollowUps),
+      forceConfirmOverride: readBoolean(req.body?.forceConfirmOverride),
+      overrideReason: readNullableString(req.body?.overrideReason),
       actorUserId: user!.userId,
       forceRemoveNamedSlots: readBoolean(req.body?.forceRemoveNamedSlots),
     });

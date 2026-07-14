@@ -8,6 +8,7 @@ import XLSX from "xlsx";
 import { prisma } from "../../../core/db/prisma.js";
 import { canUseSharedParser, parseDocumentWithSharedService } from "../../../core/services/parse/documentParseService.js";
 import { EventureServiceError } from "./eventure-error.js";
+import { isEligiblePaymentStatus } from "./participant-eligibility.service.js";
 import { recordEventurePaymentTransaction } from "./payment-ledger.service.js";
 import { inferPaymentStatus, normalizeCompanyName, parseMoney } from "./sponsor-import.service.js";
 import { reconcileAttendeeSlots } from "./workspace.service.js";
@@ -1017,16 +1018,19 @@ export async function confirmPaymentImportForEvent(input: PaymentImportConfirmIn
       });
 
       if (participant) {
+        const paymentConfirmed = isEligiblePaymentStatus(payment.paymentStatus);
         await prisma.eventureParticipant.update({
           where: { id: participant.id },
           data: {
-            paymentConfirmed: true,
+            paymentConfirmed,
             paymentId: payment.id,
           },
         });
-        participantsConfirmed += 1;
+        if (paymentConfirmed) {
+          participantsConfirmed += 1;
+        }
 
-        if (participant.attendeeCount > 0) {
+        if (paymentConfirmed && participant.attendeeCount > 0) {
           await reconcileAttendeeSlots({
             organizationId: input.organizationId,
             eventId: input.eventId,

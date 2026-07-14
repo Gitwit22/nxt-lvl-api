@@ -33,6 +33,8 @@ type ConfirmPaymentInput = {
     description?: string | null;
   }>;
   paymentFieldFollowUps?: PaymentFieldFollowUpInput[];
+  forceConfirmOverride?: boolean;
+  overrideReason?: string | null;
   actorUserId?: string;
   forceRemoveNamedSlots?: boolean;
 };
@@ -693,6 +695,12 @@ async function syncRegistrationsOnPaymentConfirm(input: {
 }
 
 export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInput) {
+  const forceConfirmOverride = input.forceConfirmOverride === true;
+  const overrideReason = input.overrideReason?.trim() || null;
+  if (forceConfirmOverride && !overrideReason) {
+    throw new EventureServiceError("overrideReason is required when forceConfirmOverride is true.", 400);
+  }
+
   // Resolve priceOption first so attendeeCount can default from it
   let resolvedPriceOption: Awaited<ReturnType<typeof prisma.eventPriceOption.findFirst>> | null = null;
   if (input.priceOptionId) {
@@ -729,6 +737,9 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
 
     const amountDue = input.amountDue ?? latestPayment?.amountDue ?? eventSponsor.committedAmount ?? 0;
     const amountPaid = input.amountPaid ?? latestPayment?.amountPaid ?? eventSponsor.amountPaid ?? amountDue;
+    const resolvedNotes = forceConfirmOverride && overrideReason
+      ? [input.notes?.trim(), `Override reason: ${overrideReason}`].filter(Boolean).join(" | ")
+      : input.notes;
 
     const existingParticipant = await tx.eventureParticipant.findUnique({
       where: {
@@ -755,7 +766,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
         where: { id: existingParticipant.id },
         data: {
           companyName,
-          paymentConfirmed: true,
+          paymentConfirmed: existingParticipant.paymentConfirmed,
           attendeeCount: effectiveAttendeeCount,
           status: "active",
           flightAssignment: chosenFlight,
@@ -767,7 +778,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
           eventId: input.eventId,
           contactCompanyId: input.contactCompanyId,
           companyName,
-          paymentConfirmed: true,
+          paymentConfirmed: false,
           attendeeCount: effectiveAttendeeCount,
           flightAssignment: chosenFlight,
           status: "active",
@@ -783,10 +794,11 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
       amountDue,
       amountPaid,
       paymentMethod: input.paymentMethod,
-      notes: input.notes,
+      notes: resolvedNotes,
       changedByUserId: input.actorUserId,
-      transactionType: "manual_confirm",
-      source: "workspace_confirm",
+      transactionType: forceConfirmOverride ? "manual_override_confirm" : "manual_confirm",
+      source: forceConfirmOverride ? "workspace_confirm_override" : "workspace_confirm",
+      forceConfirmOverride,
       lineItems: input.lineItems?.length
         ? input.lineItems
         : [
@@ -819,6 +831,7 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
       where: { id: participant.id },
       data: {
         paymentId: payment.id,
+        paymentConfirmed: isEligiblePaymentStatus(payment.paymentStatus),
       },
     });
 
@@ -858,13 +871,15 @@ export async function confirmPaymentAndSyncParticipant(input: ConfirmPaymentInpu
 
   // Reverse sync: mark all unlinked registrations for this company as "paid"
   // and pair them deterministically with slots by createdAt / slotNumber order.
-  await syncRegistrationsOnPaymentConfirm({
-    organizationId: input.organizationId,
-    eventId: input.eventId,
-    contactCompanyId: input.contactCompanyId,
-    participantId: result.participant.id,
-    actorUserId: input.actorUserId,
-  });
+  if (isEligiblePaymentStatus(result.payment.paymentStatus)) {
+    await syncRegistrationsOnPaymentConfirm({
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      contactCompanyId: input.contactCompanyId,
+      participantId: result.participant.id,
+      actorUserId: input.actorUserId,
+    });
+  }
 
   const [participant, slots] = await Promise.all([
     prisma.eventureParticipant.findUnique({ where: { id: result.participant.id } }),

@@ -29,7 +29,47 @@ type RecordPaymentTransactionInput = {
   referenceKey?: string;
   transactionAt?: Date;
   lineItems?: LedgerLineItemInput[];
+  forceConfirmOverride?: boolean;
 };
+
+function resolveLedgerPaymentStatus(amountDue: number, amountPaid: number, now: Date): {
+  paymentStatus: string;
+  paymentConfirmedAt: Date | null;
+} {
+  const epsilon = 0.01;
+  const hasOutstandingBalance = amountDue > amountPaid + epsilon;
+
+  if (hasOutstandingBalance) {
+    return {
+      paymentStatus: amountPaid > 0 ? "partially_paid" : "pending",
+      paymentConfirmedAt: null,
+    };
+  }
+
+  return {
+    paymentStatus: "confirmed",
+    paymentConfirmedAt: now,
+  };
+}
+
+function resolveLedgerPaymentState(
+  amountDue: number,
+  amountPaid: number,
+  now: Date,
+  forceConfirmOverride: boolean,
+): {
+  paymentStatus: string;
+  paymentConfirmedAt: Date | null;
+} {
+  if (forceConfirmOverride) {
+    return {
+      paymentStatus: "confirmed",
+      paymentConfirmedAt: now,
+    };
+  }
+
+  return resolveLedgerPaymentStatus(amountDue, amountPaid, now);
+}
 
 export async function recordEventurePaymentTransaction(input: RecordPaymentTransactionInput) {
   const db = input.db ?? prisma;
@@ -45,6 +85,12 @@ export async function recordEventurePaymentTransaction(input: RecordPaymentTrans
 
   const rollupAmountPaid = lineItems.reduce((sum, item) => sum + item.amount, 0);
   const rollupAmountDue = Math.max(input.amountDue, rollupAmountPaid);
+  const resolvedPaymentState = resolveLedgerPaymentState(
+    rollupAmountDue,
+    rollupAmountPaid,
+    now,
+    input.forceConfirmOverride === true,
+  );
 
   const existingPayment = await db.eventurePayment.findFirst({
     where: {
@@ -63,9 +109,9 @@ export async function recordEventurePaymentTransaction(input: RecordPaymentTrans
         amountDue: rollupAmountDue,
         amountPaid: rollupAmountPaid,
         balance: rollupAmountDue - rollupAmountPaid,
-        paymentStatus: "confirmed",
+        paymentStatus: resolvedPaymentState.paymentStatus,
         paymentMethod: input.paymentMethod ?? existingPayment.paymentMethod,
-        paymentConfirmedAt: now,
+        paymentConfirmedAt: resolvedPaymentState.paymentConfirmedAt,
         notes: input.notes ?? existingPayment.notes,
       },
     })
@@ -78,9 +124,9 @@ export async function recordEventurePaymentTransaction(input: RecordPaymentTrans
         amountDue: rollupAmountDue,
         amountPaid: rollupAmountPaid,
         balance: rollupAmountDue - rollupAmountPaid,
-        paymentStatus: "confirmed",
+        paymentStatus: resolvedPaymentState.paymentStatus,
         paymentMethod: input.paymentMethod ?? null,
-        paymentConfirmedAt: now,
+        paymentConfirmedAt: resolvedPaymentState.paymentConfirmedAt,
         notes: input.notes ?? null,
       },
     });
