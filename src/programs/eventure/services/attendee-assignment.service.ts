@@ -5,6 +5,7 @@ import {
   type AttendeeIdentityInput,
   type CreateOrUpdateResult,
 } from "./attendee-identity.service.js";
+import { logActivity } from "./activity-log.service.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +65,17 @@ export async function assignAttendeeToSlot(input: {
       where: { id: input.slotId },
       data: { attendeeId: input.attendeeId },
     });
+
+    void logActivity(prisma, {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      actorUserId: input.userId,
+      action: "attendee.assigned",
+      targetType: "attendee_slot",
+      targetId: input.slotId,
+      targetLabel: `${slot.companyName} — Slot #${slot.slotNumber}`,
+      details: { attendeeId: input.attendeeId },
+    });
   });
 }
 
@@ -91,6 +103,15 @@ export async function unassignAttendeeFromSlot(input: {
       where: { id: input.slotId },
       // Clear attendeeId only — actualName and displayName are preserved
       data: { attendeeId: null },
+    });
+
+    void logActivity(prisma, {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      action: "attendee.unassigned",
+      targetType: "attendee_slot",
+      targetId: input.slotId,
+      targetLabel: `${slot.companyName} — Slot #${slot.slotNumber}`,
     });
   });
 }

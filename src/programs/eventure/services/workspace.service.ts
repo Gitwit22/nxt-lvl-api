@@ -5,6 +5,7 @@ import {
   assertEligiblePaymentStatus,
   isEligiblePaymentStatus,
 } from "./participant-eligibility.service.js";
+import { logActivity } from "./activity-log.service.js";
 
 type CreateParticipantInput = {
   organizationId: string;
@@ -1049,6 +1050,17 @@ export async function createParticipantForEvent(input: CreateParticipantInput) {
     });
   }
 
+  void logActivity(prisma, {
+    organizationId: input.organizationId,
+    eventId: input.eventId,
+    actorUserId: input.createdByUserId,
+    action: "participant.created",
+    targetType: "participant",
+    targetId: participant.id,
+    targetLabel: displayName,
+    details: { slotCount },
+  });
+
   return prisma.eventureParticipant.findUniqueOrThrow({
     where: { id: participant.id },
     include: {
@@ -1249,6 +1261,16 @@ export async function updateParticipantFlightAssignment(input: {
     return next;
   });
 
+  void logActivity(prisma, {
+    organizationId: input.organizationId,
+    eventId: input.eventId,
+    action: "participant.flight_changed",
+    targetType: "participant",
+    targetId: input.participantId,
+    targetLabel: participant.companyName,
+    details: { before: participant.flightAssignment, after: input.flightAssignment },
+  });
+
   return updated;
 }
 
@@ -1256,6 +1278,7 @@ export async function updateAttendeeSlot(input: {
   organizationId: string;
   eventId: string;
   slotId: string;
+  actorUserId?: string | null;
   actualName?: string | null;
   email?: string | null;
   phone?: string | null;
@@ -1278,7 +1301,7 @@ export async function updateAttendeeSlot(input: {
     throw new EventureServiceError("Attendee slot not found.", 404);
   }
 
-  return prisma.eventureAttendeeSlot.update({
+  const updated = await prisma.eventureAttendeeSlot.update({
     where: { id: input.slotId },
     data: {
       actualName: input.actualName === undefined ? slot.actualName : input.actualName,
@@ -1292,6 +1315,61 @@ export async function updateAttendeeSlot(input: {
       badgePrinted: input.badgePrinted === undefined ? slot.badgePrinted : input.badgePrinted,
     },
   });
+
+  // Activity logging
+  const label = `${slot.companyName} — Slot #${slot.slotNumber}${
+    updated.actualName ? ` (${updated.actualName})` : ""
+  }`;
+
+  if (input.checkedIn !== undefined && input.checkedIn !== slot.checkedIn) {
+    void logActivity(prisma, {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      actorUserId: input.actorUserId,
+      action: input.checkedIn ? "slot.checked_in" : "slot.checked_out",
+      targetType: "attendee_slot",
+      targetId: slot.id,
+      targetLabel: label,
+    });
+  } else if (
+    (input.actualName !== undefined && input.actualName !== slot.actualName)
+  ) {
+    void logActivity(prisma, {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      actorUserId: input.actorUserId,
+      action: "slot.name_updated",
+      targetType: "attendee_slot",
+      targetId: slot.id,
+      targetLabel: label,
+      details: { before: slot.actualName, after: input.actualName },
+    });
+  } else if (
+    (input.email !== undefined && input.email !== slot.email) ||
+    (input.phone !== undefined && input.phone !== slot.phone)
+  ) {
+    void logActivity(prisma, {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      actorUserId: input.actorUserId,
+      action: "slot.contact_updated",
+      targetType: "attendee_slot",
+      targetId: slot.id,
+      targetLabel: label,
+    });
+  } else if (input.badgePrinted === true && !slot.badgePrinted) {
+    void logActivity(prisma, {
+      organizationId: input.organizationId,
+      eventId: input.eventId,
+      actorUserId: input.actorUserId,
+      action: "slot.badge_printed",
+      targetType: "attendee_slot",
+      targetId: slot.id,
+      targetLabel: label,
+    });
+  }
+
+  return updated;
 }
 
 export async function updateParticipantAttendeeCount(input: {
@@ -1451,11 +1529,22 @@ export async function removeParticipantFromEvent(input: {
     });
   });
 
-  return {
+  const result = {
     removedParticipantId: participant.id,
     contactCompanyId: participant.contactCompanyId,
     paymentsDeleted: input.deletePayments ?? false,
   };
+
+  void logActivity(prisma, {
+    organizationId: input.organizationId,
+    eventId: input.eventId,
+    action: "participant.removed",
+    targetType: "participant",
+    targetId: participant.id,
+    details: { deletePayments: input.deletePayments ?? false },
+  });
+
+  return result;
 }
 
 export async function mergeParticipantIntoCompany(input: {

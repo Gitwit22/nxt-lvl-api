@@ -550,4 +550,32 @@ for (const reportType of ATTENDEE_EXPORT_TYPES) {
   });
 }
 
+// ─── Activity Log ────────────────────────────────────────────────────────
+
+import { listActivityLogForEvent, ACTION_LABELS } from "../services/activity-log.service.js";
+
+router.get("/activity-log", async (req, res) => {
+  try {
+    const user = getRequestUser(req);
+    const eventId = readRouteParam(req.params["eventId"], "eventId");
+    const limit = Math.min(Number(req.query["limit"]) || 100, 500);
+    const offset = Number(req.query["offset"]) || 0;
+
+    const { entries, total } = await listActivityLogForEvent(
+      user!.organizationId,
+      eventId,
+      { limit, offset },
+    );
+
+    const enriched = entries.map((e) => ({
+      ...e,
+      actionLabel: ACTION_LABELS[e.action] ?? e.action,
+    }));
+
+    res.json({ entries: enriched, total });
+  } catch (error) {
+    handleError(res, error);
+  }
+});
+
 export { router as eventureReportsRouter };

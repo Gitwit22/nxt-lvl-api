@@ -1247,6 +1247,7 @@ model EventureEvent {
   participationHistory EventParticipationHistory[]
   importBatches       EventureImportBatch[]
   checkInLogs         EventureCheckInLog[]
+  activityLogs        EventureActivityLog[]
   personnel           EventureEventPersonnel[]
   volunteerContacts   EventureEventVolunteerContact[]
   priceOptions        EventPriceOption[]
@@ -1843,6 +1844,27 @@ model EventureCheckInLog {
   @@index([organizationId, eventId, checkedInAt])
   @@index([organizationId, registrationId])
   @@index([organizationId, attendeeId])
+}
+
+model EventureActivityLog {
+  id             String    @id @default(cuid())
+  organizationId String
+  programDomain  String    @default("eventure")
+  eventId        String
+  actorUserId    String?
+  actorName      String?
+  action         String
+  targetType     String
+  targetId       String?
+  targetLabel    String?
+  details        Json?
+  createdAt      DateTime  @default(now())
+
+  event          EventureEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, eventId, createdAt])
+  @@index([organizationId, eventId, targetType])
+  @@index([organizationId, actorUserId])
 }
 
 model EventureRegistrationPaymentLog {
