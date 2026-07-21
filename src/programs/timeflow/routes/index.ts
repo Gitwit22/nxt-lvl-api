@@ -946,6 +946,23 @@ router.use(async (req, res, next) => {
   try {
     const payload = getUser(req);
     const tokenUserId = payload.userId;
+
+    // Multi-workspace support: if the client sends x-active-workspace-id and
+    // the user has a membership in that org, use it as the scoped org instead
+    // of the JWT's stored organizationId. This allows switching workspaces
+    // without re-issuing a JWT.
+    const requestedWorkspaceId = req.headers["x-active-workspace-id"];
+    if (typeof requestedWorkspaceId === "string" && requestedWorkspaceId.trim()) {
+      const membershipCheck = await (prisma as unknown as {
+        membership: { findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null> };
+      }).membership.findFirst({
+        where: { userId: payload.userId, organizationId: requestedWorkspaceId.trim() },
+      });
+      if (membershipCheck) {
+        payload.organizationId = requestedWorkspaceId.trim();
+      }
+    }
+
     const effectiveUserId = await resolveEffectiveDataUserId({
       organizationId: payload.organizationId,
       userId: payload.userId,
