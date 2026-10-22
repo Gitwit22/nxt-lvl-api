@@ -696,8 +696,26 @@ function requireTimeflowAuth(req: Request, res: Response, next: NextFunction): v
     res.status(401).json({ error: "Invalid or expired token" });
     return;
   }
+  // Most routes re-run this guard after the router-level scope middleware.
+  // Re-apply the membership-verified workspace it resolved; otherwise the
+  // re-decoded token silently scopes the request back to the token's org.
+  const activeOrganizationId = (req as Request & TimeflowScopeState).timeflowActiveOrgId;
+  if (activeOrganizationId) {
+    payload.organizationId = activeOrganizationId;
+  }
   (req as Request & { timeflowUser: TimeflowTokenPayload }).timeflowUser = payload;
   next();
+}
+
+type TimeflowScopeState = {
+  /** Workspace from x-active-workspace-id, set only after a membership check. */
+  timeflowActiveOrgId?: string;
+  /** The organizationId stored in the token (the user's default workspace). */
+  timeflowTokenOrgId?: string;
+};
+
+function getTokenOrganizationId(req: Request): string {
+  return (req as Request & TimeflowScopeState).timeflowTokenOrgId ?? getUser(req).organizationId;
 }
 
 function getUser(req: Request): TimeflowTokenPayload {
@@ -946,6 +964,7 @@ router.use(async (req, res, next) => {
   try {
     const payload = getUser(req);
     const tokenUserId = payload.userId;
+    (req as Request & TimeflowScopeState).timeflowTokenOrgId = payload.organizationId;
 
     // Multi-workspace support: if the client sends x-active-workspace-id and
     // the user has a membership in that org, use it as the scoped org instead
@@ -960,6 +979,7 @@ router.use(async (req, res, next) => {
       });
       if (membershipCheck) {
         payload.organizationId = requestedWorkspaceId.trim();
+        (req as Request & TimeflowScopeState).timeflowActiveOrgId = payload.organizationId;
       }
     }
 
@@ -3436,7 +3456,9 @@ function toWorkspaceMeta(org: Record<string, unknown>, meta: Record<string, unkn
 
 // GET /organizations — list all user's workspaces
 router.get("/organizations", requireTimeflowAuth, async (req, res) => {
-  const { userId, organizationId: tokenOrganizationId } = getUser(req);
+  const { userId } = getUser(req);
+  // isDefault reflects the token's workspace, not the one currently selected.
+  const tokenOrganizationId = getTokenOrganizationId(req);
   const store = getWorkspaceStore();
 
   const memberships = await (prisma as unknown as {
