@@ -463,6 +463,9 @@ model TimeflowWorkspaceMeta {
   workspaceType  String   @default("solo")  // solo | team
   teamEnabled    Boolean  @default(false)
   isDefault      Boolean  @default(false)
+  // Per-business profile shown in TimeFlow (legal name, contact, address,
+  // branding, document defaults). Validated by sanitizeBusinessProfile().
+  businessProfile Json?
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 

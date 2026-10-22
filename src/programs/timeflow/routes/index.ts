@@ -3434,6 +3434,158 @@ function toWorkspaceMeta(org: Record<string, unknown>, meta: Record<string, unkn
   };
 }
 
+// ─── Business profile ─────────────────────────────────────────────────────────
+// Each workspace is a separate business with its own branding and document
+// defaults. Only whitelisted, type-checked fields are stored.
+
+type BusinessProfile = Record<string, unknown>;
+
+const PROFILE_TEXT_FIELDS: Record<string, number> = {
+  legalName: 200,
+  businessType: 50,
+  industry: 50,
+  email: 200,
+  phone: 50,
+  website: 300,
+};
+const ADDRESS_TEXT_FIELDS = ["street", "city", "state", "zip", "country"];
+const ESTIMATE_HEADER_STYLES = ["modern", "classic", "minimal"];
+const HEX_COLOR = /^#[0-9a-fA-F]{3,8}$/;
+// Logos are stored as data URLs; cap well under the 10mb JSON body limit.
+const MAX_LOGO_DATA_URL_LENGTH = 3_000_000;
+
+export class BusinessProfileValidationError extends Error {}
+
+function readText(source: Record<string, unknown>, key: string, maxLength: number, path: string): string | undefined {
+  const value = source[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string") throw new BusinessProfileValidationError(`${path} must be a string`);
+  const trimmed = value.trim();
+  if (trimmed.length > maxLength) throw new BusinessProfileValidationError(`${path} must be at most ${maxLength} characters`);
+  return trimmed || undefined;
+}
+
+function readNumber(
+  source: Record<string, unknown>,
+  key: string,
+  path: string,
+  { min, max, integer = false }: { min: number; max: number; integer?: boolean },
+): number | undefined {
+  const value = source[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "number" || !Number.isFinite(value) || (integer && !Number.isInteger(value)) || value < min || value > max) {
+    throw new BusinessProfileValidationError(`${path} must be ${integer ? "an integer" : "a number"} between ${min} and ${max}`);
+  }
+  return value;
+}
+
+function readBoolean(source: Record<string, unknown>, key: string, path: string): boolean | undefined {
+  const value = source[key];
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "boolean") throw new BusinessProfileValidationError(`${path} must be a boolean`);
+  return value;
+}
+
+function compact(record: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(record).filter(([, value]) => value !== undefined));
+}
+
+function readSection(body: Record<string, unknown>, key: string): Record<string, unknown> | null | undefined {
+  const value = body[key];
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!isRecord(value)) throw new BusinessProfileValidationError(`${key} must be an object`);
+  return value;
+}
+
+/**
+ * Validates a business profile update. Returns only the keys present in the
+ * body: a value of `null` means "clear this field/section". Sections (address,
+ * branding, businessSettings) are replaced as a whole when provided.
+ */
+export function sanitizeBusinessProfile(body: Record<string, unknown>): Record<string, unknown> {
+  const update: Record<string, unknown> = {};
+
+  for (const [key, maxLength] of Object.entries(PROFILE_TEXT_FIELDS)) {
+    if (!(key in body)) continue;
+    update[key] = readText(body, key, maxLength, key) ?? null;
+  }
+
+  const address = readSection(body, "address");
+  if (address !== undefined) {
+    update.address = address === null ? null : compact({
+      ...Object.fromEntries(ADDRESS_TEXT_FIELDS.map((field) => [field, readText(address, field, 200, `address.${field}`)])),
+      useOnDocuments: readBoolean(address, "useOnDocuments", "address.useOnDocuments"),
+    });
+  }
+
+  const branding = readSection(body, "branding");
+  if (branding === null) {
+    update.branding = null;
+  } else if (branding !== undefined) {
+    let logoDataUrl: string | undefined;
+    if (branding.logoDataUrl !== undefined && branding.logoDataUrl !== null) {
+      if (typeof branding.logoDataUrl !== "string" || !branding.logoDataUrl.startsWith("data:image/")) {
+        throw new BusinessProfileValidationError("branding.logoDataUrl must be an image data URL");
+      }
+      if (branding.logoDataUrl.length > MAX_LOGO_DATA_URL_LENGTH) {
+        throw new BusinessProfileValidationError("branding.logoDataUrl is too large");
+      }
+      logoDataUrl = branding.logoDataUrl;
+    }
+    const color = (key: string) => {
+      const value = readText(branding, key, 9, `branding.${key}`);
+      if (value !== undefined && !HEX_COLOR.test(value)) throw new BusinessProfileValidationError(`branding.${key} must be a hex color`);
+      return value;
+    };
+    const headerStyle = readText(branding, "estimateHeaderStyle", 20, "branding.estimateHeaderStyle");
+    if (headerStyle !== undefined && !ESTIMATE_HEADER_STYLES.includes(headerStyle)) {
+      throw new BusinessProfileValidationError("branding.estimateHeaderStyle is invalid");
+    }
+    update.branding = compact({
+      logoDataUrl,
+      primaryColor: color("primaryColor"),
+      accentColor: color("accentColor"),
+      estimateHeaderStyle: headerStyle,
+    });
+  }
+
+  const settings = readSection(body, "businessSettings");
+  if (settings !== undefined) {
+    update.businessSettings = settings === null ? null : compact({
+      currency: readText(settings, "currency", 10, "businessSettings.currency"),
+      taxRate: readNumber(settings, "taxRate", "businessSettings.taxRate", { min: 0, max: 1 }),
+      estimatePrefix: readText(settings, "estimatePrefix", 20, "businessSettings.estimatePrefix"),
+      nextEstimateNumber: readNumber(settings, "nextEstimateNumber", "businessSettings.nextEstimateNumber", { min: 1, max: 1_000_000_000, integer: true }),
+      invoicePrefix: readText(settings, "invoicePrefix", 20, "businessSettings.invoicePrefix"),
+      nextInvoiceNumber: readNumber(settings, "nextInvoiceNumber", "businessSettings.nextInvoiceNumber", { min: 1, max: 1_000_000_000, integer: true }),
+      defaultEstimateExpirationDays: readNumber(settings, "defaultEstimateExpirationDays", "businessSettings.defaultEstimateExpirationDays", { min: 0, max: 3650, integer: true }),
+      defaultPaymentTerms: readText(settings, "defaultPaymentTerms", 100, "businessSettings.defaultPaymentTerms"),
+      defaultDepositPercent: readNumber(settings, "defaultDepositPercent", "businessSettings.defaultDepositPercent", { min: 0, max: 100 }),
+      defaultCustomerNote: readText(settings, "defaultCustomerNote", 5000, "businessSettings.defaultCustomerNote"),
+      defaultTermsAndConditions: readText(settings, "defaultTermsAndConditions", 10000, "businessSettings.defaultTermsAndConditions"),
+      defaultTaxableStatus: readBoolean(settings, "defaultTaxableStatus", "businessSettings.defaultTaxableStatus"),
+      timezone: readText(settings, "timezone", 64, "businessSettings.timezone"),
+    });
+  }
+
+  return update;
+}
+
+function mergeBusinessProfile(existing: unknown, update: Record<string, unknown>): BusinessProfile {
+  const merged: BusinessProfile = { ...(isRecord(existing) ? existing : {}) };
+  for (const [key, value] of Object.entries(update)) {
+    if (value === null) delete merged[key];
+    else merged[key] = value;
+  }
+  return merged;
+}
+
+function toBusinessProfilePayload(meta: Record<string, unknown> | null | undefined): BusinessProfile {
+  const profile = meta?.businessProfile;
+  return isRecord(profile) ? profile : {};
+}
+
 // GET /organizations — list all user's workspaces
 router.get("/organizations", requireTimeflowAuth, async (req, res) => {
   const { userId, organizationId: tokenOrganizationId } = getUser(req);
@@ -3490,6 +3642,7 @@ router.get("/organizations", requireTimeflowAuth, async (req, res) => {
       createdAt: org.createdAt,
       status: org.status,
       role: roleMap.get(orgId) ?? "member",
+      ...toBusinessProfilePayload(meta),
       ...metaPayload,
       isDefault: Boolean(metaPayload.isDefault || tokenOrganizationId === orgId),
     };
@@ -3600,6 +3753,61 @@ router.patch("/organizations/:id", requireTimeflowAuth, async (req, res) => {
   });
 
   res.json({ id: updated.id, name: updated.name });
+});
+
+// PUT /organizations/:id/profile — save a business's profile and branding
+router.put("/organizations/:id/profile", requireTimeflowAuth, async (req, res) => {
+  const { userId } = getUser(req);
+  const { id } = req.params;
+  const body = isRecord(req.body) ? req.body : {};
+
+  const membershipStore = prisma as unknown as {
+    membership: {
+      findFirst: (args: Record<string, unknown>) => Promise<Record<string, unknown> | null>;
+      count: (args: Record<string, unknown>) => Promise<number>;
+    };
+  };
+  const membership = await membershipStore.membership.findFirst({ where: { userId, organizationId: id } });
+
+  if (!membership || !["owner", "admin"].includes(membership.role as string)) {
+    res.status(403).json({ error: "Only workspace owners and admins can edit the business profile" });
+    return;
+  }
+
+  let update: Record<string, unknown>;
+  try {
+    update = sanitizeBusinessProfile(body);
+  } catch (error) {
+    if (error instanceof BusinessProfileValidationError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
+
+  const store = getWorkspaceStore();
+  const existing = await store.timeflowWorkspaceMeta.findUnique({ where: { organizationId: id } });
+  const businessProfile = mergeBusinessProfile(existing?.businessProfile, update);
+
+  if (existing) {
+    await store.timeflowWorkspaceMeta.upsert({
+      where: { organizationId: id },
+      create: { organizationId: id, businessProfile },
+      update: { businessProfile },
+    });
+  } else {
+    // No meta row yet: keep the workspace type GET /organizations derives today
+    // instead of falling back to the column default ("solo").
+    const memberCount = await membershipStore.membership.count({ where: { organizationId: id } });
+    const workspaceType = memberCount > 1 ? "team" : "solo";
+    await store.timeflowWorkspaceMeta.upsert({
+      where: { organizationId: id },
+      create: { organizationId: id, workspaceType, teamEnabled: memberCount > 1, isDefault: false, businessProfile },
+      update: { businessProfile },
+    });
+  }
+
+  res.json({ organizationId: id, ...businessProfile });
 });
 
 // POST /organizations/:id/archive — archive workspace
