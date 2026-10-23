@@ -3131,44 +3131,95 @@ router.get("/invoices/:id", requireTimeflowAuth, async (req, res) => {
   res.json(invoice);
 });
 
+// Invoice ids double as invoice numbers (e.g. "INV-2026-021") and are a global
+// primary key across every workspace and account. Each business numbers its
+// own invoices, so a requested number can already be taken elsewhere; never
+// drop the invoice for that, allocate the next free number instead.
+type InvoiceIdStore = {
+  timeflowInvoice: {
+    create: (args: Record<string, unknown>) => Promise<Record<string, unknown>>;
+    findMany: (args: Record<string, unknown>) => Promise<Array<{ id: string }>>;
+  };
+};
+
+const INVOICE_NUMBER_PATTERN = /^(.*?)(\d+)$/;
+const MAX_INVOICE_ID_ATTEMPTS = 5;
+
+function isUniqueConstraintViolation(error: unknown): boolean {
+  return isRecord(error) && error.code === "P2002";
+}
+
+export async function findNextFreeInvoiceId(store: InvoiceIdStore, takenId: string): Promise<string | null> {
+  const match = INVOICE_NUMBER_PATTERN.exec(takenId);
+  if (!match) return null;
+  const [, prefix, digits] = match;
+  const existing = await store.timeflowInvoice.findMany({
+    where: { id: { startsWith: prefix } },
+    select: { id: true },
+  });
+  const highest = existing.reduce((max, row) => {
+    const rowMatch = INVOICE_NUMBER_PATTERN.exec(row.id);
+    if (!rowMatch || rowMatch[1] !== prefix) return max;
+    return Math.max(max, Number(rowMatch[2]));
+  }, Number(digits));
+  return `${prefix}${String(highest + 1).padStart(digits.length, "0")}`;
+}
+
+async function createInvoiceWithAvailableId(
+  store: InvoiceIdStore,
+  requestedId: string | undefined,
+  data: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  if (!requestedId) return store.timeflowInvoice.create({ data });
+
+  let candidate = requestedId;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await store.timeflowInvoice.create({ data: { ...data, id: candidate } });
+    } catch (error) {
+      if (!isUniqueConstraintViolation(error) || attempt >= MAX_INVOICE_ID_ATTEMPTS) throw error;
+      const next = await findNextFreeInvoiceId(store, candidate);
+      if (!next) throw error;
+      logger.info("[timeflow] invoice number taken; using next free number", { requestedId, nextId: next });
+      candidate = next;
+    }
+  }
+}
+
 router.post("/invoices", requireTimeflowAuth, async (req, res) => {
   const { userId, organizationId } = getUser(req);
   const body = isRecord(req.body) ? req.body : {};
-  const store = prisma as unknown as {
-    timeflowInvoice: { create: (args: Record<string, unknown>) => Promise<Record<string, unknown>> };
-  };
+  const store = prisma as unknown as InvoiceIdStore;
 
   if (typeof body.clientId !== "string") {
     res.status(400).json({ error: "clientId is required" });
     return;
   }
 
-  const invoice = await store.timeflowInvoice.create({
-    data: {
-      ...(typeof body.id === "string" && body.id.trim() ? { id: body.id.trim() } : {}),
-      organizationId,
-      userId,
-      clientId: body.clientId as string,
-      periodStart: typeof body.periodStart === "string" ? body.periodStart : "",
-      periodEnd: typeof body.periodEnd === "string" ? body.periodEnd : "",
-      billingMode: typeof body.billingMode === "string" ? body.billingMode : "outstanding",
-      rangeStart: typeof body.rangeStart === "string" ? body.rangeStart : null,
-      rangeEnd: typeof body.rangeEnd === "string" ? body.rangeEnd : null,
-      grouping: typeof body.grouping === "string" ? body.grouping : "none",
-      dueDate: typeof body.dueDate === "string" ? body.dueDate : "",
-      entryIds: Array.isArray(body.entryIds) ? body.entryIds : [],
-      timeEntryIds: Array.isArray(body.timeEntryIds) ? body.timeEntryIds : [],
-      lineItems: Array.isArray(body.lineItems) ? body.lineItems : [],
-      projectIds: Array.isArray(body.projectIds) ? body.projectIds : [],
-      totalHours: typeof body.totalHours === "number" ? body.totalHours : 0,
-      hourlyRate: typeof body.hourlyRate === "number" ? body.hourlyRate : 0,
-      subtotal: typeof body.subtotal === "number" ? body.subtotal : 0,
-      taxRate: typeof body.taxRate === "number" ? body.taxRate : 0,
-      taxAmount: typeof body.taxAmount === "number" ? body.taxAmount : 0,
-      totalAmount: typeof body.totalAmount === "number" ? body.totalAmount : 0,
-      hasMixedRates: body.hasMixedRates === true,
-      status: typeof body.status === "string" ? body.status : "draft",
-    },
+  const requestedId = typeof body.id === "string" && body.id.trim() ? body.id.trim() : undefined;
+  const invoice = await createInvoiceWithAvailableId(store, requestedId, {
+    organizationId,
+    userId,
+    clientId: body.clientId as string,
+    periodStart: typeof body.periodStart === "string" ? body.periodStart : "",
+    periodEnd: typeof body.periodEnd === "string" ? body.periodEnd : "",
+    billingMode: typeof body.billingMode === "string" ? body.billingMode : "outstanding",
+    rangeStart: typeof body.rangeStart === "string" ? body.rangeStart : null,
+    rangeEnd: typeof body.rangeEnd === "string" ? body.rangeEnd : null,
+    grouping: typeof body.grouping === "string" ? body.grouping : "none",
+    dueDate: typeof body.dueDate === "string" ? body.dueDate : "",
+    entryIds: Array.isArray(body.entryIds) ? body.entryIds : [],
+    timeEntryIds: Array.isArray(body.timeEntryIds) ? body.timeEntryIds : [],
+    lineItems: Array.isArray(body.lineItems) ? body.lineItems : [],
+    projectIds: Array.isArray(body.projectIds) ? body.projectIds : [],
+    totalHours: typeof body.totalHours === "number" ? body.totalHours : 0,
+    hourlyRate: typeof body.hourlyRate === "number" ? body.hourlyRate : 0,
+    subtotal: typeof body.subtotal === "number" ? body.subtotal : 0,
+    taxRate: typeof body.taxRate === "number" ? body.taxRate : 0,
+    taxAmount: typeof body.taxAmount === "number" ? body.taxAmount : 0,
+    totalAmount: typeof body.totalAmount === "number" ? body.totalAmount : 0,
+    hasMixedRates: body.hasMixedRates === true,
+    status: typeof body.status === "string" ? body.status : "draft",
   });
 
   res.status(201).json(invoice);
